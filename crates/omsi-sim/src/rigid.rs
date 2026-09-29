@@ -37,6 +37,19 @@ pub const BUMP: f32 = 0.24;
 const UNSPRUNG: f32 = 0.12;
 const TYRE_K: f32 = 900_000.0;
 const TYRE_C: f32 = 3_000.0;
+/// The frame OMSI's per-frame damping of the body's pitch and roll is measured in (see
+/// `RigidBus::step`): a thirtieth of a second, the rate its options.cfg caps OMSI at.
+const OMSI_FRAME: f32 = 1.0 / 30.0;
+
+/// What is left of the body's pitch and roll rate after `dt` seconds of OMSI's damping.
+fn body_damping(body_freq: f32, dt: f32) -> f32 {
+    let x0 = 1.5 * body_freq * OMSI_FRAME;
+    if x0 <= 1e-6 || dt <= 0.0 {
+        return 1.0;
+    }
+    (x0.sin() / x0).clamp(0.1, 1.0).powf(dt / OMSI_FRAME)
+}
+
 /// OMSI has no tyre between the road and the spring: `achse_feder` alone carries the body
 /// (Omsi.exe 0x7e4960..0x7e4c40, force = feder x penetration - daempfer x speed). The
 /// tyre here is at least this many times as stiff as the spring, so that the two in series
@@ -402,6 +415,11 @@ pub struct RigidBody {
     /// move towards the nearest side pushed it back in). `None` until the first collision
     /// check after `place`.
     pub spawned_inside: Option<Vec<i64>>,
+    /// The faces a wheel cannot climb stop it (a platform's edge, a kerb too high for it).
+    /// Off with the collisions with objects: the wheels then keep to the ground under them,
+    /// as OMSI's do - its wheels know no faces - and a step nobody sees (a height profile
+    /// over the drawn road, a helper object's collision box) is no invisible wall.
+    pub wheel_walls: bool,
 }
 
 impl RigidBody {
@@ -447,7 +465,7 @@ impl RigidBody {
         let inv_min_turn_radius = if def.inv_min_turn_radius > 0.0 { def.inv_min_turn_radius } else { max_steer_deg.to_radians().tan() / s };
         let springs: f32 = def.axles.iter().map(|a| 2.0 * if a.spring > 0.0 { a.spring } else { 150.0 }).sum();
         let body_freq = (springs / (mass / 1000.0)).max(0.0).sqrt();
-        RigidBody { mass, inertia, cog, position: DVec3::ZERO, orientation: Quat::IDENTITY, velocity: Vec3::ZERO, omega: Vec3::ZERO, wheels, wheel_axle, steer_deg: 0.0, max_steer_deg, rot_pnt_long: def.rot_pnt_long, inv_min_turn_radius, body_freq, holding: true, rolling_resistance: if def.rolling_resistance > 0.0 { def.rolling_resistance } else { 0.008 * mass * 9.81 }, accel_body: Vec3::ZERO, friction: 0.85, wheel_impacts: Vec::new(), coupled: Vec::new(), spawned_inside: None }
+        RigidBody { mass, inertia, cog, position: DVec3::ZERO, orientation: Quat::IDENTITY, velocity: Vec3::ZERO, omega: Vec3::ZERO, wheels, wheel_axle, steer_deg: 0.0, max_steer_deg, rot_pnt_long: def.rot_pnt_long, inv_min_turn_radius, body_freq, holding: true, rolling_resistance: if def.rolling_resistance > 0.0 { def.rolling_resistance } else { 0.008 * mass * 9.81 }, accel_body: Vec3::ZERO, friction: 0.85, wheel_impacts: Vec::new(), coupled: Vec::new(), spawned_inside: None, wheel_walls: true }
     }
 
     /// Place the body at rest with its wheels on the ground plane at `origin.z`: heading
@@ -560,13 +578,14 @@ impl RigidBody {
         for _ in 0..slices {
             self.step_slice(dt / slices as f32, drive_torque, brake, steer, probe);
             // OMSI damps the body's pitch and roll - never its yaw - by sin(x)/x each frame,
-            // x = 1.5 x sqrt(springs / mass) x frame (Omsi.exe 0x7e4f55..0x7e50b0)
-            let x = 1.5 * self.body_freq * dt / slices as f32;
-            if x > 1e-6 {
-                let k = (x.sin() / x).clamp(0.1, 1.0);
-                self.omega.x *= k;
-                self.omega.y *= k;
-            }
+            // x = 1.5 x sqrt(springs / mass) x frame (Omsi.exe 0x7e4f55..0x7e50b0). Its
+            // frames are OMSI's (its options.cfg caps them at 30 a second): taken per frame
+            // of this game, a machine drawing 150 frames a second damped the body a fifth as
+            // much, and the bus rocked on its springs like a boat. The same damping a second
+            // as OMSI's at 30 frames, however many are drawn:
+            let k = body_damping(self.body_freq, dt / slices as f32);
+            self.omega.x *= k;
+            self.omega.y *= k;
             // (one impact per obstacle a frame, as a single slice gives)
             for m in self.wheel_impacts.drain(..) {
                 match impacts.iter_mut().find(|x: &&mut Impact| x.obstacle == m.obstacle) {
@@ -660,7 +679,7 @@ impl RigidBody {
                 };
                 // across the tread: a kerb under part of it (see `tread_step`)
                 let ground = ground.map(|(need, slope, x)| (need + tread_step(probe, hub, fwd_h, r, z_top), slope, x));
-                let walls = track_walls(probe, &w.walls, &line, hub, fwd_h, r, z_top, wall_top, look.y);
+                let walls = if self.wheel_walls { track_walls(probe, &w.walls, &line, hub, fwd_h, r, z_top, wall_top, look.y) } else { Vec::new() };
                 found.push(ground);
                 let w = &mut self.wheels[i];
                 w.walls = walls;
@@ -1396,6 +1415,17 @@ fn find_face(is_wall: &dyn Fn(DVec2) -> bool, hub2: DVec2, dir: Vec2, d: f32) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The body's pitch and roll are damped as much a second at any frame rate: as OMSI
+    /// damps them at 30 frames a second (a 12 t bus on 240-280 kN/m springs).
+    #[test]
+    fn body_damping_does_not_depend_on_the_frame_rate() {
+        let f = ((2.0 * 240.0 + 2.0 * 280.0) / 12.0f32).sqrt();
+        let second = |fps: f32| (0..fps as usize).fold(1.0f32, |k, _| k * super::body_damping(f, 1.0 / fps));
+        let (a, b, c) = (second(30.0), second(60.0), second(144.0));
+        assert!((a - b).abs() < 1e-3 && (a - c).abs() < 1e-3, "{a} {b} {c}");
+        assert!(a > 0.2 && a < 0.5, "{a}");
+    }
     use omsi_vehicle::vehicle::Axle;
 
     fn bus() -> Vehicle {

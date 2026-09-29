@@ -181,6 +181,8 @@ fn weather_outside_n(world: vec3<f32>, n: vec3<f32>, terrain: bool, surface: f32
 // hidden surface removal as well - for everything it draws, and the heavy shading then
 // ran for every covered layer of the city, not once per pixel.
 override ALPHA_TEST: bool = true;
+// Multisampled cutout pipelines can turn filtered alpha directly into sample coverage.
+override ALPHA_TO_COVERAGE: bool = false;
 @group(0) @binding(5) var t_shadow: texture_depth_2d;
 @group(0) @binding(6) var s_shadow: sampler_comparison;
 @group(0) @binding(7) var t_shadow_far: texture_depth_2d;
@@ -988,8 +990,20 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
     }
     let mode = material.params.x;
-    if (ALPHA_TEST && mode > 0.5 && mode < 1.5 && tex.a < 0.5) {
-        discard;
+    // Mip-filtered alpha is the fraction of the pixel covered by leaves or fence wires.
+    // Tighten the transition around the cutout edge before MSAA turns it into sample
+    // coverage. The depth prepass leaves these draws out so its binary cutoff cannot hide
+    // the scene behind samples that the colour pass leaves open.
+    if (ALPHA_TEST && mode > 0.5 && mode < 1.5) {
+        if (ALPHA_TO_COVERAGE) {
+            let aa = max(fwidth(tex.a) * 0.5, 1.0 / 255.0);
+            if (tex.a < 0.5 - aa) {
+                discard;
+            }
+            tex.a = smoothstep(0.5 - aa, 0.5 + aa, tex.a);
+        } else if (tex.a < 0.5) {
+            discard;
+        }
     }
     let n = safe_normal(in.normal);
     let ndl = max(dot(n, camera.sun_dir.xyz), 0.0);
@@ -1077,8 +1091,6 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         // treated as a window/transparent surface.
         let glass = material.params.x > 1.5 && material.bump.z > 0.5 &&
             (material.params2.y > 0.0 || material.params.z > 0.5 || material.emissive.w > 0.5);
-        let painted_transmap = material.params.z > 0.5 && !glass;
-        let painted_body = material.params.x < 1.5 || painted_transmap;
         let env = textureSampleBias(t_env, s_diffuse, env_uv, select(2.0, 0.0, glass));
         let diffuse_a = textureSample(t_diffuse, s_diffuse, duv).a;
         // strength: reflection mask x factor; the factor saturates at 1 like a D3D texture
@@ -1092,12 +1104,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         // (a blended pane's alpha is its transparency, not a reflection mask: read as one,
         // the Scania's nearly clear panes reflected nothing at all)
         var k = clamp(factor * reflection_mask(duv, select(diffuse_a, 1.0, glass)), 0.0, 1.0) * select(1.0, 0.65, glass);
-        if (painted_body) {
-            // Opaque vehicle paint may carry an envmap for legacy content, but it must
-            // not inherit the window's mirror-like sphere-map reflection (in vanilla too:
-            // taken as D3D blends it, every bus body turned into a mirror).
-            k = 0.0;
-        }
+        // (paint reflects too, as much as above: its mask is the gloss the texture's alpha
+        // or [matl_envmap_mask] gives, the factor saturating at 1 - the SD202's 10 over a
+        // paint alpha of a few per cent is a soft sheen. Left out for painted bodies, every
+        // bus was matt; taken unsaturated, the SD202 became a mirror.)
         if (glass) {
             // See-through glass reflects a few per cent of the sphere map when you look
             // straight through it and much more at a grazing angle - without that the

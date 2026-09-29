@@ -8,7 +8,6 @@ use glam::{DVec3, Mat4, Vec3};
 use omsi_geometry::MeshData;
 use std::collections::HashMap;
 use std::sync::Arc;
-use wgpu::util::DeviceExt;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -1054,6 +1053,9 @@ pub struct Renderer {
     )>,
     /// The pre-exposure (natural log) as it follows the sky's.
     exposure: Option<f32>,
+    /// The projection's width over height while a picture is drawn into a texture (see
+    /// `render_to_texture`), whatever the texture's own shape.
+    texture_aspect: Option<f32>,
     last_frame: Option<std::time::Instant>,
     /// The next frame stands alone (an offscreen picture): the exposure is there at once.
     pub instant_exposure: bool,
@@ -1274,7 +1276,41 @@ impl Renderer {
             .request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, compatible_surface: surface, force_fallback_adapter: false, ..Default::default() })
             .await
             .map_err(|e| anyhow!("no graphics adapter that can draw the game was found (Metal, Vulkan, DirectX 12 or OpenGL 3.3 or later); updating the graphics driver often helps: {e}"))?;
+        Self::new_on(adapter, surface, format, options).await
+    }
+
+    /// The adapters of `instance` that can show `surface`, the ones worth trying first first:
+    /// a graphics card of its own, then the processor's graphics, then anything else (a
+    /// software renderer last).
+    pub fn adapters_for(instance: &wgpu::Instance, surface: &wgpu::Surface<'_>) -> Vec<wgpu::Adapter> {
+        let mut v: Vec<wgpu::Adapter> = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()))
+            .into_iter()
+            .filter(|a| a.is_surface_supported(surface))
+            .collect();
+        let rank = |a: &wgpu::Adapter| match a.get_info().device_type {
+            wgpu::DeviceType::DiscreteGpu => 0,
+            wgpu::DeviceType::IntegratedGpu => 1,
+            wgpu::DeviceType::VirtualGpu | wgpu::DeviceType::Other => 2,
+            wgpu::DeviceType::Cpu => 3,
+        };
+        v.sort_by_key(rank);
+        v
+    }
+
+    /// Create a renderer on this adapter.
+    pub async fn new_on(
+        adapter: wgpu::Adapter,
+        surface: Option<&wgpu::Surface<'_>>,
+        format: Option<wgpu::TextureFormat>,
+        options: RenderOptions,
+    ) -> Result<Renderer> {
         let info = adapter.get_info();
+        // test hooks for an adapter that cannot be opened: an error, or wgpu going down
+        match omsi_cfg::env::var("OMSI_FAKE_GPU_ERROR").as_deref() {
+            Ok("open") => return Err(anyhow!("test: {} refused (OMSI_FAKE_GPU_ERROR=open)", info.name)),
+            Ok("open-panic") => panic!("test: {} went down while being opened (OMSI_FAKE_GPU_ERROR=open-panic)", info.name),
+            _ => {}
+        }
         // What the textures may take on this adapter (wgpu does not tell a card's memory):
         // a discrete card is taken for one of 2-4 GB, whose rest the pictures (the render
         // targets, the shadow maps) and the driver need; an integrated one shares the
@@ -1282,8 +1318,10 @@ impl Renderer {
         let vram = dedicated_vram_mb(&info);
         let guess_mb: u64 = match info.device_type {
             // (a card of 2 or 3 GB, where Windows says: half of it - 1600 MB of a GTX 1050's
-            // 2 GB left too little for the rest, and its Vulkan device was lost at the start)
-            wgpu::DeviceType::DiscreteGpu => vram.filter(|v| *v >= 512).map_or(1600, |v| (v / 2).min(1600)),
+            // 2 GB left too little for the rest, and its Vulkan device was lost at the start;
+            // a card of 2 GB a third of it - with half, 4x MSAA, SSAO and the shadows its
+            // DirectX 12 device still ran out of memory on Grundorf within seconds, #114)
+            wgpu::DeviceType::DiscreteGpu => vram.filter(|v| *v >= 512).map_or(1600, |v| if v <= 2560 { v * 35 / 100 } else { (v / 2).min(1600) }),
             wgpu::DeviceType::IntegratedGpu if info.backend == wgpu::Backend::Metal => 3000,
             wgpu::DeviceType::IntegratedGpu | wgpu::DeviceType::VirtualGpu => 1000,
             _ => 800,
@@ -1937,6 +1975,7 @@ impl Renderer {
                     cull: bool,
                     bias: i32,
                     alpha_to_coverage: bool| {
+            let use_alpha_to_coverage = alpha_to_coverage && msaa > 1;
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("omsi"),
                 layout: Some(&layout),
@@ -1968,7 +2007,7 @@ impl Renderer {
                 multisample: wgpu::MultisampleState {
                     count: msaa,
                     mask: !0,
-                    alpha_to_coverage_enabled: alpha_to_coverage,
+                    alpha_to_coverage_enabled: use_alpha_to_coverage,
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
@@ -1977,7 +2016,13 @@ impl Renderer {
                     // only the alpha-tested pipelines keep their `discard` (see ALPHA_TEST
                     // in shader.wgsl): early depth testing for everything else
                     compilation_options: wgpu::PipelineCompilationOptions {
-                        constants: &[("ALPHA_TEST", if alpha_to_coverage { 1.0 } else { 0.0 })],
+                        constants: &[
+                            ("ALPHA_TEST", if alpha_to_coverage { 1.0 } else { 0.0 }),
+                            (
+                                "ALPHA_TO_COVERAGE",
+                                if use_alpha_to_coverage { 1.0 } else { 0.0 },
+                            ),
+                        ],
                         ..Default::default()
                     },
                 }),
@@ -2489,16 +2534,8 @@ impl Renderer {
                 si.extend_from_slice(&[a, b, a + 1, a + 1, b, b + 1]);
             }
         }
-        let sky_vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("sky vb"),
-            contents: bytemuck::cast_slice(&sv),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let sky_ib = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("sky ib"),
-            contents: bytemuck::cast_slice(&si),
-            usage: wgpu::BufferUsages::INDEX,
-        });
+        let sky_vb = buffer_init(&device, &queue, Some("sky vb"), bytemuck::cast_slice(&sv), wgpu::BufferUsages::VERTEX);
+        let sky_ib = buffer_init(&device, &queue, Some("sky ib"), bytemuck::cast_slice(&si), wgpu::BufferUsages::INDEX);
         let sky_mesh = (sky_vb, sky_ib, si.len() as u32);
         // HUD overlay quads
         let overlay_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -3114,16 +3151,12 @@ impl Renderer {
                     };
                     [0u32, 3].map(|first| {
                         let rough = m as f32 / (PROBE_MIPS - 1) as f32;
-                        let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                            label: Some("probe pass"),
-                            contents: bytemuck::cast_slice(&[
+                        let buf = buffer_init(&device, &queue, Some("probe pass"), bytemuck::cast_slice(&[
                                 first as f32,
                                 rough,
                                 PROBE_SIZE as f32,
                                 m as f32,
-                            ]),
-                            usage: wgpu::BufferUsages::UNIFORM,
-                        });
+                            ]), wgpu::BufferUsages::UNIFORM);
                         device.create_bind_group(&wgpu::BindGroupDescriptor {
                             label: Some("probe"),
                             layout: &probe_layout,
@@ -3211,11 +3244,7 @@ impl Renderer {
             let cube_bind_groups: Vec<wgpu::BindGroup> = (0..6 * SKY_CUBE_ROUNDS)
                 .map(|k| {
                     let (f, round) = (k / SKY_CUBE_ROUNDS, k % SKY_CUBE_ROUNDS);
-                    let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("sky cube face"),
-                        contents: bytemuck::cast_slice(&[f as f32, round as f32, SKY_CUBE_SIZE as f32, 0.0]),
-                        usage: wgpu::BufferUsages::UNIFORM,
-                    });
+                    let buf = buffer_init(&device, &queue, Some("sky cube face"), bytemuck::cast_slice(&[f as f32, round as f32, SKY_CUBE_SIZE as f32, 0.0]), wgpu::BufferUsages::UNIFORM);
                     device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("sky cube"),
                         layout: &probe_layout,
@@ -3440,6 +3469,7 @@ impl Renderer {
             sky_state: None,
             sky_job: None,
             exposure: None,
+            texture_aspect: None,
             last_frame: None,
             instant_exposure: false,
             overlay_pipeline_1x,
@@ -3693,7 +3723,7 @@ impl Renderer {
     }
 
     pub fn add_mesh(&self, scene: &mut Scene, data: &MeshData) -> MeshId {
-        scene.meshes.push(make_mesh(&self.device, data));
+        scene.meshes.push(make_mesh(&self.device, &self.queue, data));
         scene.meshes.len() - 1
     }
 
@@ -3975,19 +4005,24 @@ impl Renderer {
     }
 
     /// Render the scene from `camera` into a texture made by `add_render_texture`.
+    /// `aspect`: the projection's width over height (OMSI draws its mirrors 1.6 wide into
+    /// square textures, and their meshes show the middle of that).
     pub fn render_to_texture(
         &mut self,
         scene: &mut Scene,
         id: TextureId,
         camera: &Camera,
         lighting: &Lighting,
+        aspect: f32,
     ) {
         let Some(t) = scene.textures.get(id) else {
             return;
         };
         let view = t.view.clone();
         let (w, h) = t.size;
+        self.texture_aspect = Some(aspect);
         self.render_inner(scene, &view, w, h, camera, lighting, false, Some(id));
+        self.texture_aspect = None;
     }
 
     /// Replace the pixels of a texture (same size as when created, no mipmaps regenerated).
@@ -4391,13 +4426,7 @@ impl Renderer {
         let (bind_group, buf) = match scene.bind_groups.get(&key) {
             Some((bg, b)) => (bg.clone(), b.clone()),
             None => {
-                let buf = self
-                    .device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: None,
-                        contents: bytemuck::bytes_of(&uniform),
-                        usage: wgpu::BufferUsages::UNIFORM,
-                    });
+                let buf = buffer_init(&self.device, &self.queue, None, bytemuck::bytes_of(&uniform), wgpu::BufferUsages::UNIFORM);
                 let bind_group = self.material_bind_group(
                     &scene.textures,
                     MaterialMaps {
@@ -5972,13 +6001,7 @@ impl Renderer {
                 }
             }
             None => {
-                scene.grid_buf = Some(self.device.create_buffer_init(
-                    &wgpu::util::BufferInitDescriptor {
-                        label: Some("light grid"),
-                        contents: gbytes,
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                    },
-                ));
+                scene.grid_buf = Some(buffer_init(&self.device, &self.queue, Some("light grid"), gbytes, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST));
                 rebuilt = true;
             }
         }
@@ -6335,6 +6358,17 @@ impl Renderer {
         with_overlays: bool,
         exclude_texture: Option<TextureId>,
     ) {
+        // test hook for a lost device (a driver reset): its resources are taken away and
+        // the session has to end in order
+        if omsi_cfg::env::var("OMSI_FAKE_GPU_ERROR").as_deref() == Ok("lost")
+            && with_overlays
+            && self.started.elapsed().as_secs_f32() > 3.0
+            && self.device_lost().is_none()
+        {
+            log::error!("the graphics device was lost (test): OMSI_FAKE_GPU_ERROR=lost");
+            self.device.destroy();
+            *self.device_lost.lock().unwrap_or_else(|e| e.into_inner()) = Some("test".into());
+        }
         // the device is gone: nothing can be drawn, and the readbacks (the exposure meter)
         // would find their buffers taken away - "Error in Buffer::get_mapped_range:
         // Validation Error" ended the game instead of the session ending in order
@@ -6395,14 +6429,23 @@ impl Renderer {
         } else {
             (full_w, full_h)
         };
-        let scaled = (width, height) != (full_w, full_h);
+        // FXAA on the plain graphics too, where there is no multisampling to smooth the
+        // edges (the Enhanced path has it in its post passes): the picture is drawn into a
+        // texture of the window's size and smoothed on its way to the window, the HUD after
+        let vanilla_fxaa = with_overlays
+            && (width, height) == (full_w, full_h)
+            && self.options.fxaa
+            && self.options.msaa <= 1
+            && !(lighting.enhanced && omsi_cfg::env::var_os("OMSI_NO_ENHANCED").is_none())
+            && omsi_cfg::env::var_os("OMSI_NO_FXAA").is_none();
+        let scaled = (width, height) != (full_w, full_h) || vanilla_fxaa;
         let scene_target: Option<(wgpu::TextureView, wgpu::BindGroup)> = if scaled {
             Some(self.scale_target(width, height))
         } else {
             None
         };
         let scene_view: &wgpu::TextureView = scene_target.as_ref().map(|t| &t.0).unwrap_or(target);
-        let aspect = width as f32 / height.max(1) as f32;
+        let aspect = self.texture_aspect.unwrap_or(width as f32 / height.max(1) as f32);
         let cam_rel = (camera.position - ro).as_vec3();
         // The mirrors are drawn with the plain shading even in Enhanced: without the depth
         // prepass (sized for the window) every layer of a mirror's picture ran the enhanced
@@ -6473,13 +6516,7 @@ impl Renderer {
                     }
                     continue;
                 }
-                let buf = self
-                    .device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("overlay rect"),
-                        contents: bytemuck::cast_slice(&ndc),
-                        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                    });
+                let buf = buffer_init(&self.device, &self.queue, Some("overlay rect"), bytemuck::cast_slice(&ndc), wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
                 let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("overlay"),
                     layout: &self.overlay_layout,
@@ -7133,8 +7170,8 @@ impl Renderer {
                         has_blend = true;
                         continue;
                     }
-                    // a render target cannot be sampled while being drawn into (mirror glass)
-                    if exclude_texture.is_some() && mat.texture == exclude_texture {
+                    // a render target cannot be sampled while being drawn into (mirror glass, or a reflection map of it)
+                    if exclude_texture.is_some_and(|t| mat.uses_texture(t)) {
                         continue;
                     }
                     items.push(DrawItem {
@@ -7260,7 +7297,7 @@ impl Renderer {
                     let mat_id = inst.materials.get(*slot as usize).copied().unwrap_or(0);
                     let mat = &scene.materials[mat_id];
                     if (mat.alpha != AlphaMode::Blend && !mat.no_z_check)
-                        || (exclude_texture.is_some() && mat.texture == exclude_texture)
+                        || exclude_texture.is_some_and(|t| mat.uses_texture(t))
                     {
                         continue;
                     }
@@ -7633,7 +7670,18 @@ impl Renderer {
                     multiview_mask: None,
                 });
                 pass.set_bind_group(0, scene.camera_bind_group.as_ref().unwrap(), &[]);
-                encode_batches(&mut pass, scene, &prepass_batches, |pipe| &pipes[pipe as usize]);
+                // Alpha-tested colour draws use alpha-to-coverage, but the depth-only
+                // prepass uses a binary 0.5 cutoff. Letting those meshes write depth here
+                // can hide the opaque geometry behind samples the colour pass leaves
+                // uncovered (the sky then shows through buildings/terrain behind foliage).
+                // The main alpha-tested pass writes matching depth as it draws the colour.
+                encode_batches_filtered(
+                    &mut pass,
+                    scene,
+                    &prepass_batches,
+                    |batch| batch.pipe / 2 != PIPE_ALPHA_TEST,
+                    |pipe| &pipes[pipe as usize],
+                );
             }
         }
         let msaa_prepass = msaa_prepass && self.prepass_msaa_pipelines.is_some() && targets.is_some();
@@ -7848,7 +7896,9 @@ impl Renderer {
                     );
                     self.adapt_front = 1 - front;
                 }
-                if let Some(log) = self.exposure_log.as_mut().filter(|_| with_overlays) {
+                // (a device lost since this frame began took the meter's buffer as well)
+                let lost = self.device_lost().is_some();
+                if let Some(log) = self.exposure_log.as_mut().filter(|_| with_overlays && !lost) {
                     let pre = self.exposure.unwrap_or(0.0) / std::f32::consts::LN_2;
                     log.sample(&mut encoder, &self.adapt_views[self.adapt_front], pre, m);
                 }
@@ -7926,7 +7976,7 @@ impl Renderer {
             self.queue.write_buffer(
                 &self.upscale_buf,
                 0,
-                bytemuck::cast_slice(&[width as f32, height as f32, sharpen.clamp(0.0, 0.8), 0.0]),
+                bytemuck::cast_slice(&[width as f32, height as f32, sharpen.clamp(0.0, 0.8), if vanilla_fxaa { 1.0 } else { 0.0 }]),
             );
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("upscale"),
@@ -8087,8 +8137,29 @@ impl Renderer {
     }
 }
 
+/// A buffer holding `contents` - what `create_buffer_init` makes, but written through the
+/// queue instead of mapped at its creation. When the device refuses the memory (an
+/// integrated chip that shares a small heap: "Out of Memory"), the buffer is invalid, and
+/// mapping it ended the game - "Error in Buffer::get_mapped_range: Validation Error"
+/// (#107, #109) - where writing to it is an error that is logged and the game goes on from.
+fn buffer_init(device: &wgpu::Device, queue: &wgpu::Queue, label: Option<&str>, contents: &[u8], usage: wgpu::BufferUsages) -> wgpu::Buffer {
+    let align = wgpu::COPY_BUFFER_ALIGNMENT as usize;
+    let size = contents.len().next_multiple_of(align).max(align);
+    let buf = device.create_buffer(&wgpu::BufferDescriptor { label, size: size as u64, usage: usage | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+    if !contents.is_empty() {
+        if contents.len() == size {
+            queue.write_buffer(&buf, 0, contents);
+        } else {
+            let mut padded = contents.to_vec();
+            padded.resize(size, 0);
+            queue.write_buffer(&buf, 0, &padded);
+        }
+    }
+    buf
+}
+
 /// The GPU buffers of a mesh.
-fn make_mesh(device: &wgpu::Device, data: &MeshData) -> GpuMesh {
+fn make_mesh(device: &wgpu::Device, queue: &wgpu::Queue, data: &MeshData) -> GpuMesh {
     let verts: Vec<Vertex> = data
         .positions
         .iter()
@@ -8100,16 +8171,8 @@ fn make_mesh(device: &wgpu::Device, data: &MeshData) -> GpuMesh {
             uv: uv.to_array(),
         })
         .collect();
-    let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: None,
-        contents: bytemuck::cast_slice(&verts),
-        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-    });
-    let index_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: None,
-        contents: bytemuck::cast_slice(&data.indices),
-        usage: wgpu::BufferUsages::INDEX,
-    });
+    let vertex_buf = buffer_init(device, queue, None, bytemuck::cast_slice(&verts), wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST);
+    let index_buf = buffer_init(device, queue, None, bytemuck::cast_slice(&data.indices), wgpu::BufferUsages::INDEX);
     let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
     for p in &data.positions {
         lo = lo.min(*p);
@@ -8135,8 +8198,8 @@ fn make_mesh(device: &wgpu::Device, data: &MeshData) -> GpuMesh {
 pub struct PreparedMesh(GpuMesh);
 
 /// Make a mesh's GPU buffers on any thread (the device takes calls from all of them).
-pub fn prepare_mesh(device: &wgpu::Device, data: &MeshData) -> PreparedMesh {
-    PreparedMesh(make_mesh(device, data))
+pub fn prepare_mesh(device: &wgpu::Device, queue: &wgpu::Queue, data: &MeshData) -> PreparedMesh {
+    PreparedMesh(make_mesh(device, queue, data))
 }
 
 /// A texture on the GPU, made on a worker thread; [`Renderer::add_prepared_texture`] puts it
@@ -8827,8 +8890,23 @@ fn encode_batches<'a, E: wgpu::util::RenderEncoder<'a>>(
     batches: &[Batch],
     pipeline: impl Fn(u8) -> &'a wgpu::RenderPipeline,
 ) {
+    encode_batches_filtered(pass, scene, batches, |_| true, pipeline);
+}
+
+/// Record the batches accepted by `include`, setting pipeline, buffers and material only
+/// when they change.
+fn encode_batches_filtered<'a, E: wgpu::util::RenderEncoder<'a>>(
+    pass: &mut E,
+    scene: &'a Scene,
+    batches: &[Batch],
+    include: impl Fn(&Batch) -> bool,
+    pipeline: impl Fn(u8) -> &'a wgpu::RenderPipeline,
+) {
     let (mut pipe, mut mesh, mut material) = (u8::MAX, u32::MAX, u32::MAX);
     for b in batches {
+        if !include(b) {
+            continue;
+        }
         if b.pipe != pipe {
             pass.set_pipeline(pipeline(b.pipe));
             pipe = b.pipe;
@@ -9028,8 +9106,27 @@ fn point_in_vehicle_box(p: DVec3, (origin, heading, bb): &(DVec3, f64, [f32; 6])
 
 /// Helper for windowed rendering.
 pub struct SurfaceState<'w> {
-    pub surface: wgpu::Surface<'w>,
+    /// (let go of in `drop`, unless the device was lost - see there)
+    pub surface: std::mem::ManuallyDrop<wgpu::Surface<'w>>,
     pub config: wgpu::SurfaceConfiguration,
+    /// The renderer's `device_lost`.
+    lost: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl Drop for SurfaceState<'_> {
+    fn drop(&mut self) {
+        // After a lost device the frame it was drawing never finishes, and its swapchain
+        // image with it: letting the surface go (or configuring it again) then tears the
+        // swapchain down under that image - "Trying to destroy a SwapchainAcquireSemaphore
+        // that is still in use by a SurfaceTexture" (Vulkan) ended the game instead of the
+        // session ending in order. The window goes with the process anyway. So on a panic:
+        // the frame being drawn is let go of while unwinding, and the same message then
+        // took the place of the panic that ended the game in its report (#112: a sort).
+        if !std::thread::panicking() && self.lost.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
+            // SAFETY: dropped only here, once
+            unsafe { std::mem::ManuallyDrop::drop(&mut self.surface) };
+        }
+    }
 }
 
 impl<'w> SurfaceState<'w> {
@@ -9074,12 +9171,16 @@ impl<'w> SurfaceState<'w> {
         config.width = width.max(1);
         config.height = height.max(1);
         surface.configure(&renderer.device, &config);
-        Ok(SurfaceState { surface, config })
+        Ok(SurfaceState { surface: std::mem::ManuallyDrop::new(surface), config, lost: renderer.device_lost.clone() })
     }
 
     pub fn resize(&mut self, renderer: &Renderer, width: u32, height: u32) {
         self.config.width = width.max(1);
         self.config.height = height.max(1);
+        // (not after a lost device: see `drop`)
+        if renderer.device_lost().is_some() {
+            return;
+        }
         self.surface.configure(&renderer.device, &self.config);
     }
 }
@@ -9679,4 +9780,13 @@ thread_local! {
 /// does not report it as the end of the game).
 pub fn catching() -> bool {
     CATCHING.with(|c| c.get())
+}
+
+/// Run `f`; a panic in it (a driver wgpu cannot use, taking it down in a way it does not
+/// turn into an error) is caught and gives None, and is not reported as the end of the game.
+pub fn catch<R>(f: impl FnOnce() -> R) -> Option<R> {
+    let was = CATCHING.with(|c| c.replace(true));
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    CATCHING.with(|c| c.set(was));
+    r.ok()
 }

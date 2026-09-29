@@ -90,6 +90,9 @@ fn find_game(configured: &str) -> Option<PathBuf> {
     cands.into_iter().find(|p| p.is_file())
 }
 
+/// The last search for the OMSI folder: (the places given first, what was found).
+static FOUND: std::sync::Mutex<Option<(Vec<PathBuf>, Option<PathBuf>)>> = std::sync::Mutex::new(None);
+
 /// The OMSI folder: configured, remembered by the game, or found in any usual place
 /// (beside the program, Steam libraries, Wine bottles, the user's folders).
 fn find_root(configured: &str) -> Option<PathBuf> {
@@ -103,8 +106,8 @@ fn find_root(configured: &str) -> Option<PathBuf> {
     if let Ok(t) = std::fs::read_to_string(home().join(".openomsi-root")) {
         first.push(PathBuf::from(t.trim()));
     }
-    // searching the disk costs a moment: once per process is enough
-    static FOUND: std::sync::Mutex<Option<(Vec<PathBuf>, Option<PathBuf>)>> = std::sync::Mutex::new(None);
+    // searching the disk costs a moment: once per process is enough (until the settings
+    // are saved again, see `save_config`)
     let mut g = FOUND.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((k, v)) = g.as_ref() {
         if *k == first && v.as_ref().map(|p| is_omsi_root(p)).unwrap_or(true) {
@@ -216,6 +219,10 @@ pub fn omsi_options(root: &Path) -> Option<OmsiOptions> {
 
 pub fn save_config(c: &Config) -> Result<()> {
     std::fs::write(config_path(), serde_json::to_vec_pretty(c)?)?;
+    // the folder is looked for again: a folder that was not a complete OMSI 2 when it was
+    // first chosen (still being copied, a part missing) and is now stayed "not found" until
+    // the launcher was restarted, however often it was chosen and saved again
+    *FOUND.lock().unwrap_or_else(|e| e.into_inner()) = None;
     Ok(())
 }
 
@@ -265,11 +272,13 @@ fn register_roots(content: &Path) {
     let content = content.to_path_buf();
     DONE.call_once(|| {
         omsi_cfg::add_content_root(content.clone());
-        if let Some(r) = find_root(&load_config_raw().root) {
-            omsi_cfg::add_content_root(r);
-        }
         mount_archives(&content);
     });
+    // the OMSI folder - also one chosen under Setup while the launcher runs (it was only
+    // looked for once, at the start, and a folder set later was never a root)
+    if let Some(r) = find_root(&load_config_raw().root) {
+        omsi_cfg::add_content_root(r);
+    }
 }
 
 /// Mount the archives in `<content>/Archives` that are not mounted yet (an install may
@@ -632,11 +641,36 @@ pub fn list_maps() -> Result<Vec<MapInfo>> {
         out.extend(info);
     }
     index::save("map|", Some(&keys));
+    if out.is_empty() {
+        log_empty("maps", "global.cfg");
+    }
     Ok(out)
 }
 
+/// Say in launcher.log where a list that came out empty was looked for: each folder of
+/// `rel` and how many entries it has (a player whose lists stay empty sends the log).
+fn log_empty(rel: &str, what: &str) {
+    let places: Vec<String> = bases()
+        .iter()
+        .map(|b| {
+            let d = b.join(rel);
+            match omsi_cfg::vfs::list_dir(&d) {
+                Some(l) => format!("{} ({} entries)", d.display(), l.len()),
+                None => format!("{} (cannot be read: {})", d.display(), std::fs::read_dir(&d).err().map(|e| e.to_string()).unwrap_or_else(|| "not a folder".into())),
+            }
+        })
+        .collect();
+    log_line(&format!("{rel}: nothing with a {what} found in {}", if places.is_empty() { "no folder (no OMSI 2 folder and no content folder)".to_string() } else { places.join(", ") }));
+}
+
 fn read_map(d: &Path, folder: &str, lang: &str) -> Option<MapInfo> {
-    let g = omsi_map::GlobalCfg::load(&d.join("global.cfg")).ok()?;
+    let g = match omsi_map::GlobalCfg::load(&d.join("global.cfg")) {
+        Ok(g) => g,
+        Err(e) => {
+            log_line(&format!("maps: {} cannot be read ({e:#}) - not listed", d.join("global.cfg").display()));
+            return None;
+        }
+    };
     // `global_ENG.dsc` (the language of the settings) names and describes the map
     let dsc = find_dsc(&d.join("global.cfg"), lang);
     let friendly = dsc.as_ref().and_then(|x| x.name.first().cloned()).unwrap_or_else(|| g.friendly_name.trim().to_string());
@@ -783,19 +817,43 @@ pub fn list_vehicles() -> Result<Vec<VehicleInfo>> {
         out.extend(list);
     }
     index::save("bus2|", Some(&keys));
+    if out.is_empty() {
+        log_empty("Vehicles", ".bus file");
+    }
     Ok(out)
 }
 
 /// The buses of one vehicle folder (all its copies; a bus file in the content folder hides
 /// the one of the same name in the OMSI folder), and the folders read besides its own.
 fn read_vehicle_folder(folder: &str, dirs: &[PathBuf], lang: &str) -> (Vec<VehicleInfo>, Vec<PathBuf>) {
+    // Every file of the folder and of the folders in it, however deep: OMSI's bus list looks
+    // for `*.bus` and `*.ovh` under Vehicles to any depth (Omsi.exe 0x67bdf9, the search
+    // with depth 255) - `Vehicles\Pack\Variant\x.bus` was not listed here (#137). A file of
+    // the content folder hides the one at the same place in the installation.
+    fn walk(d: &Path, rel: &str, depth: u32, out: &mut Vec<(String, PathBuf)>) {
+        let mut list = omsi_cfg::vfs::list_dir(d).unwrap_or_default();
+        list.sort();
+        for (n, is_dir) in list {
+            let name = n.to_string_lossy().to_string();
+            let r = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
+            if is_dir {
+                if depth > 0 && !name.starts_with('.') {
+                    walk(&d.join(&n), &r, depth - 1, out);
+                }
+            } else {
+                out.push((r, d.join(&n)));
+            }
+        }
+    }
     let mut files: Vec<PathBuf> = Vec::new();
+    let mut rel_of: std::collections::HashMap<PathBuf, String> = std::collections::HashMap::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for d in dirs {
-        let mut here: Vec<PathBuf> = omsi_cfg::vfs::list_dir(d).unwrap_or_default().into_iter().filter(|(_, is_dir)| !*is_dir).map(|(n, _)| d.join(n)).collect();
-        here.sort();
-        for f in here {
-            if seen.insert(f.file_name().unwrap_or_default().to_string_lossy().to_ascii_lowercase()) {
+        let mut here = Vec::new();
+        walk(d, "", 8, &mut here);
+        for (r, f) in here {
+            if seen.insert(r.to_ascii_lowercase()) {
+                rel_of.insert(f.clone(), r);
                 files.push(f);
             }
         }
@@ -807,7 +865,15 @@ fn read_vehicle_folder(folder: &str, dirs: &[PathBuf], lang: &str) -> (Vec<Vehic
         log_line(&format!("vehicles: Vehicles/{folder} has no .bus file (a repaint or textures for a bus that is not installed?) - not listed"));
         return (out, deps);
     }
-    let hofs: Vec<String> = files.iter().filter(|f| f.extension().map(|e| e.eq_ignore_ascii_case("hof")).unwrap_or(false)).filter_map(|f| omsi_vehicle::Hof::load(f).ok().map(|h| h.name.trim().to_string())).collect();
+    // the depot files beside each bus (a bus in a folder of the pack: those of its folder,
+    // else those of the pack's own)
+    let hof_dir = |f: &PathBuf| rel_of.get(f).map(|r| r.rsplit_once('/').map(|(d, _)| d.to_ascii_lowercase()).unwrap_or_default()).unwrap_or_default();
+    let mut hofs_in: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for f in files.iter().filter(|f| f.extension().map(|e| e.eq_ignore_ascii_case("hof")).unwrap_or(false)) {
+        if let Ok(h) = omsi_vehicle::Hof::load(f) {
+            hofs_in.entry(hof_dir(f)).or_default().push(h.name.trim().to_string());
+        }
+    }
     // OMSI offers what has a [friendlyname]: never the rear section of an articulated bus
     // (its front brings it along), an AI-only variant or a car
     for (f, v) in omsi_vehicle::vehicle::offered_vehicles(&files) {
@@ -819,7 +885,8 @@ fn read_vehicle_folder(folder: &str, dirs: &[PathBuf], lang: &str) -> (Vec<Vehic
             log_line(&format!("vehicles: {} - its model {} is missing, not listed", f.display(), model.map(|m| m.display().to_string()).unwrap_or_else(|| "(none)".into())));
             continue;
         }
-        let rel = format!("Vehicles/{}/{}", folder, f.file_name().unwrap().to_string_lossy());
+        let rel = format!("Vehicles/{}/{}", folder, rel_of.get(f).cloned().unwrap_or_else(|| f.file_name().unwrap().to_string_lossy().to_string()));
+        let hofs = hofs_in.get(&hof_dir(f)).or_else(|| hofs_in.get("")).cloned().unwrap_or_default();
         let name = format!("{} {}", v.manufacturer.trim(), v.type_name.trim()).trim().to_string();
         let (paints, paint_dirs) = paint_schemes(&v);
         deps.extend(paint_dirs);
@@ -829,7 +896,7 @@ fn read_vehicle_folder(folder: &str, dirs: &[PathBuf], lang: &str) -> (Vec<Vehic
         if !missing_packs.is_empty() {
             log_line(&format!("vehicles: {} borrows parts from packs that are not installed: {}", f.display(), missing_packs.join(", ")));
         }
-        out.push(VehicleInfo { name: if name.is_empty() { stem.clone() } else { name }, manufacturer: v.manufacturer.trim().to_string(), type_name: v.type_name.trim().to_string(), file: rel, folder: folder.to_string(), description: description.chars().take(600).collect(), paints, hofs: hofs.clone(), installed: in_content(f), missing_packs });
+        out.push(VehicleInfo { name: if name.is_empty() { stem.clone() } else { name }, manufacturer: v.manufacturer.trim().to_string(), type_name: v.type_name.trim().to_string(), file: rel, folder: folder.to_string(), description: description.chars().take(600).collect(), paints, hofs, installed: in_content(f), missing_packs });
     }
     deps.sort();
     deps.dedup();
@@ -1374,7 +1441,7 @@ fn keyboard_cfg_write_path() -> Result<PathBuf> {
 
 fn keyboard_cfg_read_path() -> Result<PathBuf> {
     let own = keyboard_cfg_write_path()?;
-    Ok(if own.exists() { own } else { root()?.join("Inputs").join("keyboard.cfg") })
+    Ok(if own.exists() { own } else { omsi_cfg::original_keyboard_cfg(&root()?) })
 }
 
 fn binding_to_json(b: &omsi_content::input::KeyBinding) -> Value {
@@ -1898,6 +1965,14 @@ pub fn duty_args(d: &Duty) -> Result<Vec<String>> {
         let mut a = vec!["--root".into(), root.to_string_lossy().to_string(), "--no-menu".into(), "--situation".into(), sit.to_string()];
         if let Some(p) = d.profile.as_deref().filter(|p| !p.trim().is_empty()) {
             a.extend(["--driver".into(), format!("Drivers/{}.odr", p.trim())]);
+        }
+        // the traffic and the people as for any other start: a situation file keeps the
+        // vehicles the player placed, not how busy the streets are (OMSI takes that from its
+        // options), and without these a continued session had the timetable buses alone -
+        // no cars, nobody at the stops (#136)
+        a.extend(["--traffic".into(), d.traffic.unwrap_or(30).to_string()]);
+        if d.passengers.unwrap_or(true) {
+            a.push("--passengers".into());
         }
         return Ok(a);
     }

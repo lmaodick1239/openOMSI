@@ -99,9 +99,10 @@ impl ApplicationHandler for App {
                     );
                 }
             }
+            // (the middle button - the wheel pressed - turns the view as well: OMSI's pan)
             WindowEvent::MouseInput {
                 state,
-                button: winit::event::MouseButton::Right,
+                button: winit::event::MouseButton::Right | winit::event::MouseButton::Middle,
                 ..
             } => {
                 if self.navigator.as_ref().map(|n| n.map_open()).unwrap_or(false) {
@@ -687,7 +688,12 @@ impl ApplicationHandler for App {
                             if let Some(t) = tracked {
                                 p.seat += glam::Vec3::new(t.pos[0], -t.pos[2], t.pos[1]).clamp(glam::Vec3::splat(-60.0), glam::Vec3::splat(60.0)) / 100.0;
                             }
-                            let mut cam = p.camera_look(&self.view, cam, self.look, self.orbit);
+                            // (the outside view's field of view starts from the plain 60
+                            // degrees every frame: taken from the last frame's camera, the
+                            // zoom was applied on top of itself and ran off to its narrowest
+                            // or widest at once)
+                            let base = omsi_render::Camera { fov_deg: 60.0, ..*cam };
+                            let mut cam = p.camera_look(&self.view, &base, self.look, self.orbit);
                             if let Some(mut t) = tracked {
                                 for (k, axis) in ["yaw", "pitch", "roll"].iter().enumerate() {
                                     if self.settings.head_tracking_invert.contains(axis) {
@@ -725,7 +731,9 @@ impl ApplicationHandler for App {
                     // turned, else every few frames for switches that moved under it - a ray
                     // through every cockpit mesh every frame was a tenth of the frame)
                     let key = self.camera.as_ref().map(|c| (self.cursor.0.round() as i32, self.cursor.1.round() as i32, (c.yaw * 4.0).round() as i32, (c.pitch * 4.0).round() as i32));
-                    if key != self.hover_key || self.total_frames % 6 == 0 {
+                    // (the cab sways with the suspension: a view that only turned waits a few frames)
+                    let cursor_moved = key.map(|k| (k.0, k.1)) != self.hover_key.map(|k| (k.0, k.1));
+                    if cursor_moved || (key != self.hover_key && self.total_frames % 3 == 0) || self.total_frames % 6 == 0 {
                         self.hover_key = key;
                         self.update_hover();
                     }
@@ -1785,7 +1793,10 @@ impl ApplicationHandler for App {
                         let __t = Instant::now();
                         match frame {
                             Some(frame) => {
-                                win.pre_present_notify();
+                                // (without V-sync max_fps paces the frames: waiting for the compositor's frame callback cost a missed refresh each slow frame)
+                                if self.settings.vsync {
+                                    win.pre_present_notify();
+                                }
                                 frame.present();
                             }
                             None => {
@@ -2054,12 +2065,17 @@ impl App {
                 }
             }
         }
-        if self.view == "outside" && self.player.is_some() {
+        let ctrl = self.keys.contains(&KeyCode::ControlLeft) || self.keys.contains(&KeyCode::ControlRight);
+        if self.view == "outside" && self.player.is_some() && ctrl {
+            // Ctrl+wheel: the outside camera stays where it is and narrows its field of view
+            // (a telephoto; OMSI's own zoom there only moves the camera, as the wheel does)
+            self.zoom_by(amount);
+        } else if self.view == "outside" && self.player.is_some() {
             self.orbit = (self.orbit - amount * 1.5).clamp(ORBIT_MIN, ORBIT_MAX);
         } else if matches!(self.view.as_str(), "driver" | "pax") && self.player.is_some() {
             // inside the bus the wheel zooms, as in OMSI (the camera itself stays in the seat)
             self.zoom_by(amount);
-        } else if matches!(self.view.as_str(), "free" | "foot") && !self.keys.contains(&KeyCode::ControlLeft) && !self.keys.contains(&KeyCode::ControlRight) {
+        } else if matches!(self.view.as_str(), "free" | "foot") && !ctrl {
             // the free camera and on foot: the wheel zooms too (Ctrl+wheel moves the free
             // camera on, as the wheel alone did)
             self.zoom_by(amount);

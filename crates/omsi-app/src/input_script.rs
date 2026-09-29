@@ -291,47 +291,12 @@ impl App {
                     && extras
                     && matches!(code, KeyCode::KeyZ | KeyCode::KeyX | KeyCode::KeyC)
                 {
-                    if let Some(p) = self.player.as_mut() {
-                        let want: u8 = match code {
-                            KeyCode::KeyZ => 1,
-                            KeyCode::KeyC => 2,
-                            _ => 3,
-                        };
-                        // (as the lever stands now: the scripts put it back themselves after
-                        // a turn, and the key remembered "left" - the next Z switched off a
-                        // blinker that was off, and it took two presses)
-                        let lever = if p.vehicle.var("lights_sw_warnblinker").is_some_and(|v| v > 0.5) {
-                            Some(3)
-                        } else {
-                            p.vehicle.var("lights_sw_blinker").map(|v| match v.round() as i32 {
-                                1 => 1u8,
-                                2 => 2,
-                                _ => 0,
-                            })
-                        };
-                        if let Some(l) = lever {
-                            p.blinker_key_state = l;
-                        }
-                        // (the hazard lights have a switch of their own that toggles: pressed
-                        // again with them on, "blinker_off" only let go of the indicator
-                        // lever, and the hazards - the phone's button too - never went off)
-                        let action = if want == 3 {
-                            p.blinker_key_state = if p.blinker_key_state == 3 { 0 } else { 3 };
-                            "blinker_warn_toggle"
-                        } else if p.blinker_key_state == want {
-                            p.blinker_key_state = 0;
-                            "blinker_off"
-                        } else {
-                            p.blinker_key_state = want;
-                            match want {
-                                1 => "blinker_left_set",
-                                2 => "blinker_right_set",
-                                _ => "blinker_warn_toggle",
-                            }
-                        };
-                        p.action(action, true);
-                        p.action(action, false);
-                    }
+                    let want: u8 = match code {
+                        KeyCode::KeyZ => 1,
+                        KeyCode::KeyC => 2,
+                        _ => 3,
+                    };
+                    self.blinker(want);
                 }
                 // Shift + 1..9: open or close that physical door, front to back (see
                 // `door_trigger_groups`); plain digits are left alone (some buses put
@@ -694,6 +659,46 @@ impl App {
     /// once a frame (`RedrawRequested`). A gaming mouse sends 500-8000 moves a second, and a
     /// ray through every cockpit mesh for each of them kept the event queue from ever
     /// draining - no frame was drawn while the mouse moved.
+    /// The indicator lever: 1 left, 2 right, 3 the hazard lights - each a toggle, as the
+    /// Z / C / X keys and the phone's buttons work it.
+    pub(crate) fn blinker(&mut self, want: u8) {
+        let Some(p) = self.player.as_mut() else { return };
+        // (as the lever stands now: the scripts put it back themselves after
+        // a turn, and the key remembered "left" - the next Z switched off a
+        // blinker that was off, and it took two presses)
+        let lever = if p.vehicle.var("lights_sw_warnblinker").is_some_and(|v| v > 0.5) {
+            Some(3)
+        } else {
+            p.vehicle.var("lights_sw_blinker").map(|v| match v.round() as i32 {
+                1 => 1u8,
+                2 => 2,
+                _ => 0,
+            })
+        };
+        if let Some(l) = lever {
+            p.blinker_key_state = l;
+        }
+        // (the hazard lights have a switch of their own that toggles: pressed
+        // again with them on, "blinker_off" only let go of the indicator
+        // lever, and the hazards - the phone's button too - never went off)
+        let action = if want == 3 {
+            p.blinker_key_state = if p.blinker_key_state == 3 { 0 } else { 3 };
+            "blinker_warn_toggle"
+        } else if p.blinker_key_state == want {
+            p.blinker_key_state = 0;
+            "blinker_off"
+        } else {
+            p.blinker_key_state = want;
+            match want {
+                1 => "blinker_left_set",
+                2 => "blinker_right_set",
+                _ => "blinker_warn_toggle",
+            }
+        };
+        p.action(action, true);
+        p.action(action, false);
+    }
+
     pub(crate) fn on_mouse_moved(&mut self, x: f32, y: f32) {
         self.move_cursor(x, y);
     }
@@ -981,6 +986,8 @@ pub(crate) fn script_key(name: &str) -> Option<KeyCode> {
                         self.placing_wheel(n);
                     } else if self.game_menu.is_some() {
                         self.menu_wheel(n);
+                    } else {
+                        self.wheel(n);
                     }
                     log::info!("input script: wheel {n}: menu line {:?}, chooser {:?}, placing heading {:?}", self.game_menu, self.chooser, self.placing.as_ref().map(|p| p.heading));
                 }
@@ -2088,7 +2095,7 @@ pub(crate) fn script_key(name: &str) -> Option<KeyCode> {
         let dir = base.join(dir);
         let _ = std::fs::create_dir_all(&dir);
         let out = dir.join("laststn.osn");
-        let sit = build_situation(&self.args, w, &self.clock, self.args.weather.as_deref(), self.player.as_ref(), cam, self.duty.as_ref(), "Last situation");
+        let sit = build_situation(&self.args, w, &self.clock, self.args.weather.as_deref(), self.player.as_ref(), &self.placed, cam, self.duty.as_ref(), "Last situation");
         match sit.save(&out) {
             Ok(()) => log::info!("saved the last situation {}", out.display()),
             Err(e) => log::warn!("saving {}: {e}", out.display()),
@@ -2103,7 +2110,7 @@ pub(crate) fn script_key(name: &str) -> Option<KeyCode> {
         let dir = crate::startup::content_dir().unwrap_or_else(|| self.args.root.clone()).join("Situations");
         let _ = std::fs::create_dir_all(&dir);
         let out = dir.join("quicksave.osn");
-        let sit = build_situation(&self.args, w, &self.clock, self.args.weather.as_deref(), self.player.as_ref(), cam, self.duty.as_ref(), "Quicksave");
+        let sit = build_situation(&self.args, w, &self.clock, self.args.weather.as_deref(), self.player.as_ref(), &self.placed, cam, self.duty.as_ref(), "Quicksave");
         match sit.save(&out) {
             Ok(()) => {
                 log::info!("saved situation {} ({} vehicles)", out.display(), sit.vehicles.len());
