@@ -775,6 +775,10 @@ impl Streamer {
         for k in &keys {
             self.failed.remove(k);
             if !self.requested.contains(k) {
+                if self.is_tile_pinned(*k) {
+                    log::warn!("Skipping reload of pinned tile {:?}; inspector selection active", k);
+                    continue;
+                }
                 freed |= self.world.unload_tile(renderer, scene, *k, audio);
             }
         }

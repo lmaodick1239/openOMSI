@@ -1342,7 +1342,6 @@ pub(crate) fn script_key(name: &str) -> Option<KeyCode> {
             self.service_msg = Some(("Inspector mode on (Ctrl+I) - click to select vehicle parts or scenery objects for read-only inspection".into(), 5.0));
         } else {
             // Exiting inspector mode: clear selection and release any tile pins
-            // TODO: Task 5 integration - release tile pin when implemented
             self.inspector_selection = None;
             self.service_msg = Some(("Inspector mode off".into(), 2.0));
         }
