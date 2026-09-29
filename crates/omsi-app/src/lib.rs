@@ -32,6 +32,7 @@ mod driver;
 mod export;
 mod hud;
 mod humans;
+mod inspector;
 mod keys;
 mod lan;
 mod lan_world;
