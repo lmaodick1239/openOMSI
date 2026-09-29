@@ -1714,6 +1714,196 @@ mod snapshot_tests {
     }
 }
 
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+
+    #[test]
+    fn test_inspector_mode_toggle_lifecycle() {
+        // Test entering inspector mode
+        let mut active = false;
+        active = true;
+        assert!(active, "Inspector mode should be active after toggle on");
+
+        // Test exiting inspector mode
+        active = false;
+        assert!(!active, "Inspector mode should be inactive after toggle off");
+
+        // Test multiple toggles
+        for _ in 0..5 {
+            active = !active;
+        }
+        assert!(!active, "Inspector mode should be inactive after odd number of toggles");
+    }
+
+    #[test]
+    fn test_selection_lifecycle() {
+        let mut selection = InspectorSelection::default();
+        assert!(matches!(selection.status, SelectionStatus::None), "Initial selection should be None");
+
+        // Test selecting a vehicle
+        let vehicle_target = SelectionTarget::Vehicle {
+            key: VehicleKey::Player { generation: 1 },
+            mesh: None,
+        };
+        selection = InspectorSelection::new(vehicle_target.clone());
+        assert!(selection.is_active(), "Selection should be active");
+        assert!(matches!(selection.status, SelectionStatus::Selected(_)));
+
+        // Test replacing selection
+        let scenery_target = SelectionTarget::Scenery {
+            key: SceneryKey::NonEditable {
+                tile_x: 0,
+                tile_y: 0,
+                key: 5,
+            },
+            mesh: None,
+        };
+        selection = InspectorSelection::new(scenery_target.clone());
+        assert!(selection.is_active(), "Selection should remain active after replacement");
+
+        // Test clearing selection
+        selection.clear();
+        assert!(matches!(selection.status, SelectionStatus::None), "Selection should be None after clear");
+    }
+
+    #[test]
+    fn test_selection_invalidation() {
+        let mut selection = InspectorSelection::new(SelectionTarget::Vehicle {
+            key: VehicleKey::AiCar { id: 100 },
+            mesh: None,
+        });
+        assert!(selection.is_active());
+
+        // Test invalidation
+        selection.invalidate("AI vehicle despawned".to_string());
+        assert!(!selection.is_active(), "Selection should be inactive after invalidation");
+        
+        if let SelectionStatus::Invalidated { reason } = &selection.status {
+            assert_eq!(reason, "AI vehicle despawned");
+        } else {
+            panic!("Expected Invalidated status");
+        }
+    }
+
+    #[test]
+    fn test_mode_toggle_clears_on_exit() {
+        let mut active = false;
+        let mut selection = InspectorSelection::new(SelectionTarget::Vehicle {
+            key: VehicleKey::Player { generation: 1 },
+            mesh: None,
+        });
+
+        // Activate inspector mode
+        active = true;
+        assert!(active);
+        assert!(selection.is_active());
+
+        // Exit inspector mode should clear selection
+        active = false;
+        selection.clear();
+        assert!(!active);
+        assert!(matches!(selection.status, SelectionStatus::None));
+    }
+
+    #[test]
+    fn test_vehicle_selection_types() {
+        // Test player vehicle selection
+        let player_sel = InspectorSelection::new(SelectionTarget::Vehicle {
+            key: VehicleKey::Player { generation: 1 },
+            mesh: None,
+        });
+        assert!(player_sel.is_active());
+
+        // Test AI vehicle selection
+        let ai_sel = InspectorSelection::new(SelectionTarget::Vehicle {
+            key: VehicleKey::AiCar { id: 42 },
+            mesh: None,
+        });
+        assert!(ai_sel.is_active());
+
+        // Test remote vehicle selection
+        let remote_sel = InspectorSelection::new(SelectionTarget::Vehicle {
+            key: VehicleKey::Remote {
+                player_id: 3,
+                generation: 1,
+            },
+            mesh: None,
+        });
+        assert!(remote_sel.is_active());
+
+        // Test trailer selection
+        let trailer_sel = InspectorSelection::new(SelectionTarget::Vehicle {
+            key: VehicleKey::PlayerTrailer {
+                generation: 1,
+                trailer_index: 0,
+            },
+            mesh: None,
+        });
+        assert!(trailer_sel.is_active());
+    }
+
+    #[test]
+    fn test_scenery_selection_types() {
+        // Test editable scenery selection
+        let editable_sel = InspectorSelection::new(SelectionTarget::Scenery {
+            key: SceneryKey::Editable { map_id: 1 },
+            mesh: None,
+        });
+        assert!(editable_sel.is_active());
+
+        // Test non-editable scenery selection
+        let non_editable_sel = InspectorSelection::new(SelectionTarget::Scenery {
+            key: SceneryKey::NonEditable {
+                tile_x: 5,
+                tile_y: 10,
+                key: 3,
+            },
+            mesh: None,
+        });
+        assert!(non_editable_sel.is_active());
+
+        // Test parked vehicle selection
+        let parked_sel = InspectorSelection::new(SelectionTarget::Scenery {
+            key: SceneryKey::Parked { key: 1 },
+            mesh: None,
+        });
+        assert!(parked_sel.is_active());
+    }
+
+    #[test]
+    fn test_mesh_identity_with_selection() {
+        let mesh = MeshIdentity::new(
+            "Vehicles/MAN_SD200/model.cfg".to_string(),
+            0,
+            "chassis".to_string(),
+            Some(1),
+        );
+
+        let selection = InspectorSelection::new(SelectionTarget::Vehicle {
+            key: VehicleKey::Player { generation: 1 },
+            mesh: Some(mesh.clone()),
+        });
+
+        assert!(selection.is_active());
+        if let SelectionStatus::Selected(SelectionTarget::Vehicle { mesh: sel_mesh, .. }) = &selection.status {
+            assert_eq!(sel_mesh.as_ref().unwrap().mesh_name, "chassis");
+            assert_eq!(sel_mesh.as_ref().unwrap().definition_index, 0);
+            assert_eq!(sel_mesh.as_ref().unwrap().disambiguator, Some(1));
+        } else {
+            panic!("Expected vehicle target with mesh");
+        }
+    }
+
+    #[test]
+    fn test_view_toggles_default() {
+        let selection = InspectorSelection::default();
+        assert!(!selection.view.show_bounds, "Bounds should be off by default");
+        assert!(!selection.view.show_local_axes, "Local axes should be off by default");
+        assert!(!selection.view.show_mesh_name, "Mesh name should be off by default");
+    }
+}
+
 /// Draw visual overlays for the currently selected entity.
 ///
 /// This adds transient per-frame visual feedback using coronas for position markers,
