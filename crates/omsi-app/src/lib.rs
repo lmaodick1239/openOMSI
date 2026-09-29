@@ -504,6 +504,8 @@ pub(crate) fn make_app(mut args: Args, server_cfg: Option<server::ServerCfg>) ->
         wetness: 0.0,
         cursor_kind: 0,
         settings,
+        inspector_active: false,
+        inspector_selection: None,
         lan: None,
         remotes: Default::default(),
         spikes: 0,

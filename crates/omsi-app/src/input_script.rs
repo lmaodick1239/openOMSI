@@ -247,6 +247,11 @@ impl App {
                         self.toggle_editor();
                         return;
                     }
+                    // visual debug inspector (Ctrl+I): read-only entity selection
+                    KeyCode::KeyI if ctrl && !alt && !shift_now => {
+                        self.toggle_inspector();
+                        return;
+                    }
                     // OMSI's `sim_pause`
                     KeyCode::KeyP if !ctrl && !alt && !shift_now => {
                         self.toggle_pause();
@@ -750,6 +755,13 @@ impl App {
     }
 
     pub(crate) fn on_left(&mut self, pressed: bool) {
+        // inspector mode: first refusal over world clicks when active
+        // TODO: Task 7 integration - wire to actual selection logic once snapshot building is ready
+        if self.inspector_active && pressed {
+            // Empty world click clears selection; actual hit detection deferred to Task 7
+            self.inspector_selection = None;
+            return;
+        }
         // the object editor: the mouse picks and drags
         if self.game_menu.is_none() && self.editor_mouse(pressed) {
             return;
@@ -1302,10 +1314,38 @@ pub(crate) fn script_key(name: &str) -> Option<KeyCode> {
             self.service_msg = Some(("Object editor off (unsaved changes stay until the end of the session)".into(), 3.0));
             return;
         }
+        // Mutual exclusion: deactivate inspector when activating editor
+        if self.inspector_active {
+            self.inspector_active = false;
+            self.inspector_selection = None;
+        }
         let ed = crate::editor::Editor::default();
         let msg = self.world.as_ref().map(|w| ed.describe(w)).unwrap_or_default();
         self.editor = Some(ed);
         self.service_msg = Some((format!("{msg} - click picks, drag moves, wheel turns (Shift: height), Delete, C copy, V variant, Backspace undo, PgUp/PgDn/F ground, [ ] brush, Ctrl+S save, Esc leave"), 10.0));
+    }
+
+    /// Toggle visual debug inspector mode (Ctrl+I).
+    pub(crate) fn toggle_inspector(&mut self) {
+        // Mutual exclusion: inspector and editor cannot both be active
+        if !self.inspector_active && self.editor.is_some() {
+            self.service_msg = Some(("Cannot activate inspector while object editor is active (Ctrl+Shift+E to exit editor first)".into(), 3.0));
+            return;
+        }
+        
+        self.inspector_active = !self.inspector_active;
+        if self.inspector_active {
+            // Entering inspector mode: clear any stale state
+            self.inspector_selection = None;
+            self.hover = None;
+            self.hover_part = None;
+            self.service_msg = Some(("Inspector mode on (Ctrl+I) - click to select vehicle parts or scenery objects for read-only inspection".into(), 5.0));
+        } else {
+            // Exiting inspector mode: clear selection and release any tile pins
+            // TODO: Task 5 integration - release tile pin when implemented
+            self.inspector_selection = None;
+            self.service_msg = Some(("Inspector mode off".into(), 2.0));
+        }
     }
 
     /// A key while the object editor is on; true when it was the editor's.
