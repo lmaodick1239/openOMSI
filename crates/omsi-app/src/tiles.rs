@@ -17,8 +17,10 @@ use glam::{DVec2, DVec3, Mat4, Vec3};
 use hashbrown::HashMap;
 use omsi_geometry::SplineCurve;
 use omsi_map::{tile_size, MapSpline, SplineAttachment, Tile};
+use parking_lot::Mutex;
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// A spline of the map as far as a repeater's walk along its chain needs it.
 #[derive(Debug, Clone, Copy)]
@@ -560,6 +562,86 @@ fn tile_candidates(
     candidates
 }
 
+/// A token granting permission to keep a tile loaded beyond normal streaming distance.
+/// The inspector holds a lease while a scenery object on that tile is selected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TilePinLease {
+    tile: (i32, i32),
+    generation: u64,
+}
+
+impl TilePinLease {
+    fn new(tile: (i32, i32), generation: u64) -> Self {
+        Self { tile, generation }
+    }
+
+    pub(crate) fn tile(&self) -> (i32, i32) {
+        self.tile
+    }
+}
+
+/// Tracks a single pinned tile with generation-based stale detection.
+/// Only one tile may be pinned at a time (single-lease policy).
+struct TilePins {
+    /// The currently pinned tile and its generation, if any.
+    pinned: Option<((i32, i32), u64)>,
+    /// Monotonic generation counter. Increments on each new pin acquisition.
+    next_generation: u64,
+}
+
+impl TilePins {
+    fn new() -> Self {
+        Self {
+            pinned: None,
+            next_generation: 0,
+        }
+    }
+
+    /// Acquire a pin on `tile`. Returns None if a different tile is already pinned.
+    /// If the same tile is already pinned, returns a lease with the existing generation.
+    fn acquire(&mut self, tile: (i32, i32)) -> Option<TilePinLease> {
+        match self.pinned {
+            Some((pinned_tile, gen)) if pinned_tile == tile => {
+                // Same tile already pinned; reuse existing generation
+                Some(TilePinLease::new(tile, gen))
+            }
+            Some(_) => {
+                // Different tile already pinned; enforce single-lease policy
+                None
+            }
+            None => {
+                // No tile pinned; acquire new pin with new generation
+                let gen = self.next_generation;
+                self.next_generation += 1;
+                self.pinned = Some((tile, gen));
+                Some(TilePinLease::new(tile, gen))
+            }
+        }
+    }
+
+    /// Release the pin identified by `lease`. Returns true if the lease was valid and released.
+    /// Returns false if the lease is stale (generation mismatch) or no tile is pinned.
+    fn release(&mut self, lease: TilePinLease) -> bool {
+        match self.pinned {
+            Some((pinned_tile, gen)) if pinned_tile == lease.tile && gen == lease.generation => {
+                self.pinned = None;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Check if `tile` is currently pinned.
+    fn is_pinned(&self, tile: (i32, i32)) -> bool {
+        self.pinned.map_or(false, |(pinned_tile, _)| pinned_tile == tile)
+    }
+
+    /// Release all pins (for teardown/world replacement).
+    fn release_all(&mut self) {
+        self.pinned = None;
+    }
+}
+
 /// Loads the tiles around a few points as they move (the camera, and the player's bus,
 /// which must not lose the ground under it when the free camera flies off), like OMSI's
 /// tile streaming: the tiles within `load_radius` of any of them are read, tessellated and
@@ -597,6 +679,8 @@ pub struct Streamer {
     last_summary: std::time::Instant,
     /// Tiles loaded and unloaded when the heap's free pages were last given back, and when.
     relieved_at: (usize, usize, std::time::Instant),
+    /// Inspector tile pins (single-lease policy, thread-safe).
+    tile_pins: Arc<Mutex<TilePins>>,
 }
 
 impl Streamer {
@@ -632,6 +716,7 @@ impl Streamer {
             started: std::time::Instant::now(),
             last_summary: std::time::Instant::now(),
             relieved_at: (0, 0, std::time::Instant::now()),
+            tile_pins: Arc::new(Mutex::new(TilePins::new())),
         };
         let first: hashbrown::HashSet<(i32, i32)> = s.tiles.iter().filter(|t| Self::nearest(centers, t.0, t.1) <= initial_radius.min(load_radius)).map(|t| (t.0, t.1)).collect();
         log::info!("tile streaming: {} tiles in the map, load radius {:.0} m around {} points ({} tiles now), first area {} tiles", s.tiles.len(), load_radius, centers.len(), s.tiles.iter().filter(|t| Self::nearest(centers, t.0, t.1) <= load_radius).count(), first.len());
@@ -651,6 +736,28 @@ impl Streamer {
     /// Distance from the nearest of `centers` to tile (tx, ty).
     pub fn nearest(centers: &[DVec3], tx: i32, ty: i32) -> f64 {
         centers.iter().map(|c| Self::distance(*c, tx, ty)).fold(f64::INFINITY, f64::min)
+    }
+
+    /// Acquire a pin on `tile` for inspector selection. Returns None if a different tile
+    /// is already pinned (single-lease policy). The returned lease must be released via
+    /// `unpin_tile` when the selection is cleared or replaced.
+    pub fn pin_tile(&self, tile: (i32, i32)) -> Option<TilePinLease> {
+        self.tile_pins.lock().acquire(tile)
+    }
+
+    /// Release a tile pin using the lease token. Returns true if the lease was valid.
+    pub fn unpin_tile(&self, lease: TilePinLease) -> bool {
+        self.tile_pins.lock().release(lease)
+    }
+
+    /// Check if a tile is currently pinned by the inspector.
+    pub fn is_tile_pinned(&self, tile: (i32, i32)) -> bool {
+        self.tile_pins.lock().is_pinned(tile)
+    }
+
+    /// Release all tile pins (for world teardown or inspector exit).
+    pub fn release_all_pins(&self) {
+        self.tile_pins.lock().release_all();
     }
 
     /// Read tiles `keys` again (a chrono scenario changed them, the season's textures
@@ -776,7 +883,8 @@ impl Streamer {
         if self.initial.is_none() {
             let now = std::time::Instant::now();
             let unload_deadline = deadline.max(now + budget / 2);
-            let mut far: Vec<(f64, (i32, i32))> = self.world.loaded_tiles().into_iter().filter(|k| !self.requested.contains(k)).map(|k| (Self::nearest(centers, k.0, k.1), k)).filter(|(d, _)| *d > self.unload_radius).collect();
+            // Exclude pinned tiles (inspector selection) from unload candidates
+            let mut far: Vec<(f64, (i32, i32))> = self.world.loaded_tiles().into_iter().filter(|k| !self.requested.contains(k) && !self.is_tile_pinned(*k)).map(|k| (Self::nearest(centers, k.0, k.1), k)).filter(|(d, _)| *d > self.unload_radius).collect();
             far.sort_by(|a, b| b.0.total_cmp(&a.0));
             for (_, key) in far {
                 if unloaded > 0 && std::time::Instant::now() >= unload_deadline {
@@ -1031,5 +1139,80 @@ mod tests {
         // parent faces east: its left (-x) is north
         assert!((child.pos - DVec3::new(100.4, 204.0, 35.0)).length() < 1e-4, "{:?}", child.pos);
         assert!((child.heading() - 270.0).abs() < 1e-3, "{}", child.heading());
+    }
+
+    #[test]
+    fn tile_pin_acquire_release() {
+        let mut pins = TilePins::new();
+        
+        // Acquire pin on tile (1, 2)
+        let lease1 = pins.acquire((1, 2)).expect("should acquire pin");
+        assert_eq!(lease1.tile(), (1, 2));
+        assert!(pins.is_pinned((1, 2)));
+        
+        // Same tile can be re-acquired (returns lease with same generation)
+        let lease2 = pins.acquire((1, 2)).expect("should re-acquire same tile");
+        assert_eq!(lease2, lease1);
+        assert!(pins.is_pinned((1, 2)));
+        
+        // Different tile cannot be acquired (single-lease policy)
+        assert!(pins.acquire((3, 4)).is_none());
+        
+        // Release with valid lease
+        assert!(pins.release(lease1.clone()));
+        assert!(!pins.is_pinned((1, 2)));
+        
+        // Can now acquire different tile
+        let lease3 = pins.acquire((3, 4)).expect("should acquire after release");
+        assert_eq!(lease3.tile(), (3, 4));
+        assert!(pins.is_pinned((3, 4)));
+        
+        // Old lease is now stale (cannot release)
+        assert!(!pins.release(lease1));
+    }
+
+    #[test]
+    fn tile_pin_stale_lease() {
+        let mut pins = TilePins::new();
+        
+        // Acquire, release, re-acquire same tile -> new generation
+        let lease1 = pins.acquire((1, 2)).unwrap();
+        assert!(pins.release(lease1.clone()));
+        let lease2 = pins.acquire((1, 2)).unwrap();
+        
+        // lease1 is stale (generation mismatch)
+        assert_ne!(lease1, lease2);
+        assert!(!pins.release(lease1));
+        
+        // lease2 is valid
+        assert!(pins.release(lease2));
+    }
+
+    #[test]
+    fn tile_pin_release_all() {
+        let mut pins = TilePins::new();
+        
+        let lease = pins.acquire((1, 2)).unwrap();
+        assert!(pins.is_pinned((1, 2)));
+        
+        pins.release_all();
+        assert!(!pins.is_pinned((1, 2)));
+        
+        // Old lease is now stale
+        assert!(!pins.release(lease));
+        
+        // Can acquire any tile after release_all
+        assert!(pins.acquire((3, 4)).is_some());
+    }
+
+    #[test]
+    fn tile_pin_idempotent_release() {
+        let mut pins = TilePins::new();
+        
+        let lease = pins.acquire((1, 2)).unwrap();
+        assert!(pins.release(lease.clone()));
+        
+        // Second release with same lease is rejected (stale)
+        assert!(!pins.release(lease));
     }
 }
