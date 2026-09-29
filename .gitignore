@@ -4,6 +4,7 @@
 **/*.rs.bk
 
 # local tools and editors
+.worktrees/
 .DS_Store
 .claude/
 .idea/
