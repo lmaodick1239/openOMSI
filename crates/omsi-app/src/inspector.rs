@@ -800,7 +800,8 @@ pub fn raycast_scenery_object_meshes(
 
     for (i, (mesh, _materials, _)) in meshes.iter().enumerate() {
         // Narrowphase: triangle intersection
-        // MeshData IS the mesh data itself, no .data field needed
+        // Note: ObjectType meshes are (MeshData, materials, overrides) tuples,
+        // while VehicleMesh has a .data field. Here `mesh` is already MeshData.
         if let Some(t) = omsi_geometry::ray_mesh(o, dir, mesh, xf) {
             hits.push(SceneryMeshHit {
                 mesh_index: i,
@@ -812,28 +813,6 @@ pub fn raycast_scenery_object_meshes(
 
     hits.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(Ordering::Equal));
     hits
-}
-
-/// Simple axis-aligned bounding box ray intersection check.
-///
-/// Returns entry and exit parameters (t0, t1) if the ray intersects the box.
-fn slab_check(o: Vec3, d: Vec3, lo: Vec3, hi: Vec3) -> Option<(f32, f32)> {
-    let (mut t0, mut t1) = (f32::MIN, f32::MAX);
-    for k in 0..3 {
-        if d[k].abs() < 1e-8 {
-            if o[k] < lo[k] || o[k] > hi[k] {
-                return None;
-            }
-            continue;
-        }
-        let (a, b) = ((lo[k] - o[k]) / d[k], (hi[k] - o[k]) / d[k]);
-        t0 = t0.max(a.min(b));
-        t1 = t1.min(a.max(b));
-        if t0 > t1 {
-            return None;
-        }
-    }
-    Some((t0, t1))
 }
 
 /// Inspector-mode raycast for a tile's scenery objects.
@@ -868,11 +847,13 @@ pub fn raycast_tile_scenery(
         // Raycast against this scenery object
         for hit in raycast_scenery_object_meshes(&scenery.ty, scenery.pos, &scenery.xf, origin, dir, lod_level) {
             // Get mesh name for identity from model definition
+            // For LOD 0, use mesh_def_index mapping; for lower LODs, the definition index
+            // is not tracked per-mesh, so we use mesh_index as a fallback logical identifier
             let mesh_def_idx = if lod_level == 0 {
                 scenery.ty.mesh_def_index.get(hit.mesh_index).copied()
             } else {
-                // For lower LODs, we don't have a direct def_index mapping, use hit index
-                Some(hit.def_index)
+                // Lower LODs: no def_index mapping available, use mesh_index as logical ID
+                Some(hit.mesh_index)
             };
 
             let mesh_name = mesh_def_idx
@@ -1282,33 +1263,6 @@ mod tests {
         // Verify mesh identity is preserved across LOD changes
         assert_eq!(mesh_identity.definition_index, 3);
         assert_eq!(mesh_identity.mesh_name, "shelter_wall");
-    }
-
-    #[test]
-    fn test_slab_check_bounds_intersection() {
-        let o = Vec3::new(0.0, 0.0, 0.0);
-        let d = Vec3::new(1.0, 0.0, 0.0).normalize();
-        let lo = Vec3::new(5.0, -1.0, -1.0);
-        let hi = Vec3::new(10.0, 1.0, 1.0);
-
-        // Ray along x-axis should intersect box at x=5 to x=10
-        let result = slab_check(o, d, lo, hi);
-        assert!(result.is_some());
-        let (t0, t1) = result.unwrap();
-        assert!(t0 >= 4.9 && t0 <= 5.1); // Entry at ~5.0
-        assert!(t1 >= 9.9 && t1 <= 10.1); // Exit at ~10.0
-
-        // Ray in opposite direction should also intersect (negative t values)
-        // but for raycast purposes, we'd filter negative t values elsewhere
-        let d_neg = Vec3::new(-1.0, 0.0, 0.0).normalize();
-        let result_neg = slab_check(o, d_neg, lo, hi);
-        // slab_check doesn't filter by direction, it returns mathematical intersection
-        assert!(result_neg.is_some());
-
-        // Ray parallel to box but outside should miss
-        let o_outside = Vec3::new(0.0, 5.0, 0.0);
-        let result_miss = slab_check(o_outside, d, lo, hi);
-        assert!(result_miss.is_none());
     }
 
     #[test]

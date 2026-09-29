@@ -638,6 +638,7 @@ pub struct SceneryObjectRecord {
     /// Collision key (unique per placed object).
     pub key: i64,
     /// Map id (may be 0 for spline-attached or row objects with no map id).
+    #[allow(dead_code)] // Used in Task 5 for editable object tile pinning
     pub map_id: i64,
     /// Object type (shared, read-only).
     pub ty: Arc<ObjectType>,
@@ -646,6 +647,7 @@ pub struct SceneryObjectRecord {
     /// Transform matrix.
     pub xf: Mat4,
     /// Render instances (all LODs).
+    #[allow(dead_code)] // Used in Task 8 for rendering integration
     pub instances: Vec<usize>,
 }
 
