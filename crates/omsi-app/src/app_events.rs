@@ -1564,6 +1564,7 @@ impl ApplicationHandler for App {
                             tutorial: self.tutorial.as_ref().filter(|t| !t.hidden).and_then(|t| t.page().map(|p| (p.title.as_str(), p.text.as_str(), p.image.as_deref(), t.at, t.pages.len()))),
                             chat,
                             tags,
+                            inspector: None,
                         };
                         ui.draw(r, scene, &frame, dt);
                     }
