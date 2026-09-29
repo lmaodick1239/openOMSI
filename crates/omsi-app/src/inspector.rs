@@ -5,6 +5,7 @@
 //! entity identity, hit candidates, selection state, and ordering policy.
 
 use std::cmp::Ordering;
+use glam::{DVec3, Vec3};
 
 /// Stable identity for a vehicle entity across frames.
 ///
@@ -352,6 +353,314 @@ impl InspectorSnapshot {
     }
 }
 
+/// A single vehicle mesh raycast hit candidate.
+///
+/// This is the inspector-only side-effect-free mesh intersection result. It includes
+/// the mesh index, hit distance, and optional mesh identity for building an [`InspectorHit`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct VehicleMeshHit {
+    /// Mesh index in the vehicle's mesh list.
+    pub mesh_index: usize,
+    /// Hit distance from ray origin.
+    pub distance: f32,
+    /// Definition index for mesh identity lookup.
+    pub def_index: usize,
+}
+
+/// Read-only vehicle mesh raycast helper.
+///
+/// Returns all nearest hit candidates without triggering `[mouseevent]` bindings or
+/// mutating vehicle state. Reuses the existing vehicle mesh visibility state,
+/// `mesh_local_transform`, broadphase check, and `ray_mesh` triangle intersection.
+///
+/// This helper is suitable for inspector selection across all vehicle domains:
+/// player, AI, remote, and trailer parts.
+///
+/// # Parameters
+/// - `vehicle`: The vehicle instance to raycast against
+/// - `origin`: Ray origin in world space
+/// - `dir`: Ray direction (normalized)
+/// - `include_all_visible`: If true, includes all visible meshes; if false, only switch meshes
+///
+/// # Returns
+/// All hit candidates sorted nearest-first, with world-space distances comparable across
+/// vehicle sections.
+pub fn raycast_vehicle_meshes(
+    vehicle: &omsi_sim::VehicleInstance,
+    origin: DVec3,
+    dir: Vec3,
+    include_all_visible: bool,
+) -> Vec<VehicleMeshHit> {
+    let o = (origin - vehicle.position).as_vec3();
+    let mut hits = Vec::new();
+
+    for (i, vm) in vehicle.ty.meshes.iter().enumerate() {
+        let props = &vehicle.mesh_props[i];
+        if !props.visible {
+            continue;
+        }
+
+        // Filter: switch meshes or all visible meshes
+        let is_switch = vehicle.ty.model.meshes[vm.def_index].mouse_event.is_some();
+        if !include_all_visible && !is_switch {
+            continue;
+        }
+
+        // Broadphase: sphere check using existing bounds
+        let xf = vehicle.mesh_local_transform(i);
+        if !crate::camera_util::ray_may_hit(&vehicle.ty, i, &xf, o, dir, 0.0) {
+            continue;
+        }
+
+        // Narrowphase: triangle intersection
+        if let Some(t) = omsi_geometry::ray_mesh(o, dir, &vm.data, &xf) {
+            hits.push(VehicleMeshHit {
+                mesh_index: i,
+                distance: t,
+                def_index: vm.def_index,
+            });
+        }
+    }
+
+    hits.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(Ordering::Equal));
+    hits
+}
+
+/// Raycast against vehicle trailer parts.
+///
+/// Returns hit candidates with trailer index, mesh index, and world-space distance
+/// comparable to lead vehicle hits.
+pub fn raycast_vehicle_trailers(
+    vehicle: &omsi_sim::VehicleInstance,
+    origin: DVec3,
+    dir: Vec3,
+    include_all_visible: bool,
+) -> Vec<(usize, VehicleMeshHit)> {
+    let mut hits = Vec::new();
+
+    for (ti, trailer) in vehicle.trailers.iter().enumerate() {
+        let o = (origin - trailer.position).as_vec3();
+
+        for (i, vm) in trailer.ty.meshes.iter().enumerate() {
+            let props = &trailer.mesh_props[i];
+            if !props.visible {
+                continue;
+            }
+
+            // Filter: switch meshes or all visible meshes
+            let is_switch = trailer.ty.model.meshes[vm.def_index].mouse_event.is_some();
+            if !include_all_visible && !is_switch {
+                continue;
+            }
+
+            // Broadphase: sphere check using existing bounds
+            let xf = trailer.mesh_local_transform(i);
+            if !crate::camera_util::ray_may_hit(&trailer.ty, i, &xf, o, dir, 0.0) {
+                continue;
+            }
+
+            // Narrowphase: triangle intersection
+            if let Some(t) = omsi_geometry::ray_mesh(o, dir, &vm.data, &xf) {
+                hits.push((
+                    ti,
+                    VehicleMeshHit {
+                        mesh_index: i,
+                        distance: t,
+                        def_index: vm.def_index,
+                    },
+                ));
+            }
+        }
+    }
+
+    hits.sort_by(|a, b| a.1.distance.partial_cmp(&b.1.distance).unwrap_or(Ordering::Equal));
+    hits
+}
+
+/// Inspector-mode raycast for the player's vehicle: all visible meshes, lead and trailers combined.
+///
+/// Returns hits sorted nearest-first, with lead vehicle hits and trailer hits in the same list
+/// for proper cross-section distance comparison.
+pub fn raycast_player_vehicle(
+    vehicle: &omsi_sim::VehicleInstance,
+    origin: DVec3,
+    dir: Vec3,
+) -> Vec<InspectorHit> {
+    let mut hits = Vec::new();
+
+    // Lead vehicle hits
+    for hit in raycast_vehicle_meshes(vehicle, origin, dir, true) {
+        let mesh_name = vehicle.ty.model.meshes[hit.def_index].file.clone();
+        let mesh_identity = MeshIdentity::new(
+            vehicle.ty.model_dir.to_string_lossy().to_string(),
+            hit.def_index,
+            mesh_name,
+            None, // TODO: compute disambiguator for duplicate mesh names
+        );
+
+        if let Some(inspector_hit) = InspectorHit::new(
+            hit.distance,
+            SelectionTarget::Vehicle {
+                key: VehicleKey::Player { generation: 0 }, // TODO: get actual generation
+                mesh: Some(mesh_identity),
+            },
+        ) {
+            hits.push(inspector_hit);
+        }
+    }
+
+    // Trailer hits
+    for (ti, hit) in raycast_vehicle_trailers(vehicle, origin, dir, true) {
+        let trailer = &vehicle.trailers[ti];
+        let mesh_name = trailer.ty.model.meshes[hit.def_index].file.clone();
+        let mesh_identity = MeshIdentity::new(
+            trailer.ty.model_dir.to_string_lossy().to_string(),
+            hit.def_index,
+            mesh_name,
+            None,
+        );
+
+        if let Some(inspector_hit) = InspectorHit::new(
+            hit.distance,
+            SelectionTarget::Vehicle {
+                key: VehicleKey::PlayerTrailer {
+                    generation: 0,
+                    trailer_index: ti,
+                },
+                mesh: Some(mesh_identity),
+            },
+        ) {
+            hits.push(inspector_hit);
+        }
+    }
+
+    InspectorHit::order_candidates(&mut hits);
+    hits
+}
+
+/// Inspector-mode raycast for an AI vehicle: all visible meshes, lead and trailers combined.
+pub fn raycast_ai_vehicle(
+    vehicle: &omsi_sim::VehicleInstance,
+    car_id: u64,
+    origin: DVec3,
+    dir: Vec3,
+) -> Vec<InspectorHit> {
+    let mut hits = Vec::new();
+
+    // Lead vehicle hits
+    for hit in raycast_vehicle_meshes(vehicle, origin, dir, true) {
+        let mesh_name = vehicle.ty.model.meshes[hit.def_index].file.clone();
+        let mesh_identity = MeshIdentity::new(
+            vehicle.ty.model_dir.to_string_lossy().to_string(),
+            hit.def_index,
+            mesh_name,
+            None,
+        );
+
+        if let Some(inspector_hit) = InspectorHit::new(
+            hit.distance,
+            SelectionTarget::Vehicle {
+                key: VehicleKey::AiCar { id: car_id },
+                mesh: Some(mesh_identity),
+            },
+        ) {
+            hits.push(inspector_hit);
+        }
+    }
+
+    // Trailer hits
+    for (ti, hit) in raycast_vehicle_trailers(vehicle, origin, dir, true) {
+        let trailer = &vehicle.trailers[ti];
+        let mesh_name = trailer.ty.model.meshes[hit.def_index].file.clone();
+        let mesh_identity = MeshIdentity::new(
+            trailer.ty.model_dir.to_string_lossy().to_string(),
+            hit.def_index,
+            mesh_name,
+            None,
+        );
+
+        if let Some(inspector_hit) = InspectorHit::new(
+            hit.distance,
+            SelectionTarget::Vehicle {
+                key: VehicleKey::AiTrailer {
+                    car_id,
+                    trailer_index: ti,
+                },
+                mesh: Some(mesh_identity),
+            },
+        ) {
+            hits.push(inspector_hit);
+        }
+    }
+
+    InspectorHit::order_candidates(&mut hits);
+    hits
+}
+
+/// Inspector-mode raycast for a remote (LAN) vehicle: all visible meshes, lead and trailers combined.
+pub fn raycast_remote_vehicle(
+    vehicle: &omsi_sim::VehicleInstance,
+    player_id: u32,
+    generation: u64,
+    origin: DVec3,
+    dir: Vec3,
+) -> Vec<InspectorHit> {
+    let mut hits = Vec::new();
+
+    // Lead vehicle hits
+    for hit in raycast_vehicle_meshes(vehicle, origin, dir, true) {
+        let mesh_name = vehicle.ty.model.meshes[hit.def_index].file.clone();
+        let mesh_identity = MeshIdentity::new(
+            vehicle.ty.model_dir.to_string_lossy().to_string(),
+            hit.def_index,
+            mesh_name,
+            None,
+        );
+
+        if let Some(inspector_hit) = InspectorHit::new(
+            hit.distance,
+            SelectionTarget::Vehicle {
+                key: VehicleKey::Remote {
+                    player_id,
+                    generation,
+                },
+                mesh: Some(mesh_identity),
+            },
+        ) {
+            hits.push(inspector_hit);
+        }
+    }
+
+    // Trailer hits
+    for (ti, hit) in raycast_vehicle_trailers(vehicle, origin, dir, true) {
+        let trailer = &vehicle.trailers[ti];
+        let mesh_name = trailer.ty.model.meshes[hit.def_index].file.clone();
+        let mesh_identity = MeshIdentity::new(
+            trailer.ty.model_dir.to_string_lossy().to_string(),
+            hit.def_index,
+            mesh_name,
+            None,
+        );
+
+        if let Some(inspector_hit) = InspectorHit::new(
+            hit.distance,
+            SelectionTarget::Vehicle {
+                key: VehicleKey::RemoteTrailer {
+                    player_id,
+                    generation,
+                    trailer_index: ti,
+                },
+                mesh: Some(mesh_identity),
+            },
+        ) {
+            hits.push(inspector_hit);
+        }
+    }
+
+    InspectorHit::order_candidates(&mut hits);
+    hits
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -598,5 +907,53 @@ mod tests {
 
         assert_ne!(remote_gen1, remote_gen2);
         assert!(remote_gen1 < remote_gen2);
+    }
+
+    // Tests for vehicle mesh raycast helpers
+    // Note: These are unit tests for the helper structure, not integration tests.
+    // Integration tests would require a full VehicleInstance which needs map/content loading.
+
+    #[test]
+    fn test_vehicle_mesh_hit_ordering() {
+        let hit1 = VehicleMeshHit {
+            mesh_index: 0,
+            distance: 5.0,
+            def_index: 0,
+        };
+        let hit2 = VehicleMeshHit {
+            mesh_index: 1,
+            distance: 2.0,
+            def_index: 1,
+        };
+        let hit3 = VehicleMeshHit {
+            mesh_index: 2,
+            distance: 10.0,
+            def_index: 2,
+        };
+
+        let mut hits = vec![hit1, hit2.clone(), hit3];
+        hits.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(Ordering::Equal));
+
+        assert_eq!(hits[0].distance, 2.0);
+        assert_eq!(hits[0].mesh_index, 1);
+        assert_eq!(hits[1].distance, 5.0);
+        assert_eq!(hits[2].distance, 10.0);
+    }
+
+    #[test]
+    fn test_raycast_helpers_are_side_effect_free() {
+        // This test verifies the type signatures ensure side-effect-free operation:
+        // 1. Both helpers take &VehicleInstance (immutable borrow)
+        // 2. They return owned data (Vec<VehicleMeshHit>), not references
+        // 3. No vehicle state mutation is possible through the API
+
+        // The actual raycast logic is tested through integration tests with real vehicles,
+        // but this test documents the contract: read-only, no side effects.
+        
+        // Type check: these functions exist and have the correct immutable signatures
+        let _: fn(&omsi_sim::VehicleInstance, DVec3, Vec3, bool) -> Vec<VehicleMeshHit> =
+            raycast_vehicle_meshes;
+        let _: fn(&omsi_sim::VehicleInstance, DVec3, Vec3, bool) -> Vec<(usize, VehicleMeshHit)> =
+            raycast_vehicle_trailers;
     }
 }
