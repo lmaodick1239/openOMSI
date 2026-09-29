@@ -580,6 +580,8 @@ struct Placing {
     night_modes: Vec<NightMode>,
     light_objects: Vec<LightObject>,
     poles: Vec<i64>,
+    /// Non-editable scenery objects for inspector selection.
+    scenery_objects: Vec<SceneryObjectRecord>,
     splines: usize,
     trees: usize,
     objects: usize,
@@ -624,7 +626,29 @@ pub struct TileState {
     pub parked_count: usize,
     /// The tile's echoing places (see `World::reverb_zones`).
     pub reverb_zones: Vec<(omsi_sim::collision::Obb, f32, f32)>,
+    /// Non-editable scenery objects for inspector selection: (collision key, map id, type, position, transform, instances).
+    /// Includes scripted objects, lamps, poles, and all other placed objects that are not in `edit_objects` or `parked_objects`.
+    pub scenery_objects: Vec<SceneryObjectRecord>,
     pub gpu: TileGpu,
+}
+
+/// A non-editable scenery object record for inspector selection.
+#[derive(Clone)]
+pub struct SceneryObjectRecord {
+    /// Collision key (unique per placed object).
+    pub key: i64,
+    /// Map id (may be 0 for spline-attached or row objects with no map id).
+    #[allow(dead_code)] // Used in Task 5 for editable object tile pinning
+    pub map_id: i64,
+    /// Object type (shared, read-only).
+    pub ty: Arc<ObjectType>,
+    /// World position.
+    pub pos: DVec3,
+    /// Transform matrix.
+    pub xf: Mat4,
+    /// Render instances (all LODs).
+    #[allow(dead_code)] // Used in Task 8 for rendering integration
+    pub instances: Vec<usize>,
 }
 
 /// The GPU resources a tile holds: its own (terrain, splines, masks, text) and the shared
@@ -5235,6 +5259,7 @@ impl World {
         state.night_modes = placing.night_modes;
         state.light_objects = placing.light_objects;
         state.poles = placing.poles;
+        state.scenery_objects = placing.scenery_objects;
     }
 
     /// Place a tile whose textures and object types are on the GPU - the ground, then the
@@ -6070,11 +6095,13 @@ impl World {
                             || !script_texts.is_empty()
                         {
                             let arrivals = inst.wants_arrivals();
+                            // Clone all_instances before moving it, for scenery registry later
+                            let instances_for_script = all_instances.clone();
                             self.scripted.lock().push(ScriptedObject {
                                 ty: ot.clone(),
                                 pos,
                                 xf,
-                                instances: all_instances,
+                                instances: instances_for_script,
                                 inst,
                                 controller,
                                 light_index: 0,
@@ -6087,6 +6114,18 @@ impl World {
                                 arrivals,
                             });
                         }
+                    }
+                    // Add to scenery registry for inspector (non-editable objects only)
+                    if !editable && !parked {
+                        let instances: Vec<usize> = all_instances.iter().chain(&lod_instances).copied().collect();
+                        pl.scenery_objects.push(SceneryObjectRecord {
+                            key: collision_key,
+                            map_id,
+                            ty: ot.clone(),
+                            pos,
+                            xf,
+                            instances,
+                        });
                     }
                     pl.objects += 1;
                     done_some = true;

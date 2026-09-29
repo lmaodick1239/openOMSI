@@ -322,6 +322,36 @@ original map is never written; delete the copy to have the original back. Only a
 `[object]` records can be edited: splines, the ground, spline rows, new objects and the
 timetable are not part of it.
 
+## Inspector mode
+
+The visual debug inspector lets you examine vehicles and scenery objects without changing them.
+**Ctrl+I** toggles inspector mode on and off.
+
+**Selection:** Left-click a vehicle or scenery object to select it. A cyan marker appears above
+the selection, distinguishing it from the object editor's magenta. Left-click empty space to
+clear the selection. **Ctrl+I** again exits inspector mode.
+
+**What you can select:**
+- **Vehicles**: Player bus, AI traffic, remote players (LAN), trailers
+- **Scenery**: All loaded scenery objects
+
+**Inspector panel:** When an object is selected, the panel shows:
+- Object type and parent (for trailers)
+- Asset path (the `.bus` or `.sco` file)
+- World position and rotation
+- Local position and rotation (relative to parent for trailers)
+- Bounding box (when available)
+- Tile coordinates (for scenery)
+
+**Mutual exclusion:** Inspector mode and object editor mode are mutually exclusive. Activating
+one deactivates the other.
+
+**Limitations:**
+- Read-only: Inspector cannot modify objects
+- Selection becomes unavailable if the object unloads or is replaced
+- Only one scenery tile pinned at a time (tile unload is blocked while scenery is selected)
+- Humans, terrain, and splines not selectable in this version
+
 ## Debug and test switches
 
 Environment variables, all off unless set. The useful ones:

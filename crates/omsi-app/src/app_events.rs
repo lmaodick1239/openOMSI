@@ -1274,6 +1274,15 @@ impl ApplicationHandler for App {
                             });
                         }
                     }
+                    // inspector's selection: a cyan glow over the selected entity
+                    if self.inspector_active {
+                        if let Some(sel) = self.inspector_selection.as_ref() {
+                            if sel.is_active() {
+                                // Placeholder: visual feedback will be added once snapshot generation is complete
+                                // This will use cyan/blue-green color to contrast with object editor's magenta
+                            }
+                        }
+                    }
                     if let Some(wt) = &self.weather {
                         let (kind, rate) = precip_of(wt);
                         self.rain.set(kind, rate);
@@ -1555,6 +1564,7 @@ impl ApplicationHandler for App {
                             tutorial: self.tutorial.as_ref().filter(|t| !t.hidden).and_then(|t| t.page().map(|p| (p.title.as_str(), p.text.as_str(), p.image.as_deref(), t.at, t.pages.len()))),
                             chat,
                             tags,
+                            inspector: None,
                         };
                         ui.draw(r, scene, &frame, dt);
                     }
