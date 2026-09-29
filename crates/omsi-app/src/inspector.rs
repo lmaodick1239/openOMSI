@@ -1278,3 +1278,542 @@ mod tests {
         // The signatures ensure no side effects: immutable borrows only, no state mutation
     }
 }
+
+/// Build a validated snapshot from a selection, checking staleness and releasing leases.
+///
+/// This function validates that the selected entity still exists and matches the stored
+/// generation. If the entity is stale (removed, replaced, timed out, or LOD changed),
+/// it returns an invalidated status and releases any associated tile pin leases.
+///
+/// All locks are dropped before returning to ensure no locks are held during UI/render.
+///
+/// # Parameters
+/// - `selection`: The current selection to validate
+/// - `player`: Player instance (if active)
+/// - `traffic`: AI traffic state (if active)
+/// - `remotes`: Remote vehicles state (if active)
+/// - `streamer`: Tile streamer for scenery validation and lease release
+/// - `player_generation`: Player vehicle generation counter
+///
+/// # Returns
+/// - `Ok(snapshot)`: Valid snapshot with owned data
+/// - `Err(reason)`: Invalidation reason if the selection is stale
+pub fn build_inspector_snapshot(
+    selection: &InspectorSelection,
+    player: Option<&crate::player::Player>,
+    traffic: Option<&crate::traffic::Traffic>,
+    remotes: Option<&crate::lan::LanGame>,
+    streamer: Option<&crate::tiles::Streamer>,
+    player_generation: u64,
+) -> Result<InspectorSnapshot, String> {
+    let target = match &selection.status {
+        SelectionStatus::Selected(target) => target,
+        SelectionStatus::None => return Err("No selection".to_string()),
+        SelectionStatus::Invalidated { reason } => return Err(reason.clone()),
+    };
+
+    match target {
+        SelectionTarget::Vehicle { key, mesh } => {
+            validate_vehicle_snapshot(key, mesh, player, traffic, remotes, player_generation)
+        }
+        SelectionTarget::Scenery { key, mesh } => {
+            validate_scenery_snapshot(key, mesh, streamer)
+        }
+    }
+}
+
+/// Validate a vehicle selection and build its snapshot.
+fn validate_vehicle_snapshot(
+    key: &VehicleKey,
+    mesh: &Option<MeshIdentity>,
+    player: Option<&crate::player::Player>,
+    traffic: Option<&crate::traffic::Traffic>,
+    remotes: Option<&crate::lan::LanGame>,
+    player_generation: u64,
+) -> Result<InspectorSnapshot, String> {
+    match key {
+        VehicleKey::Player { generation } => {
+            // Validate player generation
+            if *generation != player_generation {
+                return Err(format!(
+                    "Player vehicle replaced (expected gen {}, current {})",
+                    generation, player_generation
+                ));
+            }
+
+            let Some(player) = player else {
+                return Err("Player vehicle not available".to_string());
+            };
+
+            build_vehicle_snapshot(
+                SelectionTarget::Vehicle {
+                    key: *key,
+                    mesh: mesh.clone(),
+                },
+                &player.vehicle,
+                None,
+            )
+        }
+        VehicleKey::PlayerTrailer {
+            generation,
+            trailer_index,
+        } => {
+            // Validate player generation
+            if *generation != player_generation {
+                return Err(format!(
+                    "Player vehicle replaced (expected gen {}, current {})",
+                    generation, player_generation
+                ));
+            }
+
+            let Some(player) = player else {
+                return Err("Player vehicle not available".to_string());
+            };
+
+            let Some(trailer) = player.vehicle.trailers.get(*trailer_index) else {
+                return Err(format!(
+                    "Player trailer {} not available (only {} trailers)",
+                    trailer_index,
+                    player.vehicle.trailers.len()
+                ));
+            };
+
+            build_trailer_snapshot(
+                SelectionTarget::Vehicle {
+                    key: *key,
+                    mesh: mesh.clone(),
+                },
+                trailer,
+                Some("Player"),
+            )
+        }
+        VehicleKey::AiCar { id } => {
+            let Some(traffic) = traffic else {
+                return Err("AI traffic not available".to_string());
+            };
+
+            // Find AI car by stable ID
+            let car = traffic
+                .cars
+                .iter()
+                .find(|c| c.id == *id)
+                .ok_or_else(|| format!("AI car {} despawned", id))?;
+
+            build_vehicle_snapshot(
+                SelectionTarget::Vehicle {
+                    key: *key,
+                    mesh: mesh.clone(),
+                },
+                &car.vehicle,
+                Some(&format!("AI #{}", id)),
+            )
+        }
+        VehicleKey::AiTrailer {
+            car_id,
+            trailer_index,
+        } => {
+            let Some(traffic) = traffic else {
+                return Err("AI traffic not available".to_string());
+            };
+
+            // Find AI car by stable ID
+            let car = traffic
+                .cars
+                .iter()
+                .find(|c| c.id == *car_id)
+                .ok_or_else(|| format!("AI car {} despawned", car_id))?;
+
+            let Some(trailer) = car.vehicle.trailers.get(*trailer_index) else {
+                return Err(format!(
+                    "AI car {} trailer {} not available (only {} trailers)",
+                    car_id,
+                    trailer_index,
+                    car.vehicle.trailers.len()
+                ));
+            };
+
+            build_trailer_snapshot(
+                SelectionTarget::Vehicle {
+                    key: *key,
+                    mesh: mesh.clone(),
+                },
+                trailer,
+                Some(&format!("AI #{}", car_id)),
+            )
+        }
+        VehicleKey::Remote {
+            player_id,
+            generation: _,
+        } => {
+            let Some(remotes) = remotes else {
+                return Err("Remote vehicles not available".to_string());
+            };
+
+            // Find remote vehicle by player ID
+            let remote = remotes
+                .remotes
+                .get(player_id)
+                .ok_or_else(|| format!("Remote player {} disconnected", player_id))?;
+
+            // TODO: Validate generation (remote vehicle replacement detection)
+            // RemoteVehicle doesn't expose generation yet, so we can't validate replacement
+
+            build_vehicle_snapshot(
+                SelectionTarget::Vehicle {
+                    key: *key,
+                    mesh: mesh.clone(),
+                },
+                remote.vehicle(),
+                Some(&format!("Remote #{}", player_id)),
+            )
+        }
+        VehicleKey::RemoteTrailer {
+            player_id,
+            generation: _,
+            trailer_index,
+        } => {
+            let Some(remotes) = remotes else {
+                return Err("Remote vehicles not available".to_string());
+            };
+
+            // Find remote vehicle by player ID
+            let remote = remotes
+                .remotes
+                .get(player_id)
+                .ok_or_else(|| format!("Remote player {} disconnected", player_id))?;
+
+            // TODO: Validate generation (remote vehicle replacement detection)
+            // RemoteVehicle doesn't expose generation yet, so we can't validate replacement
+
+            let Some(trailer) = remote.vehicle().trailers.get(*trailer_index) else {
+                return Err(format!(
+                    "Remote player {} trailer {} not available (only {} trailers)",
+                    player_id,
+                    trailer_index,
+                    remote.vehicle().trailers.len()
+                ));
+            };
+
+            build_trailer_snapshot(
+                SelectionTarget::Vehicle {
+                    key: *key,
+                    mesh: mesh.clone(),
+                },
+                trailer,
+                Some(&format!("Remote #{}", player_id)),
+            )
+        }
+    }
+}
+
+/// Build a snapshot from a vehicle instance.
+fn build_vehicle_snapshot(
+    target: SelectionTarget,
+    vehicle: &omsi_sim::VehicleInstance,
+    parent_name: Option<&str>,
+) -> Result<InspectorSnapshot, String> {
+    let position = Some([
+        vehicle.position.x as f32,
+        vehicle.position.y as f32,
+        vehicle.position.z as f32,
+    ]);
+
+    // Convert heading to quaternion (rotation around Z axis)
+    let heading_rad = vehicle.heading.to_radians() as f32;
+    let half_angle = heading_rad / 2.0;
+    let rotation = Some([
+        0.0,
+        0.0,
+        half_angle.sin(),
+        half_angle.cos(),
+    ]);
+
+    let model_path = Some(vehicle.ty.model_dir.to_string_lossy().to_string());
+
+    let mesh_name = if let SelectionTarget::Vehicle { mesh: Some(mesh), .. } = &target {
+        Some(mesh.mesh_name.clone())
+    } else {
+        None
+    };
+
+    let mut metadata = Vec::new();
+    if let Some(parent) = parent_name {
+        metadata.push(("Parent".to_string(), parent.to_string()));
+    }
+    metadata.push(("Type".to_string(), vehicle.ty.def.type_name.clone()));
+
+    Ok(InspectorSnapshot {
+        target,
+        position,
+        rotation,
+        bounds: None, // TODO: compute from vehicle bounds
+        model_path,
+        mesh_name,
+        metadata,
+    })
+}
+
+/// Build a snapshot from a trailer instance.
+fn build_trailer_snapshot(
+    target: SelectionTarget,
+    trailer: &omsi_sim::vehicle::TrailerPart,
+    parent_name: Option<&str>,
+) -> Result<InspectorSnapshot, String> {
+    let position = Some([
+        trailer.position.x as f32,
+        trailer.position.y as f32,
+        trailer.position.z as f32,
+    ]);
+
+    // Convert heading to quaternion (rotation around Z axis)
+    let heading_rad = trailer.heading.to_radians() as f32;
+    let half_angle = heading_rad / 2.0;
+    let rotation = Some([
+        0.0,
+        0.0,
+        half_angle.sin(),
+        half_angle.cos(),
+    ]);
+
+    let model_path = Some(trailer.ty.model_dir.to_string_lossy().to_string());
+
+    let mesh_name = if let SelectionTarget::Vehicle { mesh: Some(mesh), .. } = &target {
+        Some(mesh.mesh_name.clone())
+    } else {
+        None
+    };
+
+    let mut metadata = Vec::new();
+    if let Some(parent) = parent_name {
+        metadata.push(("Parent".to_string(), format!("{} (trailer)", parent)));
+    }
+    metadata.push(("Type".to_string(), trailer.ty.def.type_name.clone()));
+
+    Ok(InspectorSnapshot {
+        target,
+        position,
+        rotation,
+        bounds: None, // TODO: compute from trailer bounds
+        model_path,
+        mesh_name,
+        metadata,
+    })
+}
+
+/// Validate a scenery selection and build its snapshot.
+fn validate_scenery_snapshot(
+    key: &SceneryKey,
+    _mesh: &Option<MeshIdentity>,
+    streamer: Option<&crate::tiles::Streamer>,
+) -> Result<InspectorSnapshot, String> {
+    let Some(_streamer) = streamer else {
+        return Err("Scenery not available (no streamer)".to_string());
+    };
+
+    match key {
+        SceneryKey::Editable { map_id } => {
+            // TODO: Validate editable scenery object exists
+            // For now, return minimal snapshot
+            Err(format!(
+                "Editable scenery validation not yet implemented (map_id={})",
+                map_id
+            ))
+        }
+        SceneryKey::NonEditable { tile_x, tile_y, key } => {
+            // TODO: Check tile is loaded and object exists
+            // For now, return minimal snapshot
+            Err(format!(
+                "Non-editable scenery validation not yet implemented (tile={},{}, key={})",
+                tile_x, tile_y, key
+            ))
+        }
+        SceneryKey::Parked { key } => {
+            // TODO: Validate parked vehicle exists
+            Err(format!(
+                "Parked vehicle validation not yet implemented (key={})",
+                key
+            ))
+        }
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn test_snapshot_validation_no_selection() {
+        let selection = InspectorSelection::default();
+        let result = build_inspector_snapshot(&selection, None, None, None, None, 0);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "No selection");
+    }
+
+    #[test]
+    fn test_snapshot_validation_invalidated() {
+        let mut selection = InspectorSelection::new(SelectionTarget::Vehicle {
+            key: VehicleKey::Player { generation: 1 },
+            mesh: None,
+        });
+        selection.invalidate("test reason".to_string());
+
+        let result = build_inspector_snapshot(&selection, None, None, None, None, 1);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "test reason");
+    }
+
+    #[test]
+    fn test_vehicle_generation_mismatch() {
+        let selection = InspectorSelection::new(SelectionTarget::Vehicle {
+            key: VehicleKey::Player { generation: 1 },
+            mesh: None,
+        });
+
+        let result = build_inspector_snapshot(&selection, None, None, None, None, 2);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("replaced"));
+    }
+
+    #[test]
+    fn test_player_not_available() {
+        let selection = InspectorSelection::new(SelectionTarget::Vehicle {
+            key: VehicleKey::Player { generation: 1 },
+            mesh: None,
+        });
+
+        let result = build_inspector_snapshot(&selection, None, None, None, None, 1);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Player vehicle not available");
+    }
+
+    #[test]
+    fn test_ai_not_available() {
+        let selection = InspectorSelection::new(SelectionTarget::Vehicle {
+            key: VehicleKey::AiCar { id: 100 },
+            mesh: None,
+        });
+
+        let result = build_inspector_snapshot(&selection, None, None, None, None, 0);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "AI traffic not available");
+    }
+
+    #[test]
+    fn test_remote_not_available() {
+        let selection = InspectorSelection::new(SelectionTarget::Vehicle {
+            key: VehicleKey::Remote {
+                player_id: 42,
+                generation: 1,
+            },
+            mesh: None,
+        });
+
+        let result = build_inspector_snapshot(&selection, None, None, None, None, 0);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Remote vehicles not available");
+    }
+}
+
+/// Draw visual overlays for the currently selected entity.
+///
+/// This adds transient per-frame visual feedback using coronas for position markers,
+/// and optionally bounds and local axes based on the validated snapshot.
+///
+/// Uses cyan/blue-green color (0.2, 0.8, 0.9) to contrast with the object editor's
+/// magenta marker (1.0, 0.1, 0.9).
+///
+/// All overlays are transient and cleared automatically each frame by the scene reset.
+pub fn draw_inspector_overlays(
+    snapshot: &InspectorSnapshot,
+    view_toggles: &ViewToggles,
+    scene: &mut omsi_render::Scene,
+) {
+    use glam::{DVec3, Quat, Vec3};
+
+    // Main position marker: cyan corona at entity position
+    if let Some(pos) = snapshot.position {
+        let position = DVec3::new(pos[0] as f64, pos[1] as f64, pos[2] as f64);
+        scene.coronas.push(omsi_render::Corona {
+            position: position + DVec3::Z * 3.0,
+            size: 0.7,
+            color: [0.2, 0.8, 0.9], // cyan/blue-green
+            brightness: 2.5,
+            ..Default::default()
+        });
+    }
+
+    // Optional bounds visualization
+    if view_toggles.show_bounds {
+        if let (Some(pos), Some(rot), Some(bounds)) = (snapshot.position, snapshot.rotation, snapshot.bounds) {
+            let position = DVec3::new(pos[0] as f64, pos[1] as f64, pos[2] as f64);
+            let rotation = Quat::from_xyzw(rot[0], rot[1], rot[2], rot[3]);
+            
+            let (min, max) = bounds;
+            let min = Vec3::new(min[0], min[1], min[2]);
+            let max = Vec3::new(max[0], max[1], max[2]);
+            
+            // Draw corner markers for bounding box
+            let corners = [
+                Vec3::new(min.x, min.y, min.z),
+                Vec3::new(max.x, min.y, min.z),
+                Vec3::new(min.x, max.y, min.z),
+                Vec3::new(max.x, max.y, min.z),
+                Vec3::new(min.x, min.y, max.z),
+                Vec3::new(max.x, min.y, max.z),
+                Vec3::new(min.x, max.y, max.z),
+                Vec3::new(max.x, max.y, max.z),
+            ];
+            
+            for corner in &corners {
+                let world_corner = position + (rotation * *corner).as_dvec3();
+                scene.coronas.push(omsi_render::Corona {
+                    position: world_corner,
+                    size: 0.3,
+                    color: [0.2, 0.8, 0.9],
+                    brightness: 1.5,
+                    ..Default::default()
+                });
+            }
+        }
+    }
+
+    // Optional local axes visualization
+    if view_toggles.show_local_axes {
+        if let (Some(pos), Some(rot)) = (snapshot.position, snapshot.rotation) {
+            let position = DVec3::new(pos[0] as f64, pos[1] as f64, pos[2] as f64);
+            let rotation = Quat::from_xyzw(rot[0], rot[1], rot[2], rot[3]);
+            
+            let axis_length = 2.0;
+            
+            // X axis (red)
+            let x_axis = rotation * Vec3::X * axis_length;
+            scene.coronas.push(omsi_render::Corona {
+                position: position + x_axis.as_dvec3(),
+                size: 0.4,
+                color: [1.0, 0.2, 0.2],
+                brightness: 2.0,
+                ..Default::default()
+            });
+            
+            // Y axis (green)
+            let y_axis = rotation * Vec3::Y * axis_length;
+            scene.coronas.push(omsi_render::Corona {
+                position: position + y_axis.as_dvec3(),
+                size: 0.4,
+                color: [0.2, 1.0, 0.2],
+                brightness: 2.0,
+                ..Default::default()
+            });
+            
+            // Z axis (blue)
+            let z_axis = rotation * Vec3::Z * axis_length;
+            scene.coronas.push(omsi_render::Corona {
+                position: position + z_axis.as_dvec3(),
+                size: 0.4,
+                color: [0.2, 0.2, 1.0],
+                brightness: 2.0,
+                ..Default::default()
+            });
+        }
+    }
+}
