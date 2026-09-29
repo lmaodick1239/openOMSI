@@ -743,6 +743,180 @@ pub fn raycast_remote_vehicle(
     hits
 }
 
+/// A single scenery object mesh raycast hit candidate.
+///
+/// This is the inspector-only side-effect-free mesh intersection result for scenery objects.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SceneryMeshHit {
+    /// Mesh index in the object type's mesh list.
+    pub mesh_index: usize,
+    /// Hit distance from ray origin.
+    pub distance: f32,
+    /// Definition index for mesh identity lookup.
+    pub def_index: usize,
+}
+
+/// Read-only scenery object mesh raycast helper.
+///
+/// Returns all nearest hit candidates for a single scenery object placement without triggering
+/// any side effects. Reuses existing geometry infrastructure: [`omsi_geometry::ray_mesh`] for
+/// triangle intersection with mesh bounds checking.
+///
+/// This helper is suitable for inspector selection across all scenery domains:
+/// editable objects, non-editable placed objects, and parked vehicles (as scenery).
+///
+/// # Parameters
+/// - `object_type`: The object type to raycast against
+/// - `pos`: Object position in world space
+/// - `xf`: Object transform matrix
+/// - `origin`: Ray origin in world space
+/// - `dir`: Ray direction (normalized)
+///
+/// # Returns
+/// All hit candidates sorted nearest-first with world-space distances.
+///
+/// # LOD Handling
+/// Only the currently visible LOD level meshes are tested. The caller must determine the
+/// appropriate LOD level before calling this function based on camera distance and LOD thresholds.
+pub fn raycast_scenery_object_meshes(
+    object_type: &crate::scene::ObjectType,
+    pos: DVec3,
+    xf: &glam::Mat4,
+    origin: DVec3,
+    dir: Vec3,
+    lod_level: usize,
+) -> Vec<SceneryMeshHit> {
+    let o = (origin - pos).as_vec3();
+    let mut hits = Vec::new();
+
+    // Determine which mesh list to use based on LOD level
+    let meshes = if lod_level == 0 {
+        &object_type.meshes
+    } else if let Some((_, lod_meshes)) = object_type.lower_lods.get(lod_level - 1) {
+        lod_meshes
+    } else {
+        return hits; // LOD level out of range
+    };
+
+    for (i, (mesh, _materials, _)) in meshes.iter().enumerate() {
+        // Narrowphase: triangle intersection
+        // MeshData IS the mesh data itself, no .data field needed
+        if let Some(t) = omsi_geometry::ray_mesh(o, dir, mesh, xf) {
+            hits.push(SceneryMeshHit {
+                mesh_index: i,
+                distance: t,
+                def_index: i, // For scenery, mesh_index == def_index
+            });
+        }
+    }
+
+    hits.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(Ordering::Equal));
+    hits
+}
+
+/// Simple axis-aligned bounding box ray intersection check.
+///
+/// Returns entry and exit parameters (t0, t1) if the ray intersects the box.
+fn slab_check(o: Vec3, d: Vec3, lo: Vec3, hi: Vec3) -> Option<(f32, f32)> {
+    let (mut t0, mut t1) = (f32::MIN, f32::MAX);
+    for k in 0..3 {
+        if d[k].abs() < 1e-8 {
+            if o[k] < lo[k] || o[k] > hi[k] {
+                return None;
+            }
+            continue;
+        }
+        let (a, b) = ((lo[k] - o[k]) / d[k], (hi[k] - o[k]) / d[k]);
+        t0 = t0.max(a.min(b));
+        t1 = t1.min(a.max(b));
+        if t0 > t1 {
+            return None;
+        }
+    }
+    Some((t0, t1))
+}
+
+/// Inspector-mode raycast for a tile's scenery objects.
+///
+/// Returns hits for all non-editable scenery objects in a tile, sorted nearest-first.
+///
+/// # Parameters
+/// - `tile_x`: Tile X coordinate
+/// - `tile_y`: Tile Y coordinate
+/// - `scenery_objects`: List of scenery object records
+/// - `origin`: Ray origin in world space
+/// - `dir`: Ray direction (normalized)
+/// - `camera_pos`: Camera position for LOD determination
+///
+/// # Returns
+/// All hit candidates with proper `SceneryKey::NonEditable` identity.
+pub fn raycast_tile_scenery(
+    tile_x: i32,
+    tile_y: i32,
+    scenery_objects: &[crate::scene::SceneryObjectRecord],
+    origin: DVec3,
+    dir: Vec3,
+    camera_pos: DVec3,
+) -> Vec<InspectorHit> {
+    let mut hits = Vec::new();
+
+    for scenery in scenery_objects {
+        // Determine LOD level based on camera distance
+        let distance = (camera_pos - scenery.pos).length();
+        let lod_level = determine_lod_level(&scenery.ty, distance);
+
+        // Raycast against this scenery object
+        for hit in raycast_scenery_object_meshes(&scenery.ty, scenery.pos, &scenery.xf, origin, dir, lod_level) {
+            // Get mesh name for identity from model definition
+            let mesh_def_idx = if lod_level == 0 {
+                scenery.ty.mesh_def_index.get(hit.mesh_index).copied()
+            } else {
+                // For lower LODs, we don't have a direct def_index mapping, use hit index
+                Some(hit.def_index)
+            };
+
+            let mesh_name = mesh_def_idx
+                .and_then(|idx| scenery.ty.model.meshes.get(idx))
+                .map(|def| def.file.clone())
+                .unwrap_or_default();
+
+            let mesh_identity = MeshIdentity::new(
+                scenery.ty.sco.path.to_string_lossy().to_string(),
+                mesh_def_idx.unwrap_or(hit.def_index),
+                mesh_name,
+                None, // Scenery objects typically don't have duplicate mesh names
+            );
+
+            if let Some(inspector_hit) = InspectorHit::new(
+                hit.distance,
+                SelectionTarget::Scenery {
+                    key: SceneryKey::NonEditable {
+                        tile_x,
+                        tile_y,
+                        key: scenery.key,
+                    },
+                    mesh: Some(mesh_identity),
+                },
+            ) {
+                hits.push(inspector_hit);
+            }
+        }
+    }
+
+    InspectorHit::order_candidates(&mut hits);
+    hits
+}
+
+/// Determine the appropriate LOD level for a scenery object based on camera distance.
+///
+/// Returns 0 for the base LOD, or the index of the appropriate lower LOD (1-based).
+fn determine_lod_level(_object_type: &crate::scene::ObjectType, _distance: f64) -> usize {
+    // Simplified LOD determination: always use LOD 0 for now
+    // Full implementation would require screen-space size calculation
+    // based on camera distance, object bounds, and viewport dimensions
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1037,5 +1211,116 @@ mod tests {
             raycast_vehicle_meshes;
         let _: fn(&omsi_sim::VehicleInstance, DVec3, Vec3, bool, bool) -> Vec<(usize, VehicleMeshHit)> =
             raycast_vehicle_trailers;
+    }
+
+    // Tests for scenery raycast helpers
+
+    #[test]
+    fn test_scenery_mesh_hit_ordering() {
+        let hit1 = SceneryMeshHit {
+            mesh_index: 0,
+            distance: 5.0,
+            def_index: 0,
+        };
+        let hit2 = SceneryMeshHit {
+            mesh_index: 1,
+            distance: 2.0,
+            def_index: 1,
+        };
+        let hit3 = SceneryMeshHit {
+            mesh_index: 2,
+            distance: 10.0,
+            def_index: 2,
+        };
+
+        let mut hits = vec![hit1, hit2.clone(), hit3];
+        hits.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(Ordering::Equal));
+
+        assert_eq!(hits[0].distance, 2.0);
+        assert_eq!(hits[0].mesh_index, 1);
+        assert_eq!(hits[1].distance, 5.0);
+        assert_eq!(hits[2].distance, 10.0);
+    }
+
+    #[test]
+    fn test_scenery_key_distinguishes_placements() {
+        // Two placements of the same asset must have different SceneryKey values
+        let placement1 = SceneryKey::NonEditable {
+            tile_x: 0,
+            tile_y: 0,
+            key: 100,
+        };
+        let placement2 = SceneryKey::NonEditable {
+            tile_x: 0,
+            tile_y: 0,
+            key: 101,
+        };
+
+        // Same tile, different collision keys
+        assert_ne!(placement1, placement2);
+
+        // Verify ordering is stable
+        assert!(placement1 < placement2);
+    }
+
+    #[test]
+    fn test_scenery_mesh_identity_with_lod_fallback() {
+        // Test that mesh identity supports LOD fallback via definition index
+        let mesh_identity = MeshIdentity::new(
+            "scenery/bus_stop.sco".to_string(),
+            3,
+            "shelter_wall".to_string(),
+            None,
+        );
+
+        // LOD fallback: if exact mesh (def_index=3) is missing, find nearest
+        let available = vec![1, 2, 5, 6]; // No 3, so nearest is 2 (distance=1)
+        let fallback = mesh_identity.find_fallback_index(&available);
+
+        assert_eq!(fallback, Some(2));
+
+        // Verify mesh identity is preserved across LOD changes
+        assert_eq!(mesh_identity.definition_index, 3);
+        assert_eq!(mesh_identity.mesh_name, "shelter_wall");
+    }
+
+    #[test]
+    fn test_slab_check_bounds_intersection() {
+        let o = Vec3::new(0.0, 0.0, 0.0);
+        let d = Vec3::new(1.0, 0.0, 0.0).normalize();
+        let lo = Vec3::new(5.0, -1.0, -1.0);
+        let hi = Vec3::new(10.0, 1.0, 1.0);
+
+        // Ray along x-axis should intersect box at x=5 to x=10
+        let result = slab_check(o, d, lo, hi);
+        assert!(result.is_some());
+        let (t0, t1) = result.unwrap();
+        assert!(t0 >= 4.9 && t0 <= 5.1); // Entry at ~5.0
+        assert!(t1 >= 9.9 && t1 <= 10.1); // Exit at ~10.0
+
+        // Ray in opposite direction should also intersect (negative t values)
+        // but for raycast purposes, we'd filter negative t values elsewhere
+        let d_neg = Vec3::new(-1.0, 0.0, 0.0).normalize();
+        let result_neg = slab_check(o, d_neg, lo, hi);
+        // slab_check doesn't filter by direction, it returns mathematical intersection
+        assert!(result_neg.is_some());
+
+        // Ray parallel to box but outside should miss
+        let o_outside = Vec3::new(0.0, 5.0, 0.0);
+        let result_miss = slab_check(o_outside, d, lo, hi);
+        assert!(result_miss.is_none());
+    }
+
+    #[test]
+    fn test_scenery_raycast_helpers_are_side_effect_free() {
+        // Type check: these functions exist and have the correct immutable signatures
+        // All scenery raycast helpers take immutable borrows and return owned data
+        
+        let _: fn(&crate::scene::ObjectType, DVec3, &glam::Mat4, DVec3, Vec3, usize) -> Vec<SceneryMeshHit> =
+            raycast_scenery_object_meshes;
+        let _: fn(i32, i32, &[crate::scene::SceneryObjectRecord], DVec3, Vec3, DVec3) -> Vec<InspectorHit> =
+            raycast_tile_scenery;
+        
+        // The signatures ensure no side effects: immutable borrows only, no state mutation
     }
 }
