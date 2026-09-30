@@ -261,43 +261,73 @@ impl InspectorUi {
     }
 
     /// Draw all enabled windows from an owned snapshot and queue typed commands.
-    pub fn draw(&mut self, snapshot: &InspectorUiSnapshot) {
+    pub fn draw(&mut self, window: &Window, snapshot: &InspectorUiSnapshot) {
         if !self.frame_started {
             return;
         }
-        let layout = &self.layout;
+        let layout = self.layout.clone();
+        let mut captured_layout = layout.windows;
         let ui = self.context.frame();
-        draw_window(ui, layout, InspectorWindow::Inspector, |ui| {
-            draw_inspector(ui, snapshot.inspector.as_ref())
-        });
-        draw_window(ui, layout, InspectorWindow::Hierarchy, |ui| {
-            draw_lines(ui, "Entities", &snapshot.hierarchy)
-        });
-        draw_window(ui, layout, InspectorWindow::Log, |ui| {
-            draw_lines(ui, "Diagnostics", &snapshot.log_lines)
-        });
-        draw_window(ui, layout, InspectorWindow::Materials, |ui| {
-            draw_material(ui, snapshot.material.as_ref())
-        });
-        draw_window(ui, layout, InspectorWindow::Render, |ui| {
-            draw_render(ui, snapshot.render.as_ref())
-        });
-        draw_window(ui, layout, InspectorWindow::Humans, |ui| {
-            draw_human(ui, snapshot.human.as_ref())
-        });
-        draw_window(ui, layout, InspectorWindow::Telemetry, |ui| {
-            draw_telemetry(ui, snapshot.telemetry.as_ref())
-        });
-        draw_window(ui, layout, InspectorWindow::Editor, |ui| {
-            draw_editor(ui, snapshot.editor.as_ref())
-        });
-        draw_window(ui, layout, InspectorWindow::Export, |ui| {
-            draw_export(ui, snapshot.export.as_ref())
-        });
+        captured_layout[InspectorWindow::Inspector.index()] = draw_window(
+            ui,
+            layout.windows[InspectorWindow::Inspector.index()],
+            InspectorWindow::Inspector,
+            |ui| draw_inspector(ui, snapshot.inspector.as_ref()),
+        );
+        captured_layout[InspectorWindow::Hierarchy.index()] = draw_window(
+            ui,
+            layout.windows[InspectorWindow::Hierarchy.index()],
+            InspectorWindow::Hierarchy,
+            |ui| draw_lines(ui, "Entities", &snapshot.hierarchy),
+        );
+        captured_layout[InspectorWindow::Log.index()] = draw_window(
+            ui,
+            layout.windows[InspectorWindow::Log.index()],
+            InspectorWindow::Log,
+            |ui| draw_lines(ui, "Diagnostics", &snapshot.log_lines),
+        );
+        captured_layout[InspectorWindow::Materials.index()] = draw_window(
+            ui,
+            layout.windows[InspectorWindow::Materials.index()],
+            InspectorWindow::Materials,
+            |ui| draw_material(ui, snapshot.material.as_ref()),
+        );
+        captured_layout[InspectorWindow::Render.index()] = draw_window(
+            ui,
+            layout.windows[InspectorWindow::Render.index()],
+            InspectorWindow::Render,
+            |ui| draw_render(ui, snapshot.render.as_ref()),
+        );
+        captured_layout[InspectorWindow::Humans.index()] = draw_window(
+            ui,
+            layout.windows[InspectorWindow::Humans.index()],
+            InspectorWindow::Humans,
+            |ui| draw_human(ui, snapshot.human.as_ref()),
+        );
+        captured_layout[InspectorWindow::Telemetry.index()] = draw_window(
+            ui,
+            layout.windows[InspectorWindow::Telemetry.index()],
+            InspectorWindow::Telemetry,
+            |ui| draw_telemetry(ui, snapshot.telemetry.as_ref()),
+        );
+        captured_layout[InspectorWindow::Editor.index()] = draw_window(
+            ui,
+            layout.windows[InspectorWindow::Editor.index()],
+            InspectorWindow::Editor,
+            |ui| draw_editor(ui, snapshot.editor.as_ref()),
+        );
+        captured_layout[InspectorWindow::Export.index()] = draw_window(
+            ui,
+            layout.windows[InspectorWindow::Export.index()],
+            InspectorWindow::Export,
+            |ui| draw_export(ui, snapshot.export.as_ref()),
+        );
+        self.layout.windows = captured_layout;
         self.input_capture = InputCaptureState {
             pointer: ui.io().want_capture_mouse,
             keyboard: ui.io().want_capture_keyboard,
         };
+        self.platform.prepare_render(ui, window);
     }
 
     /// Finish a frame and optionally render its draw data into an existing pass.
@@ -348,19 +378,38 @@ impl Default for InspectorUi {
     }
 }
 
-fn draw_window<F>(ui: &Ui, layout: &ImGuiLayout, window: InspectorWindow, draw: F)
+fn draw_window<F>(ui: &Ui, layout: WindowLayout, window: InspectorWindow, draw: F) -> WindowLayout
 where
     F: FnOnce(&Ui),
 {
-    let layout = layout.windows[window.index()];
     if !layout.open {
-        return;
+        return layout;
     }
+    let mut open = true;
+    let mut captured = layout;
     ui.window(window.name())
         .flags(WindowFlags::NO_SAVED_SETTINGS)
+        .opened(&mut open)
         .position(layout.position, Condition::FirstUseEver)
         .size(layout.size, Condition::FirstUseEver)
-        .build(|| draw(ui));
+        .build(|| {
+            draw(ui);
+            captured.position = ui.window_pos();
+            captured.size = ui.window_size();
+        });
+    capture_window_layout(captured, open, captured.position, captured.size)
+}
+
+fn capture_window_layout(
+    mut layout: WindowLayout,
+    open: bool,
+    position: [f32; 2],
+    size: [f32; 2],
+) -> WindowLayout {
+    layout.open = open;
+    layout.position = position;
+    layout.size = size;
+    layout
 }
 
 const BLUE_TITLE_ACTIVE: [f32; 4] = [0.05, 0.3, 0.62, 1.0];
@@ -467,6 +516,24 @@ mod tests {
         assert_eq!(
             ImGuiLayout::from_json(r#"{"version":99,"windows":[]}"#),
             ImGuiLayout::default()
+        );
+    }
+
+    #[test]
+    fn captures_live_window_geometry_and_visibility() {
+        let initial = WindowLayout {
+            open: true,
+            position: [12.0, 18.0],
+            size: [240.0, 180.0],
+        };
+        let captured = capture_window_layout(initial, false, [96.0, 112.0], [360.0, 280.0]);
+        assert_eq!(
+            captured,
+            WindowLayout {
+                open: false,
+                position: [96.0, 112.0],
+                size: [360.0, 280.0],
+            }
         );
     }
 
