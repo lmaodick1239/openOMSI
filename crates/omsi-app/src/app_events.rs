@@ -102,11 +102,16 @@ impl ApplicationHandler for App {
             // (the middle button - the wheel pressed - turns the view as well: OMSI's pan)
             WindowEvent::MouseInput {
                 state,
-                button: winit::event::MouseButton::Right | winit::event::MouseButton::Middle,
+                button: button @ (winit::event::MouseButton::Right | winit::event::MouseButton::Middle),
                 ..
             } => {
                 if self.navigator.as_ref().map(|n| n.map_open()).unwrap_or(false) {
                     return;
+                }
+                // a right click lets go of the mouse steering, as in OMSI (#162)
+                if button == winit::event::MouseButton::Right && state == ElementState::Pressed && self.mouse_drive && self.game_menu.is_none() {
+                    self.mouse_drive = false;
+                    self.service_msg = Some(("Mouse steering off".into(), 3.0));
                 }
                 self.mouse_look = state == ElementState::Pressed;
             }
@@ -673,7 +678,8 @@ impl ApplicationHandler for App {
                     // (out of the seat: nobody at the wheel)
                     p.sync_driver(r, scene, dt, self.settings.driver && self.on_foot.is_none(), self.view == "driver");
                     if self.view != "free" && self.view != "foot" {
-                        crate::input_script::swap_view_look(&mut self.look, &mut self.view_looks, &mut self.look_view, &self.view);
+                        let key = crate::input_script::look_key_of(&self.view, Some(p.cam_choice));
+                        crate::input_script::swap_view_look(&mut self.look, &mut self.view_looks, &mut self.look_view, &key);
                         if let Some(cam) = self.camera.as_ref() {
                             p.seat = glam::Vec3::from_array(self.settings.seat);
                             // head tracking: the head's turn on top of the look, its movement
@@ -800,7 +806,12 @@ impl ApplicationHandler for App {
                         .or(self.camera.as_ref().map(|c| c.position))
                         .unwrap_or(DVec3::ZERO);
                     // (the riders leave a bus the driver has walked away from)
-                    h.free_roam = self.duty.is_none();
+                    if h.stop_targets.is_none() {
+                        h.stop_targets = self.schedule.as_ref().map(|s| s.stop_targets());
+                        if let Some(t) = &h.stop_targets {
+                            log::info!("people: {} bus stops with timetable targets", t.len());
+                        }
+                    }
                     h.driver_away = self.on_foot.as_ref().is_some_and(|f| {
                         let own = Some(crate::humans::BusId::Player);
                         f.seat.map(|s| s.0) != own && f.inside.map(|i| i.0) != own
@@ -1207,6 +1218,7 @@ impl ApplicationHandler for App {
                     if let Some(t) = self.traffic.as_mut() {
                         t.time_scale = speed;
                     }
+                    self.tick_weather(dt * speed as f32);
                 }
                 let daylight = omsi_sim::Daylight::compute(&self.clock, self.envir.as_ref());
                 if self.lamps_on != Some(daylight.lamps_on) {

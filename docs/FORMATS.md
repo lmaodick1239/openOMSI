@@ -270,10 +270,18 @@ its kerbs and camber while its arms come down onto the roads that run into them.
 under the plate is then pressed into the base mesh as well, which is what closes the seam
 along its edges.
 
-`[spline_terrain_align]` (no parameter) and `[spline_terrain_align_2] <m>` follow a
-`[spline]` in a tile file: the ground is pulled onto that spline, as the editor's "align
-terrain" does, and the original redoes it on every load (Berlin-Spandau: 33 and 203 of
-2486 splines). `[terrainhole] <mesh.o3d>` inside a `[mesh]` block of a model.cfg names a
+`[spline_terrain_align]` (no parameter) and `[spline_terrain_align_2] <n>` follow a
+`[spline]` in a tile file (Berlin-Spandau: 33 and 203 of 2486 splines). The editor's
+"align terrain" wrote the ground's heights into the `.terrain` file already; at load the
+flag (1, or `n`) only makes the spline cut its outline out of the ground (Omsi.exe: tile
+parser 0x794e1a -> spline +0x35 -> segment +0x205 -> Generate 0x5b1178 -> GenerateTerrain,
+"Terrain hole cutting: Spline"). The outline is the spline type's `[terrainholeprofile]`
+extruded along the spline: right edge, far end, left edge, near end; `n` 2 and 4 keep the
+far end at the spline's end, 3 and 4 the near end at its start, otherwise each point's
+third value moves it past the end. A `.sli` without `[terrainholeprofile]` gets one per
+string of joined `[profile]`s (0x5ab908): its left end and right end 3 cm in and 3 mm
+down, a bottom 10 cm under its lowest point reaching 0.5 m past both ends. An outline
+that crosses itself cuts nothing. `[terrainhole] <mesh.o3d>` inside a `[mesh]` block of a model.cfg names a
 cutter that takes the ground away under the object - 85 of the stock junction objects carry
 one, next to the model or in its `model` folder. Both matter: without them the terrain
 stands over the carriageway, which from the driver's seat looks like a missing road.
@@ -319,7 +327,9 @@ sits over it, so the shoreline is wherever the terrain rises through it. `.terra
 ## Splines (.sli) - unit `mc_splines`
 
 length texture scaleTexByLength patchwork_chain heightprofile profile profilepnt path path_2
-rail_enh third_rail halfcantwidth onlyeditor terrainholeprofile terrainholeprofilepnt.
+rail_enh third_rail halfcantwidth onlyeditor terrainholeprofile terrainholeprofilepnt
+(`[terrainholeprofile]` begins a profile, each `[terrainholeprofilepnt]` - x, height,
+end offset - goes to the last one begun).
 
 `[path]` (5 lines): kind (0 street, 1 sidewalk, 2 rail), lateral offset x (right positive),
 height z, width, direction (0 along the spline, 1 backwards, 2 both). The lane runs the
@@ -415,14 +425,24 @@ WH UK AI cars put their shadow there.
 its *alpha* is the slot's alpha, and a picture without an alpha channel is opaque as Direct3D
 samples it (the WH UK AI cars' paint layer uses a black 24-bit `transmap_null.tga`).
 
-`[texchanges] <file>` names a `chtex_*.cfg` **relative to the vehicle's own folder**
-(`texture\chtex_SD.cfg`, `..\Anzeigen\Rollband_SD79\chtex_rollband.cfg`), not to the
-model.cfg's. It holds `[newtexchangemaster]` blocks of two lines - the texture name as it
+`[texchanges] <file>` names a `chtex_*.cfg`, relative to the vehicle's root folder for
+vehicles and to the model-config folder for scenery. The examples are
+`texture\chtex_SD.cfg` and `..\Anzeigen\Rollband_SD79\chtex_rollband.cfg`. It holds
+`[newtexchangemaster]` blocks of two lines - the texture name as it
 appears in the o3d, and a script variable - each followed by `[entries] n` and n texture
 files that live next to that cfg. The variable's integer value picks the entry, 0 first
 (`rollband.osc` clamps `rlbnd_lnN` to 0…15 for sixteen entries and stores `trunc()+0.001`).
 The named texture usually does not exist on disk at all: the mesh carries it only as a key.
 The masters are model-wide even though `[texchanges]` is written inside a mesh block.
+
+Scenery `[CTC] <variable> <folder> <value>` groups read the folder's `.cti` items. Their
+`[CTCTexture] <name> <default-file>` entries link each item to a material texture. The
+script's integer variable selects an item by zero-based index; each `[CTC]` group has its own
+variable and can select independently. Scenery `[texchanges]` masters use the same indexed
+script-variable selection, with each entry replacing the master texture key. Both mechanisms
+are applied to scenery material slots at runtime, so they can drive adverts on shelter panels,
+building signs, and other props. An out-of-range or negative value leaves the model's own
+texture active.
 
 `[matl_freetex] <texture> <string variable>` is the same idea with a file name the script
 builds at run time: the SD200's destination roller sets `Rollband_Tex_V` from the map's

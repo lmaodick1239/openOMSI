@@ -307,9 +307,46 @@ struct MaterialParams {
 // The reflection mask of a [matl_envmap] material: the alpha of its [matl_envmap_mask]
 // texture when it has one, else the diffuse texture's alpha - which reads 1 for a texture
 // without an alpha channel (a 24-bit bitmap, DXT1, a JPEG), so its factor alone decides.
+fn has_env_mask() -> bool {
+    return (u32(material.params2.w + 0.5) & 1u) != 0u;
+}
+
+// [matl_transmap] was given (its file there or not: see MaterialExtra::transmap_declared)
+fn has_transmap_declared() -> bool {
+    return (u32(material.params2.w + 0.5) & 2u) != 0u;
+}
+
+// [matl_texadress_border]: where the diffuse texture's coordinates leave [0, 1] (a roller
+// blind's band scrolled away by [texcoordtransX/Y]) Direct3D reads the border colour, not
+// the texture's edge (the sampler only clamps). Its rgb comes packed in flags.z.
+fn diffuse_border(tex: vec4<f32>, uv: vec2<f32>) -> vec4<f32> {
+    let p = u32(material.flags.z + 0.5);
+    let border = vec4<f32>(
+        f32((p >> 16u) & 0xffu) / 255.0,
+        f32((p >> 8u) & 0xffu) / 255.0,
+        f32(p & 0xffu) / 255.0,
+        material.flags.w,
+    );
+    let outside = any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0));
+    return select(tex, border, material.flags.y > 0.5 && outside);
+}
+
 fn reflection_mask(uv: vec2<f32>, diffuse_a: f32) -> f32 {
     let mask = textureSample(t_envmask, s_diffuse, uv).a;
-    return select(diffuse_a, mask, material.params2.w > 0.5);
+    return select(diffuse_a, mask, has_env_mask());
+}
+
+// The D3DCOLOR Omsi.exe packs for its environment stage (0x7ff8ed): each channel the
+// [matl_envmap] factor x 255 x its light (at most 1), truncated, and OR-ed together shifted
+// into place without saturation - a factor over 1 spills into the neighbouring channel
+// exactly as there (a factor of 10 at full light reads almost white).
+fn omsi_texture_factor(factor: f32, light: vec3<f32>) -> vec3<f32> {
+    let m = min(max(light, vec3<f32>(0.0)), vec3<f32>(1.0)) * max(factor, 0.0) * 255.0;
+    let r = u32(m.r);
+    let g = u32(m.g);
+    let b = u32(m.b);
+    let packed = (0xffu << 24u) | (r << 16u) | (g << 8u) | b;
+    return vec3<f32>(f32((packed >> 16u) & 0xffu), f32((packed >> 8u) & 0xffu), f32(packed & 0xffu)) / 255.0;
 }
 
 // [matl_bumpmap]: Direct3D's bump-mapped environment stage moves the sphere-map lookup by
@@ -468,9 +505,10 @@ fn fs_shadow_test(in: VsOut) {
     // paint/gloss value rather than coverage (vehicle bodies use values such as 0.03). Only
     // alpha-test materials use diffuse alpha as a cutout; blended bodies are solid unless a
     // real transmap supplies coverage.
-    var a = select(textureSample(t_diffuse, s_diffuse, duv).a, 1.0, material.params.x > 1.5 && material.params.z < 0.5);
+    var a = select(diffuse_border(textureSample(t_diffuse, s_diffuse, duv), duv).a, 1.0, material.params.x > 1.5 && material.params.z < 0.5);
     if (material.params.z > 0.5) {
-        let tm = textureSample(t_trans, s_diffuse, in.uv);
+        // (the transmap stays where it is: [texcoordtransX/Y] only moves the diffuse stage)
+        let tm = textureSample(t_trans, s_diffuse, in.uv - in.params.zw);
         a = select(1.0, tm.a, material.params.w > 0.5);
     }
     if (a < 0.5) {
@@ -490,7 +528,7 @@ fn fs_transmap_depth(in: VsOut) {
     if (material.params.z < 0.5) {
         discard;
     }
-    let tm = textureSample(t_trans, s_diffuse, in.uv);
+    let tm = textureSample(t_trans, s_diffuse, in.uv - in.params.zw);
     let a = select(1.0, tm.a, material.params.w > 0.5) * in.params.x;
     // Only what the colour pass will cover completely may hide what lies behind it: a
     // texel that is merely more opaque than not (the dimmer and anti-aliased dots of a
@@ -710,7 +748,13 @@ fn point_lights(p: vec3<f32>, n: vec3<f32>, map_k: f32) -> vec3<f32> {
             let r0 = l.pos.w * 0.125;
             let att = min(1.0, (r0 * r0) / max(dist * dist, 0.01)) * clamp(1.0 - dist / l.pos.w, 0.0, 1.0) * 3.75;
             let ndl = max(dot(n, d / max(dist, 0.01)), 0.15);
-            let k = select(map_k, 1.0, l.dir.x > 0.5 && l.dir.w < -1.5);
+            var k = select(map_k, 1.0, l.dir.x > 0.5 && l.dir.w < -1.5);
+            if (l.dir.w >= -1.5) {
+                // a spot (a vehicle's [spotlight], as Direct3D lights with it): full inside
+                // the inner cone, fading to nothing at the outer one; nothing behind it
+                let c = dot(-d / max(dist, 0.01), l.dir.xyz);
+                k = smoothstep(l.dir.w, max(l.extra.x, l.dir.w + 1e-3), c);
+            }
             sum = sum + l.color.rgb * l.color.w * att * ndl * k;
         }
     }
@@ -960,7 +1004,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         // terrain: uv is tile space; the ground texture repeats extra.z times per tile
         duv = in.uv * material.extra.z;
     }
-    var tex = textureSample(t_diffuse, s_diffuse, duv);
+    var tex = diffuse_border(textureSample(t_diffuse, s_diffuse, duv), duv);
+    // The texture coordinates without the [texcoordtransX/Y] offset: in Omsi.exe's
+    // fixed-function pipeline the texture transform is the diffuse stage's alone, the
+    // transmap, night map and light map stay in place under a scrolling roller blind.
+    let buv = in.uv - in.params.zw;
     if (material.extra.x > 0.5 && material.extra.y > 0.0) {
         // the ground texture's detail texture, repeated finer than the texture itself and
         // modulated over it as the original's terrain pass does. The stock detail maps are
@@ -974,7 +1022,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         // is opaque, as D3D samples it: the WH UK AI cars' paint layer has a black 24-bit
         // `transmap_null.tga`, read as luminance the paint was invisible);
         // for terrain the map is the per-tile surface mask in tile space
-        let tm = textureSample(t_trans, s_diffuse, in.uv);
+        let tm = textureSample(t_trans, s_diffuse, buv);
         tex.a = select(1.0, tm.a, material.params.w > 0.5);
         if (material.extra.x > 0.5 && material.params.x > 1.5) {
             // A painted ground layer. The brush mask is coarse (0.6-3 m per texel) and
@@ -1032,7 +1080,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // it, the vanilla picture lights it from the tile light map alone)
     let lm_only = light_map_mapped(material.params) && camera.sky_color.w > 0.5;
     let map_lamps = select(1.0, 0.0, (material.params.y > 0.2 && material.params.y < 0.3) || lm_only);
-    var lit = albedo * material.color.rgb * (diffuse + point_lights(in.world, n, map_lamps));
+    let lamp_light = point_lights(in.world, n, map_lamps);
+    var lit = albedo * material.color.rgb * (diffuse + lamp_light);
     if (material.specular.w > 0.0 && material.params.y < 0.5) {
         // the D3D material's own highlight (specular colour and power of the o3d file or a
         // [matl_allcolor]) from the sun, added after the texture as D3D's specular is;
@@ -1058,7 +1107,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if (material.extra.w > 0.5) {
         // [matl_nightmap]: self-illumination that fades in with the night
         // terrain: the tile light map in tile space (north at the top row)
-        let nuv = select(duv, vec2<f32>(in.uv.x, 1.0 - in.uv.y), material.extra.x > 0.5);
+        let nuv = select(buv, vec2<f32>(in.uv.x, 1.0 - in.uv.y), material.extra.x > 0.5);
         let nm = textureSample(t_night, s_diffuse, nuv);
         // a [matl_item] night map is switched by its variable (warning lamps, displays):
         // it glows whenever that is on, by day as well; the others fade in with the night
@@ -1068,7 +1117,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if (material.params2.x > 0.5 && material.extra.x < 0.5) {
         // [matl_lightmap]: a light mask (interior lighting) multiplied with the diffuse
         // texture, scaled by a script variable
-        let lm = textureSample(t_light, s_diffuse, duv);
+        let lm = textureSample(t_light, s_diffuse, buv);
         lit = lit + tex.rgb * lm.rgb * clamp(in.params2.x, 0.0, 1.0);
     }
     // a pane's reflection, laid over what shows through it (see the end)
@@ -1092,7 +1141,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let glass = material.params.x > 1.5 && material.bump.z > 0.5 &&
             (material.params2.y > 0.0 || material.params.z > 0.5 || material.emissive.w > 0.5);
         let env = textureSampleBias(t_env, s_diffuse, env_uv, select(2.0, 0.0, glass));
-        let diffuse_a = textureSample(t_diffuse, s_diffuse, duv).a;
+        let diffuse_a = diffuse_border(textureSample(t_diffuse, s_diffuse, duv), duv).a;
         // strength: reflection mask x factor; the factor saturates at 1 like a D3D texture
         // factor (the SD202 body writes 10 for "full": its paint alpha of 0.03-0.08 is the
         // gloss, and the far LOD's own mask of 0.05-0.12 matches that, not ten times it),
@@ -1141,7 +1190,30 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             // enhanced.wgsl): the doors seen from the driver's seat were a grey veil
             pane_k = k * (1.0 - 0.85 * near_player_vehicle(in.world) * inside_vehicle(camera.cam_pos.xyz));
         } else {
-            lit = mix(lit, env.rgb * env_light, k);
+            // Omsi.exe's environment stage (0x7fd6c4 at 0x7ff626, fixed function): the sphere
+            // map's colour as it is, over what the stages before made of the lit texture -
+            // D3DTOP_LERP by the texture factor when the material has neither a
+            // [matl_transmap] nor a [matl_envmap_mask], D3DTOP_BLENDCURRENTALPHA when it
+            // has one. The factor is [matl_envmap]'s times the ambient light plus `g` (the
+            // light the vehicle stands in: the lamps of the tile's light map and the sky),
+            // each at most 1, packed into a D3DCOLOR without saturation (0x7ff8ed: a
+            // factor over 1 spills its bits into the next channel, as there). The alpha
+            // it blends by is the mask's, or the diffuse texture's times `g`
+            // (0x7feacc, 0x7ff092) - never the diffuse alpha of a material without one of
+            // them: taken as a reflection mask, a body whose texture carries an alpha
+            // channel for other purposes was mirrored (dark) where that alpha was high.
+            // `g` (0x861ca0, set per vehicle at 0x7d8735): the mean of the light the tile's
+            // light map throws on it plus the day's light A (weather +0xac = the mean of
+            // lightcolor A, 0x75333f - by it the stars fade), at most 1
+            let g = clamp(dot(lamp_light, vec3<f32>(1.0 / 3.0)) + dot(camera.sun_color.rgb, vec3<f32>(1.0 / 3.0)), 0.0, 1.0);
+            var kk = vec3<f32>(0.0);
+            if (has_transmap_declared() || has_env_mask()) {
+                let a = select(diffuse_a, textureSample(t_envmask, s_diffuse, duv).a, has_env_mask());
+                kk = vec3<f32>(a * g);
+            } else {
+                kk = omsi_texture_factor(material.params2.y, camera.ambient.rgb + vec3<f32>(g));
+            }
+            lit = mix(lit, env.rgb, kk);
         }
     }
     // wet road: a surface whose texture carries [moisture] darkens under rain and starts

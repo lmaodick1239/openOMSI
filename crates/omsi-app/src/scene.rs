@@ -52,6 +52,9 @@ pub struct ObjectType {
     pub lod0_min: f32,
     /// Number of `[CTC]` paint schemes the object offers.
     pub paint_scheme_count: usize,
+    /// Runtime scenery texture groups (`[CTC]` and `[texchanges]`), each selected by its own
+    /// script variable and supplying one or more material texture replacements per choice.
+    pub dynamic_textures: Vec<DynamicTextureGroup>,
     /// `[terrainhole]` meshes of the model: where they lie the ground is taken away.
     pub holes: Vec<MeshData>,
     /// `[crossing_heightdeformation]`: the mesh a crossing presses the terrain into, so
@@ -63,6 +66,14 @@ pub struct ObjectType {
     pub camera: std::sync::OnceLock<crate::camera_arm::BlockerShape>,
     /// The collision mesh as the vehicles meet it (built on first use).
     pub collision_shape: std::sync::OnceLock<Arc<omsi_sim::collision::MeshShape>>,
+}
+
+/// One scenery texture selector and its indexed replacement sets.
+#[derive(Clone)]
+pub struct DynamicTextureGroup {
+    pub variable: String,
+    /// Each replacement is (the material's default texture key, replacement file, folder).
+    pub choices: Vec<Vec<(String, String, PathBuf)>>,
 }
 
 impl World {
@@ -423,6 +434,9 @@ pub struct StagedTile {
     base_terrain: Terrain,
     /// `[spline_terrain_align]` splines: (index into `splines`, reach in metres).
     align: Vec<(usize, f32)>,
+    /// The outlines (world x, y) those splines cut out of the ground (see
+    /// `omsi_geometry::spline_hole_outlines`).
+    hole_outlines: Vec<Vec<DVec2>>,
     water: Option<[f32; 4]>,
     splines: Vec<StagedSpline>,
     /// The whole spline meshes, in the order of `splines`, until the tile is placed.
@@ -709,6 +723,9 @@ struct TypeGpu {
     meshes: Vec<(MeshId, Vec<MaterialId>)>,
     /// `[matl_change]` variants: (mesh index, slot, base, item, variable).
     variants: Vec<(usize, usize, MaterialId, MaterialId, String)>,
+    /// Dynamic texture overrides, made only for combinations that placed scripts use.
+    /// Rows align with LOD 0 meshes and material slots; each entry holds (base, item).
+    dynamic_texture_variants: HashMap<Vec<usize>, Vec<Vec<Option<(MaterialId, MaterialId)>>>>,
     /// Lower LODs: (min size, max size, meshes).
     lods: Vec<(f32, f32, Vec<(MeshId, Vec<MaterialId>)>)>,
     materials: Vec<MaterialId>,
@@ -986,6 +1003,109 @@ impl GpuCache {
 
     fn has_alpha(&self, path: &Path) -> bool {
         self.textures.get(path).map(|e| e.alpha).unwrap_or(false)
+    }
+
+    /// Lazily make material overrides for one placed scenery object's active `[CTC]` and
+    /// `[texchanges]` choices. The choices are cached by their complete per-group index
+    /// vector so placements sharing a type and choices also share textures and materials.
+    fn dynamic_texture_variant(
+        &mut self,
+        renderer: &Renderer,
+        scene: &mut Scene,
+        type_key: usize,
+        selection: &[usize],
+        root: &Path,
+        images: &HashMap<PathBuf, Arc<TextureData>>,
+    ) -> Option<Vec<Vec<Option<(MaterialId, MaterialId)>>>> {
+        if let Some(found) = self
+            .types
+            .get(&type_key)?
+            .dynamic_texture_variants
+            .get(selection)
+        {
+            return Some(found.clone());
+        }
+        let ot = self.types.get(&type_key)?.ot.clone();
+        let mut replacements: HashMap<String, (String, PathBuf)> = HashMap::new();
+        let mut affected_keys: HashMap<String, ()> = HashMap::new();
+        for (group, &index) in ot.dynamic_textures.iter().zip(selection) {
+            for choice in &group.choices {
+                for (default, _, _) in choice {
+                    affected_keys.insert(scenery_texture_key(default), ());
+                }
+            }
+            if let Some(choice) = group.choices.get(index) {
+                for (default, file, dir) in choice {
+                    replacements.insert(scenery_texture_key(default), (file.clone(), dir.clone()));
+                }
+            }
+        }
+
+        let (base_meshes, base_variants) = {
+            let ty = self.types.get(&type_key)?;
+            (ty.meshes.clone(), ty.variants.clone())
+        };
+        let mut rows: Vec<Vec<Option<(MaterialId, MaterialId)>>> = base_meshes
+            .iter()
+            .map(|(_, materials)| vec![None; materials.len()])
+            .collect();
+        for (mesh_index, (_, o3d_materials, _)) in ot.meshes.iter().enumerate() {
+            let Some((_, base_materials)) = base_meshes.get(mesh_index) else {
+                continue;
+            };
+            for (slot, source) in o3d_materials.iter().enumerate() {
+                let key = scenery_texture_key(&source.texture);
+                if !affected_keys.contains_key(&key) {
+                    continue;
+                }
+                let Some(&base) = base_materials.get(slot) else {
+                    continue;
+                };
+                let item = base_variants
+                    .iter()
+                    .find(|v| v.0 == mesh_index && v.1 == slot)
+                    .map(|v| v.3)
+                    .unwrap_or(base);
+                // Always retain a reset pair. An invalid index or a missing replacement
+                // texture must restore the model material after a previously valid choice.
+                rows[mesh_index][slot] = Some((base, item));
+                let Some((file, scheme_dir)) = replacements.get(&key) else {
+                    continue;
+                };
+                let mut dirs = texture_dirs(root, &ot.model_dir);
+                dirs.insert(0, scheme_dir.clone());
+                let Some((texture, path)) = self.texture(renderer, scene, file, &dirs, images)
+                else {
+                    continue;
+                };
+                let Some(base_ctc) = renderer.add_material_retextured(scene, base, Some(texture))
+                else {
+                    self.release_texture(renderer, scene, &path);
+                    continue;
+                };
+                let item_ctc = if item == base {
+                    base_ctc
+                } else if let Some(mat) =
+                    renderer.add_material_retextured(scene, item, Some(texture))
+                {
+                    mat
+                } else {
+                    base_ctc
+                };
+                let ty = self.types.get_mut(&type_key)?;
+                ty.materials.push(base_ctc);
+                if item_ctc != base_ctc {
+                    ty.materials.push(item_ctc);
+                }
+                ty.textures.push(path);
+                rows[mesh_index][slot] = Some((base_ctc, item_ctc));
+            }
+        }
+        self.types
+            .get_mut(&type_key)?
+            .dynamic_texture_variants
+            .insert(selection.to_vec(), rows.clone());
+        Some(rows)
     }
 
     /// A `[matl_bumpmap]` height map (`omsi_texture::gpu::prepare_bump`), shared like
@@ -1332,6 +1452,17 @@ fn tree_quad_mesh() -> MeshData {
 /// Where textures are looked up for a given content directory.
 /// How far a road surface may ride above the ground and still have the ground cut away
 /// under it. Anything higher is a bridge or an embankment, where cutting would open a hole.
+/// `OMSI_HEIGHTPROFILE_GROUND=1`: the wheels stand on the splines' `[heightprofile]`s as
+/// they did before, instead of on the drawn splines as Omsi.exe stands them (A/B runs).
+/// `OMSI_CHECK_ROADS`: road points under the ground, and where.
+static OVER_ROAD: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static OVER_ROAD_AT: std::sync::Mutex<Vec<(f64, f64, f32, f32)>> = std::sync::Mutex::new(Vec::new());
+
+fn heightprofile_ground() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| omsi_cfg::env::var_os("OMSI_HEIGHTPROFILE_GROUND").is_some())
+}
+
 fn surface_flush() -> f32 {
     omsi_cfg::env::var("OMSI_SURFACE_FLUSH")
         .ok()
@@ -2082,11 +2213,16 @@ impl World {
     /// step (1 m) over them - a station's floor under its roof, a car park's level under the
     /// deck above - else [`World::walk_height`]'s highest one. (Asked for the highest, the
     /// people of an indoor station stood on its roof.)
+    ///
+    /// Nothing under them within 3 m: the highest face, but only up to 1.5 m over them - a
+    /// pavement whose tile came after them. Omsi.exe keeps its people at the heights of
+    /// their paths and waiting places; the highest face, a bus shelter's roof 2.5 m up, put
+    /// the people waiting under it on top of it.
     pub fn walk_height_near(&self, x: f64, y: f64, near: f64) -> Option<f64> {
         let probe = drive_probe(&self.terrains, &self.surfaces, x, y, near + 1.0);
         match probe.below {
             Some(b) if near - b < 3.0 => Some(b),
-            _ => self.walk_height(x, y),
+            _ => self.walk_height(x, y).filter(|z| *z < near + 1.5),
         }
     }
 
@@ -2100,6 +2236,7 @@ impl World {
             .with_context(|| format!("loading {}", global_cfg.display()))?;
         let map_dir = global.dir().to_path_buf();
         omsi_map::configure_grid(&global);
+        crate::humans::LEFT_HAND.store(global.left_hand_traffic, std::sync::atomic::Ordering::Relaxed);
         log::info!(
             "tile size {:.1} m ({})",
             omsi_map::tile_size(),
@@ -2308,16 +2445,69 @@ impl World {
                 lower_lods.push((model.lods[l].min_size, list));
             }
             let lod0_min = model.lods.first().map(|l| l.min_size).unwrap_or(0.0);
-            // [CTC] paint schemes (.cti items): texture substitutions for the chosen scheme
-            let paint_schemes: Vec<omsi_sim::vehicle::PaintScheme> = model
+            // [CTC] paint schemes (.cti items): retain their texture keys and folders so
+            // the selected advertisements can be resolved when a placement chooses them.
+            let ctc_schemes: Vec<(String, Vec<omsi_sim::vehicle::PaintScheme>)> = model
                 .ctc
                 .iter()
-                .flat_map(|c| {
-                    omsi_sim::vehicle::load_paint_schemes(&omsi_cfg::resolve_path(
-                        &sco_dir, &c.path,
-                    ))
+                .map(|c| {
+                    (
+                        c.variable.clone(),
+                        omsi_sim::vehicle::load_paint_schemes(&omsi_cfg::resolve_path(
+                            &sco_dir, &c.path,
+                        )),
+                    )
                 })
                 .collect();
+            let paint_schemes: Vec<omsi_sim::vehicle::PaintScheme> = ctc_schemes
+                .iter()
+                .flat_map(|(_, schemes)| schemes.iter().cloned())
+                .collect();
+            let mut dynamic_textures: Vec<DynamicTextureGroup> = ctc_schemes
+                .iter()
+                .map(|(variable, schemes)| DynamicTextureGroup {
+                    variable: variable.clone(),
+                    choices: schemes
+                        .iter()
+                        .map(|scheme| {
+                            scheme
+                                .textures
+                                .iter()
+                                .filter_map(|(name, file)| {
+                                    model
+                                        .ctc_textures
+                                        .iter()
+                                        .find(|(ctc_name, _)| ctc_name.eq_ignore_ascii_case(name))
+                                        .map(|(_, default)| {
+                                            (default.clone(), file.clone(), scheme.dir.clone())
+                                        })
+                                })
+                                .collect()
+                        })
+                        .collect(),
+                })
+                .collect();
+            // Scenery models can also use the same script-variable texture selectors as
+            // vehicles. Each [newtexchangemaster] is an independent dynamic texture group.
+            dynamic_textures.extend(
+                omsi_model::load_texchanges(&model_dir, &model.texchanges)
+                    .into_iter()
+                    .map(|master| {
+                        let omsi_model::TexChangeMaster {
+                            texture,
+                            variable,
+                            entries,
+                            dir,
+                        } = master;
+                        DynamicTextureGroup {
+                            variable,
+                            choices: entries
+                                .into_iter()
+                                .map(|file| vec![(texture.clone(), file, dir.clone())])
+                                .collect(),
+                        }
+                    }),
+            );
             if let Some(ps) = scheme.and_then(|i| paint_schemes.get(i)) {
                 let mut map: HashMap<String, String> = HashMap::new();
                 for (ctc_name, file) in &ps.textures {
@@ -2438,6 +2628,7 @@ impl World {
                 lower_lods,
                 lod0_min,
                 paint_scheme_count,
+                dynamic_textures,
                 holes,
                 deform,
                 collision,
@@ -2989,6 +3180,7 @@ impl World {
             path: path.to_path_buf(),
             base_terrain,
             align: Vec::new(),
+            hole_outlines: Vec::new(),
             water: None,
             splines: Vec::new(),
             meshes: Mutex::new(Some(Vec::new())),
@@ -3037,10 +3229,22 @@ impl World {
                 }
                 continue;
             }
-            let hp = omsi_geometry::build_height_profile_mesh(&st.def, &curve, s.mirror, origin);
-            if !hp.is_empty() {
-                let b = mesh_bounds(&hp, &Mat4::IDENTITY, origin);
-                out.drive.push((hp, b));
+            // What the wheels stand on is the spline's drawn mesh, not its `[heightprofile]`:
+            // Omsi.exe's ground query (0x7a0814) casts a ray from 3 m over the point down
+            // into each spline segment of the tile (0x5b2d94 -> 0x7c40c8, D3DXIntersect on
+            // the segment's mesh +0xa0), and that mesh is the one TSplineSegment.Generate
+            // (0x5b1e14) builds from the `[profile]`/`[profilepnt]` lists (+0xc) for drawing.
+            // The height profile (+0x20) is read by the editor's "is the point on this
+            // spline" test alone (0x5b2b1c). Taken as the ground, a height profile wider than
+            // the drawn road reached under the bus from the road beside it, one lower than
+            // the asphalt sank the wheels into it, and a road without one had no ground at
+            // all. `OMSI_HEIGHTPROFILE_GROUND=1` goes back to the height profiles (A/B).
+            if heightprofile_ground() {
+                let hp = omsi_geometry::build_height_profile_mesh(&st.def, &curve, s.mirror, origin);
+                if !hp.is_empty() {
+                    let b = mesh_bounds(&hp, &Mat4::IDENTITY, origin);
+                    out.drive.push((hp, b));
+                }
             }
             let mesh = build_spline_mesh(&st.def, &curve, s.mirror, origin);
             if debug_splines {
@@ -3071,6 +3275,24 @@ impl World {
                 if aligned {
                     out.align
                         .push((out.splines.len(), s.terrain_align.unwrap_or(1.0) as f32));
+                    // Omsi.exe cuts the ground out under such a spline (the flag, or the
+                    // `_2` number, goes to the segment, 0x79b95e -> +0x205, and Generate
+                    // makes the outline from it; the terrain takes it with the `[terrainhole]`
+                    // meshes, "Terrain hole cutting: Spline")
+                    let mode = s.terrain_align.map(|v| v.clamp(0.0, 255.0) as u8).unwrap_or(1);
+                    if omsi_cfg::env::var_os("OMSI_LIST_ALIGNED").is_some() {
+                        let p = curve.point_at(curve.length * 0.5);
+                        log::info!("aligned spline {} {} mode {mode} mid ({:.1}, {:.1}, {:.1}) heading {:.0}", s.id, s.file, p.x, p.y, p.z, curve.heading_at(curve.length * 0.5));
+                    }
+                    for ring in omsi_geometry::spline_hole_outlines(&st.def, &curve, s.mirror, mode) {
+                        if omsi_geometry::outline_crosses_itself(&ring) {
+                            if debug_splines {
+                                log::info!("tile {tx},{ty} spline {} {}: its hole outline crosses itself, no hole (as in Omsi.exe)", s.id, s.file);
+                            }
+                            continue;
+                        }
+                        out.hole_outlines.push(ring);
+                    }
                 }
                 let bounds = mesh_bounds(&mesh, &Mat4::IDENTITY, origin);
                 // the rasters only need the shape; the whole mesh waits for the upload
@@ -3079,6 +3301,10 @@ impl World {
                     indices: mesh.indices.clone(),
                     ..Default::default()
                 };
+                // (every spline the game draws: Omsi.exe asks them all, roads or not)
+                if !heightprofile_ground() {
+                    out.drive.push((shape.clone(), bounds));
+                }
                 let drivable = st.def.paths.iter().any(|pd| pd.kind == 0 || pd.kind == 1);
                 let overlay = !st.def.profiles.is_empty()
                     && st.def.profiles.iter().all(|p| st.def.textures.get(p.texture).is_some_and(|t| t.alpha == 2));
@@ -3555,6 +3781,7 @@ impl World {
             let corners: Vec<glam::Vec3> = base.positions.clone();
             let mut meshes = Vec::with_capacity(ot.meshes.len());
             let mut moved = 0usize;
+            let mut biggest = 0f32;
             for (mesh, _, _) in &ot.meshes {
                 let mut m = mesh.clone();
                 for v in m.positions.iter_mut() {
@@ -3572,9 +3799,14 @@ impl World {
                     if d.abs() > 0.001 {
                         v.z += d;
                         moved += 1;
+                        biggest = biggest.max(d.abs());
                     }
                 }
                 meshes.push(m);
+            }
+            if biggest > 1.0 && omsi_cfg::env::var_os("OMSI_DEBUG_WARP").is_some() {
+                let (lo, hi) = base.positions.iter().fold((f32::MAX, f32::MIN), |a, p| (a.0.min(p.z), a.1.max(p.z)));
+                log::info!("crossing {} at ({:.1}, {:.1}, {:.1}) moved up to {biggest:.2} m (field {lo:.2}..{hi:.2}, {} points)", ot.sco.path.display(), pos.x, pos.y, pos.z, base.positions.len());
             }
             if moved > 0 {
                 log::debug!(
@@ -3621,7 +3853,15 @@ impl World {
         // tie should not depend on it either)
         let mut order: Vec<&Arc<StagedTile>> = src.values().collect();
         order.sort_by_key(|q| (q.tx, q.ty));
-        if omsi_cfg::env::var_os("OMSI_NO_TERRAIN_ALIGN").is_none() {
+        // (Omsi.exe does not move the ground at all when it loads a map: the editor's "align
+        // the terrain to the spline" wrote the heights into the tile's `.terrain`, and the
+        // flag left in the map only makes the spline cut its outline out of the ground -
+        // see `hole_outlines`. Pulled onto the road again here, every vertex under it took
+        // the height of whatever lay over it, and between those five-metre points the
+        // ground's triangles cut through the camber and past the kerbs: a piece of road
+        // gone under the grass, while beside it the ground stood lifted over the verge.
+        // `OMSI_TERRAIN_ALIGN=1` still does it.)
+        if omsi_cfg::env::var_os("OMSI_TERRAIN_ALIGN").is_some() {
             let mut ts = TileSurface::new(SURFACE_RASTER);
             let mut reach = 0.0f32;
             let mut any = false;
@@ -3940,6 +4180,20 @@ impl World {
                     o.id,
                     &o.rules,
                 );
+                // An object tilted on a slope (the map's pitch and bank) tilts its paths with
+                // it, as the whole object matrix places them in Omsi.exe: laid out by the
+                // heading alone, a junction on a hill had flat lanes through a sloping plate
+                // and its traffic drove into the road on one side and over it on the other.
+                let yaw = omsi_geometry::object_rotation([heading, 0.0, 0.0]);
+                let tilt = xf * yaw.inverse();
+                if !tilt.abs_diff_eq(Mat4::IDENTITY, 1e-5) {
+                    for l in own.iter_mut() {
+                        for q in l.points.iter_mut() {
+                            *q = pos + tilt.transform_point3((*q - pos).as_vec3()).as_dvec3();
+                        }
+                        l.refresh();
+                    }
+                }
                 // a junction plate raised by its height field carries its paths with it
                 if let (Some(field), true) = (ot.deform.as_ref(), res.warped.contains_key(&oi)) {
                     let inv = xf.inverse();
@@ -4351,6 +4605,11 @@ impl World {
                     else {
                         continue;
                     };
+                    if omsi_cfg::env::var_os("OMSI_NO_SPLINE_HOLES").is_none() {
+                        for ring in &q.hole_outlines {
+                            ts.add_outline(ring, tx, ty);
+                        }
+                    }
                     for (oi, (o, pose)) in q.objects.iter().zip(res.poses.iter()).enumerate() {
                         let Some(pose) = pose else { continue };
                         let ot = &o.ot;
@@ -4429,6 +4688,13 @@ impl World {
                             }
                             check.1 += 1;
                             let th = t.sample((i as f32 + 0.5) * cell, (j as f32 + 0.5) * cell);
+                            // the ground over a road: shows through it (Omsi.exe cuts nothing)
+                            if ts.road_covered(k) && th > ts.road_height(k) + 0.03 && th < ts.road_height(k) + 1.5 && !ts.cut_at((i as f32 + 0.5) * cell, (j as f32 + 0.5) * cell, th, surface_flush()) {
+                                OVER_ROAD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                if let Ok(mut w) = OVER_ROAD_AT.lock() {
+                                    w.push((x0 + ((i as f32 + 0.5) * cell) as f64, y0 + ((j as f32 + 0.5) * cell) as f64, th - ts.road_height(k), th));
+                                }
+                            }
                             let old_rule = th >= ts.low_height(k) - surface_flush();
                             let new_rule = ts.low_height(k) - surface_flush() <= th
                                 && th <= ts.height(k) + surface_flush();
@@ -4453,10 +4719,17 @@ impl World {
                     if debug {
                         log::info!("tile ({tx}, {ty}): terrain cut under flush surfaces");
                     }
+                    let rgba = ts.mask_image(&terrain_at, surface_flush());
+                    if let Some(dir) = omsi_cfg::env::var("OMSI_DUMP_CUT").ok() {
+                        let a: Vec<u8> = rgba.chunks_exact(4).map(|p| p[3]).collect();
+                        if let Some(img) = image::GrayImage::from_raw(ts.size as u32, ts.size as u32, a) {
+                            let _ = image::imageops::flip_vertical(&img).save(format!("{dir}/cut_{tx}_{ty}.png"));
+                        }
+                    }
                     Some(Image {
                         width: ts.size as u32,
                         height: ts.size as u32,
-                        rgba: ts.mask_image(&terrain_at, surface_flush()),
+                        rgba,
                         has_alpha: true,
                     })
                 } else {
@@ -4523,7 +4796,7 @@ impl World {
         let mut where_: Vec<(f64, f64, f32)> = Vec::new();
         let (mut tris, mut wheel_meshes) = (0usize, 0usize);
         for (p, (ts, cut, check, wheels)) in prepared.iter_mut().zip(results) {
-            p.cut = cut.map(|c| tile_texture(c, true));
+            p.cut = cut.map(|c| if omsi_cfg::env::var_os("OMSI_CUT_PLAIN").is_some() { omsi_texture::gpu::TextureData { gpu_mips: false, ..omsi_texture::gpu::TextureData::from_image(c) } } else { tile_texture(c, true) });
             tris += ts.drive.tris.len();
             wheel_meshes += wheels;
             // the wheel surfaces come and go with the tile (World::unload_tile)
@@ -4538,6 +4811,19 @@ impl World {
         if check_roads {
             where_.sort_by(|a, b| b.2.total_cmp(&a.2));
             log::info!("ground-cut check: {holes} of {cells} covered ground points would be cut away with nothing under them ({:.2} %)", holes as f32 / cells.max(1) as f32 * 100.0);
+            let over = OVER_ROAD.load(std::sync::atomic::Ordering::Relaxed);
+            log::info!("ground-over-road check: {over} of {cells} road points lie under the ground (3 cm to 1.5 m)");
+            if let Ok(mut w) = OVER_ROAD_AT.lock() {
+                w.sort_by(|a, b| b.2.total_cmp(&a.2));
+                let by = |lo: f32, hi: f32| w.iter().filter(|p| p.2 >= lo && p.2 < hi).count();
+                log::info!("   by depth: 3-10 cm {}, 10-30 cm {}, 30-60 cm {}, 60 cm-1.5 m {}", by(0.0, 0.1), by(0.1, 0.3), by(0.3, 0.6), by(0.6, 9.0));
+                for (x, y, d, z) in w.iter().filter(|p| p.2 > 0.08 && p.2 < 0.3).step_by(97).take(6) {
+                    log::info!("   (shallow) ground {d:.2} m over the road at ({x:.1}, {y:.1}, {z:.1})");
+                }
+                for (x, y, d, _) in w.iter().take(8) {
+                    log::info!("   ground {d:.2} m over the road at ({x:.1}, {y:.1})");
+                }
+            }
             for (x, y, d) in where_.iter().take(5) {
                 log::info!("   {d:.1} m of nothing under the ground at ({x:.0}, {y:.0})");
             }
@@ -4833,6 +5119,7 @@ impl World {
             ot: ot.clone(),
             meshes: Vec::new(),
             variants: Vec::new(),
+            dynamic_texture_variants: HashMap::new(),
             lods: Vec::new(),
             materials: Vec::new(),
             textures: Vec::new(),
@@ -4888,7 +5175,7 @@ impl World {
                     None if !is_null_texture(&m.texture) => {
                         let rel = night_texture_name(&m.texture);
                         let dirs_ref: Vec<&Path> = dirs.iter().map(|p| p.as_path()).collect();
-                        if omsi_texture::find_texture(&rel, &dirs_ref).is_some() {
+                        if night_texture_exists(&rel, &dirs_ref) {
                             t.auto_night = true;
                             tex_of(gpu, scene, &rel, &mut t)
                         } else {
@@ -4976,6 +5263,12 @@ impl World {
                     .any(|o| !matches!(o.tex_address, omsi_model::TexAddress::Wrap));
                 renderer.clamp_next.set(clamp);
                 renderer.light_map_next.set(ot.sco.light_map_mapping);
+                // OMSI_DEBUG_OBJMAT=<part of the object's file name>: how its slots are made
+                if let Ok(f) = omsi_cfg::env::var("OMSI_DEBUG_OBJMAT") {
+                    if ot.sco.path.to_string_lossy().to_ascii_lowercase().contains(&f.to_ascii_lowercase()) {
+                        log::info!("{} slot {slot} '{}': tex {} alpha {:?} color {:?} emissive {:?} night {} transmap {:?} envmap {:?} auto_night {}", ot.sco.path.display(), m.texture, tex.is_some(), alpha, color, emissive, night.is_some(), transmap.map(|t| t.1), envmap.map(|e| e.1), t.auto_night);
+                    }
+                }
                 let base = renderer.add_material_extra(
                     scene, tex, alpha, color, false, transmap, night, None, envmap, emissive, extra,
                 );
@@ -5700,6 +5993,24 @@ impl World {
                         Vec::new();
                     let mut script_texts: Vec<(TextureId, omsi_sim::texttex::TextTextureState)> =
                         Vec::new();
+                    // Run {init} once for this placement: its variable values choose CTC
+                    // schemes and its strings can name [matl_freetex] pictures.
+                    let needs_own_script = lamp.is_none()
+                        || ot.meshes.iter().any(|(_, _, overrides)| {
+                            overrides.iter().any(|o| !o.item && o.freetex.is_some())
+                        });
+                    let mut object_script = if needs_own_script {
+                        ot.program.as_ref().map(|program| {
+                            omsi_sim::scenery::SceneryInstance::new(
+                                program.clone(),
+                                &ot.mesh_defs(),
+                                self.script_clock(),
+                                &strings,
+                            )
+                        })
+                    } else {
+                        None
+                    };
                     // a crossing warped onto the ground has meshes of its own
                     let own_meshes: Option<Vec<(MeshId, Vec<MaterialId>)>> = warped.as_ref().map(|ms| {
                         ms.iter()
@@ -5764,8 +6075,6 @@ impl World {
                             ground_meshes.push((level, mi, ground_id));
                         }
                     }
-                    // (the script's string variables after its {init}, for [matl_freetex])
-                    let mut freetex_vars: Option<omsi_sim::scenery::SceneryInstance> = None;
                     for (mi, (mesh_id, mats)) in mesh_list.iter().enumerate() {
                         let inst = if surface || ot.mesh_shadow.get(mi).copied().unwrap_or(false) {
                             let i = instance!(renderer.add_surface_instance(
@@ -5795,10 +6104,7 @@ impl World {
                             for override_ in overrides.iter().filter(|o| !o.item && o.freetex.is_some()) {
                                 let Some(slot) = omsi_sim::vehicle::override_slot(o3d_mats, override_) else { continue };
                                 let Some((_, var)) = &override_.freetex else { continue };
-                                let Some(program) = ot.program.as_ref() else { continue };
-                                let started = freetex_vars.get_or_insert_with(|| {
-                                    omsi_sim::scenery::SceneryInstance::new(program.clone(), &ot.mesh_defs(), self.script_clock(), &strings)
-                                });
+                                let Some(started) = object_script.as_ref() else { continue };
                                 let name = started.str_var(var).trim().to_string();
                                 if name.is_empty() {
                                     continue;
@@ -6136,18 +6442,50 @@ impl World {
                             sound,
                             sounds: Default::default(),
                         });
-                    } else if let Some(program) = &ot.program {
-                        // scripted / animated object: its own script state
-                        let inst = omsi_sim::scenery::SceneryInstance::new(
-                            program.clone(),
-                            &ot.mesh_defs(),
-                            self.script_clock(),
-                            &strings,
-                        );
+                    } else if let Some(inst) = object_script.take() {
+                        let texture_selection = scenery_texture_selection(&ot, &inst);
+                        if !ot.dynamic_textures.is_empty() {
+                            if let Some(rows) = gpu.dynamic_texture_variant(
+                                renderer,
+                                scene,
+                                tkey,
+                                &texture_selection,
+                                &self.root,
+                                images,
+                            ) {
+                                for (mi, row) in rows.iter().enumerate() {
+                                    let Some(&mesh_inst) = all_instances.get(mi) else {
+                                        continue;
+                                    };
+                                    for (slot, pair) in row.iter().enumerate() {
+                                        let Some((base, item)) = pair else { continue };
+                                        let item_on = object_variants
+                                            .iter()
+                                            .find(|v| v.0 == mesh_inst && v.1 == slot)
+                                            .map(|v| {
+                                                v.4.trim()
+                                                    .parse::<f32>()
+                                                    .ok()
+                                                    .or_else(|| inst.var(&v.4))
+                                                    .unwrap_or(1.0)
+                                                    > 0.5
+                                            })
+                                            .unwrap_or(false);
+                                        renderer.set_material(
+                                            scene,
+                                            mesh_inst,
+                                            slot,
+                                            if item_on { *item } else { *base },
+                                        );
+                                    }
+                                }
+                            }
+                        }
                         if inst.is_dynamic()
                             || !object_variants.is_empty()
                             || ot.sco.sound.is_some()
                             || !script_texts.is_empty()
+                            || !ot.dynamic_textures.is_empty()
                         {
                             let arrivals = inst.wants_arrivals();
                             // Clone all_instances before moving it, for scenery registry later
@@ -6257,6 +6595,38 @@ impl World {
         self.departed_objects.lock().insert(key, (p.clone(), obst, boxes));
         self.refresh_tile_lists();
         Some(p)
+    }
+
+    /// The parking spaces whose cars have driven off (LAN host: the clients take the same
+    /// cars away).
+    pub fn departed_keys(&self) -> Vec<i64> {
+        let mut k: Vec<i64> = self.departed.lock().iter().copied().collect();
+        k.sort_unstable();
+        k
+    }
+
+    /// LAN client: the parked cars as the host has them - the spaces it lists empty, and
+    /// (when the list is `complete`) every other one taken again. A space on a tile not
+    /// loaded here yet is remembered: the tile comes up with it empty.
+    pub fn mirror_departed(&self, renderer: &Renderer, scene: &mut Scene, keys: &[i64], complete: bool) {
+        let before = self.departed.lock().len();
+        for &k in keys {
+            if !self.departed.lock().contains(&k) && self.depart_parked(renderer, scene, k).is_none() {
+                self.departed.lock().insert(k);
+            }
+        }
+        if complete {
+            let back: Vec<i64> = self.departed.lock().iter().copied().filter(|k| !keys.contains(k)).collect();
+            for k in back {
+                if !self.return_parked(renderer, scene, k) {
+                    self.departed.lock().remove(&k);
+                }
+            }
+        }
+        let after = self.departed.lock().len();
+        if after != before {
+            log::info!("LAN: parked cars as the host has them: {after} spaces empty (were {before})");
+        }
     }
 
     /// Parked cars standing where `b` is (the player's bus just put down at a depot's entry
@@ -7594,6 +7964,12 @@ impl World {
         let mut scripted = self.scripted.lock();
         let mut boards = self.timetable_boards.lock();
         let mut wanted: Vec<i64> = Vec::new();
+        let mut texture_updates: Vec<(
+            Arc<ObjectType>,
+            Vec<usize>,
+            Vec<usize>,
+            HashMap<(usize, usize), bool>,
+        )> = Vec::new();
         // First what every object's script is given (in order: the light programs and the
         // boards are read here), then the scripts themselves, side by side on the worker
         // threads (a city's hundreds of scripted objects took a core's worth of a frame),
@@ -7734,6 +8110,26 @@ impl World {
                 };
                 renderer.set_material(scene, *inst, *slot, if x > 0.5 { *item } else { *base });
             }
+            if !o.ty.dynamic_textures.is_empty() {
+                let selection = scenery_texture_selection(&o.ty, &o.inst);
+                let switches = o
+                    .variants
+                    .iter()
+                    .map(|(inst, slot, _, _, var)| {
+                        let value = if var.trim().eq_ignore_ascii_case("NightlightA") {
+                            nightlight as i32 as f32
+                        } else {
+                            var.trim()
+                                .parse::<f32>()
+                                .ok()
+                                .or_else(|| o.inst.var(var))
+                                .unwrap_or(1.0)
+                        };
+                        ((*inst, *slot), value > 0.5)
+                    })
+                    .collect();
+                texture_updates.push((o.ty.clone(), selection, o.instances.clone(), switches));
+            }
             for ((inst, xf), &visible) in o.instances.iter().zip(&o.inst.mesh_transforms).zip(&o.inst.mesh_visible) {
                 renderer.set_transform(scene, *inst, o.pos, o.xf * *xf);
                 let p = &mut scene.instances[*inst];
@@ -7748,6 +8144,39 @@ impl World {
         boards.wanted = wanted;
         drop(scripted);
         drop(boards);
+        // Scenery placement takes the GPU-cache lock before the script list. Apply dynamic
+        // texture changes after releasing the script-list lock to keep that lock order
+        // consistent.
+        for (ty, selection, instances, switches) in texture_updates {
+            let variant = {
+                let mut gpu = self.gpu.lock();
+                gpu.dynamic_texture_variant(
+                    renderer,
+                    scene,
+                    Arc::as_ptr(&ty) as usize,
+                    &selection,
+                    &self.root,
+                    &HashMap::new(),
+                )
+            };
+            if let Some(rows) = variant {
+                for (mi, row) in rows.iter().enumerate() {
+                    let Some(&mesh_inst) = instances.get(mi) else {
+                        continue;
+                    };
+                    for (slot, pair) in row.iter().enumerate() {
+                        let Some((base, item)) = pair else { continue };
+                        let item_on = switches.get(&(mesh_inst, slot)).copied().unwrap_or(false);
+                        renderer.set_material(
+                            scene,
+                            mesh_inst,
+                            slot,
+                            if item_on { *item } else { *base },
+                        );
+                    }
+                }
+            }
+        }
         // the lamps' own sounds (a level crossing's bell): their scripts run with the light
         // programs (`Traffic::sync`), what they fired is heard here
         for lamp in self.light_objects.lock().iter() {
@@ -7986,7 +8415,7 @@ fn sync_materials(
                     Some(p) => *p,
                     None => {
                         let dirs: Vec<&Path> = f.dirs.iter().map(|p| p.as_path()).collect();
-                        let tex = if name.is_empty() {
+                        let found = if name.is_empty() {
                             None
                         } else {
                             omsi_texture::find_texture(&name, &dirs).and_then(|path| {
@@ -8007,6 +8436,11 @@ fn sync_materials(
                                 Some(id)
                             })
                         };
+                        // An empty string or a file not found leaves the slot its own
+                        // texture from the mesh (with its addressing): a roller blind's idle
+                        // "next" band then stays out of sight in its transparent border
+                        // instead of covering the display as an untextured white plane.
+                        let tex = found.or(v.base_tex);
                         let p = v.spec.build(renderer, scene, tex);
                         f.cache.insert(key, p);
                         p
@@ -8275,6 +8709,33 @@ pub(crate) fn is_null_texture(name: &str) -> bool {
             .is_some_and(|s| s.eq_ignore_ascii_case("null"))
 }
 
+fn scenery_texture_key(name: &str) -> String {
+    name.trim().replace('\\', "/").to_ascii_lowercase()
+}
+
+fn scenery_texture_selection(
+    ot: &ObjectType,
+    inst: &omsi_sim::scenery::SceneryInstance,
+) -> Vec<usize> {
+    ot.dynamic_textures
+        .iter()
+        .map(|group| {
+            let Some(value) = inst.var(&group.variable) else {
+                return usize::MAX;
+            };
+            if !value.is_finite() || value < 0.0 {
+                return usize::MAX;
+            }
+            let index = value.trunc() as usize;
+            if index < group.choices.len() {
+                index
+            } else {
+                usize::MAX
+            }
+        })
+        .collect()
+}
+
 /// The Direct3D material of a slot as OMSI sets it: a `[matl_allcolor]` (diffuse rgba,
 /// ambient rgb, specular rgb, emissive rgb, power) replaces the o3d file's material. Returns (diffuse colour, emissive colour, specular colour and power).
 /// The diffuse colour modulates the texture; its alpha only counts where there is no
@@ -8334,7 +8795,12 @@ fn material_extra(
     MaterialExtra {
         env_mask,
         no_z_write: ov.iter().any(|o| o.no_z_write),
-        no_z_check: ov.iter().any(|o| o.no_z_check),
+        // `[matl_noZcheck]` leaves Omsi.exe's depth test on: its draw of the slot (0x7fd6c4)
+        // never reads the flag, which only adds a colourless stencil pass marking the panes
+        // for the raindrops (0x7c32c4 -> 0x7fc58c, ZENABLE 1, blend ZERO/ONE). Taken as "no
+        // depth test", the Sprinter's inner window glass (flagged so) was drawn over the
+        // body skin round every opening. OMSI_NOZCHECK_BIAS=1: the old reading.
+        no_z_check: ov.iter().any(|o| o.no_z_check) && omsi_cfg::env::var_os("OMSI_NOZCHECK_BIAS").is_some(),
         z_bias: ov.iter().map(|o| o.z_bias).find(|b| *b != 0).unwrap_or(0),
         specular,
         bump: bump.filter(|b| b.1.is_finite() && b.1 != 0.0),
@@ -8345,6 +8811,14 @@ fn material_extra(
         screen: false,
         no_map_lights: false,
         moisture: 0.0,
+        transmap_declared: ov.iter().any(|o| o.transmap.is_some()),
+        // (the last addressing command of the slot decides; the colour is given in bytes)
+        border: ov
+            .iter()
+            .rev()
+            .find(|o| o.tex_address != omsi_model::TexAddress::Wrap)
+            .filter(|o| o.tex_address == omsi_model::TexAddress::Border)
+            .map(|o| o.border_color.map(|c| (c / 255.0).clamp(0.0, 1.0))),
     }
 }
 
@@ -9784,6 +10258,48 @@ impl World {
                 inst
             });
         }
+        // Omsi.exe draws a model mesh after mesh and each material subset in its turn, with
+        // the subset's own blend and depth-write states (0x7c32c4 -> 0x7fd6c4), so a slot
+        // blended by `[matl_alpha] 2` that writes depth hides what the model lists after it.
+        // Where that happens - a blended slot writing depth before an opaque or cut-out one -
+        // the whole vehicle is drawn in that order (see `Instance::ordered`); drawn with its
+        // opaque parts first, a body blended by its alpha showed the interior through it.
+        let slots_in_order = |i: usize| -> Vec<(omsi_render::AlphaMode, bool)> {
+            let Some(inst) = scene.instances.get(i) else { return Vec::new() };
+            let Some(mesh) = scene.meshes.get(inst.mesh) else { return Vec::new() };
+            mesh.ranges
+                .iter()
+                .filter_map(|(_, _, slot)| inst.materials.get(*slot as usize))
+                .filter_map(|&m| scene.materials.get(m))
+                .map(|m| (m.alpha, !m.no_z_write && !m.no_z_check))
+                .collect()
+        };
+        let mut blended_first = false;
+        let mut ordered = false;
+        for &i in &instances {
+            if scene.instances.get(i).is_none_or(|x| x.blob) {
+                continue;
+            }
+            for (alpha, writes) in slots_in_order(i) {
+                match alpha {
+                    omsi_render::AlphaMode::Blend if writes => blended_first = true,
+                    omsi_render::AlphaMode::Blend => {}
+                    _ if blended_first => ordered = true,
+                    _ => {}
+                }
+            }
+        }
+        // (the Sprinter's, the Mercus's, the Urbino 15's saloon showed through half their
+        // panels drawn so while `[matl_noZcheck]` still took their inner glass out of the
+        // depth test; OMSI_NO_MODEL_ORDER=1 draws opaque parts first again)
+        if ordered && omsi_cfg::env::var_os("OMSI_NO_MODEL_ORDER").is_none() {
+            log::debug!("{}: drawn in model order (a blended slot writes depth before an opaque one)", vt.def.path.display());
+            for &i in &instances {
+                if scene.instances.get(i).is_some_and(|x| !x.blob) {
+                    renderer.set_ordered(scene, i, true);
+                }
+            }
+        }
         // the vehicle is drawn or left out as one object (see `set_object_culling`): its
         // sphere about the vehicle's origin, which every mesh instance shares
         let radius = set
@@ -10003,7 +10519,11 @@ impl World {
                         (hi - lo).max_element() > 0.5
                             && vt.mesh_boxes[..mesh_index].iter().any(|&(l2, h2)| (l2 - lo).abs().max_element() < 0.03 && (h2 - hi).abs().max_element() < 0.03)
                     });
-                    let repair_body_depth = !layer && is_vehicle_body_material(&def.file, &m.texture, tex.is_some(), transmap.is_some(), ov.iter().any(|o| o.no_z_write), body_hint);
+                    // (Retired: a body blended by `[matl_alpha] 2` is drawn as Omsi.exe draws
+                    // it, in model order with its depth written - see `Instance::ordered` -
+                    // instead of being guessed opaque, which drew overlay layers black, #127.
+                    // `OMSI_REPAIR_BODY_DEPTH=1` brings the old guess back for comparison.)
+                    let repair_body_depth = omsi_cfg::env::var_os("OMSI_REPAIR_BODY_DEPTH").is_some() && !layer && is_vehicle_body_material(&def.file, &m.texture, tex.is_some(), transmap.is_some(), ov.iter().any(|o| o.no_z_write), body_hint);
                     // (only a blended slot: an alpha-tested one - `[matl_alpha] 1`, the EN92's
                     // pictograms, a Sprinter's seat covers - is cut out as the model says, and
                     // made opaque its cut-out parts were grey boxes; and not a layer made of
@@ -10807,7 +11327,7 @@ mod material_tests {
             Some((3, 0.1)),
             [0.2, 0.2, 0.2, 10.0],
         );
-        assert!(e.no_z_write && e.no_z_check);
+        assert!(e.no_z_write && !e.no_z_check);
         assert_eq!(e.z_bias, 16);
         assert_eq!(e.env_mask, Some(7));
         assert_eq!(e.specular, [0.2, 0.2, 0.2, 10.0]);
@@ -10821,6 +11341,22 @@ mod material_tests {
             material_extra(&[], None, Some((3, 0.0)), [0.0; 4]).bump,
             None
         );
+        // [matl_texadress_border]: the colour in bytes, as 0..1
+        let roller = MaterialDef {
+            texture: "rlb_512.tga".into(),
+            tex_address: omsi_model::TexAddress::Border,
+            border_color: [255.0, 255.0, 255.0, 0.0],
+            ..Default::default()
+        };
+        assert_eq!(
+            material_extra(&[&roller], None, None, [0.0; 4]).border,
+            Some([1.0, 1.0, 1.0, 0.0])
+        );
+        let clamped = MaterialDef {
+            tex_address: omsi_model::TexAddress::Clamp,
+            ..roller.clone()
+        };
+        assert_eq!(material_extra(&[&roller, &clamped], None, None, [0.0; 4]).border, None);
     }
 }
 
@@ -10895,6 +11431,21 @@ fn field_height(m: &MeshData, x: f32, y: f32) -> Option<f32> {
 
 
 /// The name of a texture's night copy: the same file in a `night` folder beside it.
+/// Whether an object's texture has its night copy (see [`night_texture_name`]). A texture
+/// named by its full path - a parked car's paint, resolved in its scheme's folder - has it
+/// there or not at all: the texture lookup takes such a path for one of its author's
+/// machine and falls back to the bare file name, which found the day picture itself, and
+/// every parked car of a paint scheme was lit by its own paint at night, glowing in the
+/// dark street.
+fn night_texture_exists(rel: &str, dirs: &[&Path]) -> bool {
+    // (`night_texture_name` writes backslashes: "\\Users\\...", "C:\\...")
+    let norm = rel.trim().replace('\\', "/");
+    if norm.starts_with('/') || norm.as_bytes().get(1) == Some(&b':') {
+        return omsi_cfg::vfs::is_file(Path::new(&norm));
+    }
+    omsi_texture::find_texture(rel, dirs).is_some()
+}
+
 fn night_texture_name(texture: &str) -> String {
     let name = texture.trim().replace('/', "\\");
     match name.rsplit_once('\\') {

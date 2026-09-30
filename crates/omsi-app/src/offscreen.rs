@@ -149,6 +149,7 @@ pub(crate) fn run_offscreen(
             .global
             .passenger_density((parse_time(&args.time) / 3600.0) as f32);
         h.time_of_day = parse_time(&args.time);
+        h.stop_targets = schedule.as_ref().map(|s| s.stop_targets());
         h.populate(&world, &renderer, &mut scene, center);
         if let Some(p) = player.as_ref() {
             if args.riders > 0 {
@@ -283,7 +284,18 @@ pub(crate) fn run_offscreen(
                     probe.z0 = base + 0.3;
                     probe.z1 = base + 3.0;
                     let wall = collision.meshes.iter().find(|m| m.parts_near(&probe, None).next().is_some()).map(|m| m.id);
-                    let _ = writeln!(f, "{li},{s:.1},{:.2},{:.2},{:.3},{},{}", p.x, p.y, p.z, g.below.map(|z| format!("{z:.4}")).unwrap_or_default(), wall.map(|w| w.to_string()).unwrap_or_default());
+                    // and beside the lane, where a bus's wheels run (1.1 m) and a lane over
+                    // (2.5 m): a ground wider than the road shows there
+                    let (q, _) = l.at((s + 0.5).min(len));
+                    let dir = (q - p).truncate().normalize_or_zero();
+                    let side: Vec<String> = [-2.5, -1.1, 1.1, 2.5]
+                        .iter()
+                        .map(|&d| {
+                            let w = p.truncate() + glam::DVec2::new(dir.y, -dir.x) * d;
+                            crate::scene::drive_probe(&world.terrains, &world.surfaces, w.x, w.y, p.z + 0.5).below.map(|z| format!("{z:.4}")).unwrap_or_default()
+                        })
+                        .collect();
+                    let _ = writeln!(f, "{li},{s:.1},{:.2},{:.2},{:.3},{},{},{}", p.x, p.y, p.z, g.below.map(|z| format!("{z:.4}")).unwrap_or_default(), wall.map(|w| w.to_string()).unwrap_or_default(), side.join(","));
                 }
                 s += 1.0;
             }
@@ -1019,6 +1031,11 @@ pub(crate) fn run_offscreen(
             log::info!(
                 "traffic health: {stuck} stuck for over a minute, {overlapping} pairs overlapping"
             );
+            if omsi_cfg::env::var_os("OMSI_DEBUG_STUCK").is_some() {
+                for c in t.cars.iter().filter(|c| c.stopped > 30.0) {
+                    log::info!("  waiting {:.0} s: car {} ({}) lane {} at ({:.1}, {:.1}) lead {:?} why {:?} {:.1} junction {}", c.stopped, c.id, c.vehicle.ty.def.type_name, c.state.lane, c.vehicle.position.x, c.vehicle.position.y, c.lead_car, c.why.0, c.why.1, c.junction_why);
+                }
+            }
             for c in t.cars.iter().filter(|c| c.stopped > 60.0).take(4) {
                 log::info!(
                     "  stuck {:.0} s at ({:.0}, {:.0}) on lane {} of {} ({}): {}",

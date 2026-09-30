@@ -366,7 +366,8 @@ struct MaterialUniform {
     /// The PBR maps beside the diffuse texture (`Scene::pbr_maps`): x has a normal map,
     /// y an occlusion, z a roughness, w a metalness channel.
     pbr: [f32; 4],
-    /// x: a screen (`MaterialExtra::screen`); y, z, w unused.
+    /// x: a screen (`MaterialExtra::screen`); y: `[matl_texadress_border]`, z its colour's
+    /// rgb packed as r * 65536 + g * 256 + b (bytes), w its alpha.
     flags: [f32; 4],
 }
 
@@ -651,6 +652,9 @@ pub struct Material {
     pub transmap: Option<(TextureId, bool)>,
     /// Sampled clamped (`[matl_texadress_clamp]`).
     clamp: bool,
+    /// Keep the exact material parameters so a CTC texture swap can change only the diffuse
+    /// map without losing map lighting, moisture, screen, or other renderer flags.
+    uniform: MaterialUniform,
     buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
 }
@@ -709,6 +713,15 @@ pub struct MaterialExtra {
     /// 1 when the texture's `.cfg` sidecar carries `[moisture]`/`[puddles]`: the road of a
     /// junction or crossing object gets wet and collects puddles like a spline's.
     pub moisture: f32,
+    /// `[matl_transmap]` was given, whether or not its file is there: Omsi.exe raises the
+    /// material's transmap flag before it reads the name (0x7fbbf4), and with it the
+    /// `[matl_envmap]` reflection goes by the texture's alpha instead of the factor.
+    pub transmap_declared: bool,
+    /// `[matl_texadress_border]`: its colour (RGBA, 0..1). Where the (scrolled) texture
+    /// coordinates leave [0, 1] the diffuse texture reads this colour instead of its edge,
+    /// as Direct3D's border addressing does: a roller blind's band that has scrolled away
+    /// vanishes in a transparent border.
+    pub border: Option<[f32; 4]>,
 }
 
 /// The textures a material's bind group samples.
@@ -793,6 +806,13 @@ pub struct Instance {
     /// it. (Only the vehicle the camera is in was spared, by its box; every other bus showed
     /// its saloon under snow through the windows.)
     pub roof: Option<f32>,
+    /// Drawn with every slot in model order among the blended draws, as Omsi.exe draws a
+    /// model: mesh after mesh, each material subset with its own states and depth write
+    /// (0x7c32c4 -> 0x7fd6c4, DrawSubset), not its opaque parts first. Set on the models
+    /// where it matters: a blended slot that writes depth before an opaque one (a body with
+    /// `[matl_alpha] 2` listed before its interior hides the interior as in the original,
+    /// instead of showing it through the paint's alpha).
+    pub ordered: bool,
 }
 
 pub struct Scene {
@@ -1103,6 +1123,8 @@ pub struct Renderer {
     /// frame: all its meshes and LOD levels take the same one, so exactly one level of an
     /// object is drawn and it does not flip between levels with the view's jitter.
     object_sizes: std::cell::RefCell<HashMap<[u64; 4], f32>>,
+    /// Cleared and reused as the next main view's object-size history.
+    object_sizes_scratch: std::cell::RefCell<HashMap<[u64; 4], f32>>,
     /// The far shadow cascade as last drawn: its light matrix, frames since, the render
     /// origin and the sun it was drawn for.
     shadow_far_cache: std::cell::Cell<(Mat4, u32, DVec3, Vec3)>,
@@ -3438,6 +3460,7 @@ impl Renderer {
             flicker: std::cell::RefCell::new(HashMap::new()),
             cull_drawn: std::cell::RefCell::new(Vec::new()),
             object_sizes: std::cell::RefCell::new(HashMap::new()),
+            object_sizes_scratch: std::cell::RefCell::new(HashMap::new()),
             shadow_far_cache: std::cell::Cell::new((Mat4::IDENTITY, 0, DVec3::ZERO, Vec3::ZERO)),
             shadow_near_cache: std::cell::Cell::new((Mat4::IDENTITY, 0, DVec3::ZERO, Vec3::ZERO)),
             shadow_clear_pipeline,
@@ -4209,6 +4232,126 @@ impl Renderer {
         }
     }
 
+    /// Make a copy of a material with a different diffuse texture. Used by scenery CTC and
+    /// `[texchanges]` selectors: the slot's alpha, lighting, reflection, and depth settings
+    /// stay as they were, while the replacement texture may bring its own PBR maps.
+    pub fn add_material_retextured(
+        &self,
+        scene: &mut Scene,
+        base: MaterialId,
+        texture: Option<TextureId>,
+    ) -> Option<MaterialId> {
+        let (
+            alpha,
+            color,
+            unlit,
+            no_z_write,
+            no_z_check,
+            z_bias,
+            nightmap,
+            lightmap,
+            envmap,
+            env_mask,
+            bump,
+            emissive,
+            transmap,
+            clamp,
+            mut uniform,
+        ) = {
+            let src = scene.materials.get(base)?;
+            (
+                src.alpha,
+                src.color,
+                src.unlit,
+                src.no_z_write,
+                src.no_z_check,
+                src.z_bias,
+                src.nightmap,
+                src.lightmap,
+                src.envmap,
+                src.env_mask,
+                src.bump,
+                src.emissive,
+                src.transmap,
+                src.clamp,
+                src.uniform,
+            )
+        };
+        uniform.pbr = texture
+            .and_then(|id| scene.pbr_maps.get(&id))
+            .map(|maps| maps.flags)
+            .unwrap_or([0.0; 4]);
+        let slot = |t: Option<TextureId>| {
+            t.and_then(|t| scene.textures.get(t).map(|g| (t, g.gen)))
+                .unwrap_or((usize::MAX, 0))
+        };
+        let key = BindKey {
+            textures: [
+                slot(texture),
+                slot(transmap.map(|t| t.0)),
+                slot(nightmap),
+                slot(lightmap),
+                slot(envmap.map(|e| e.0)),
+                slot(env_mask),
+                slot(bump.map(|b| b.0)),
+            ],
+            clamp,
+            uniform: bytemuck::cast(uniform),
+        };
+        let (bind_group, buf) = match scene.bind_groups.get(&key) {
+            Some((bg, b)) => (bg.clone(), b.clone()),
+            None => {
+                let buf = buffer_init(
+                    &self.device,
+                    &self.queue,
+                    None,
+                    bytemuck::bytes_of(&uniform),
+                    wgpu::BufferUsages::UNIFORM,
+                );
+                let bind_group = self.material_bind_group(
+                    &scene.textures,
+                    MaterialMaps {
+                        texture,
+                        transmap,
+                        nightmap,
+                        lightmap,
+                        envmap,
+                        env_mask,
+                        bump,
+                        pbr: texture.and_then(|id| scene.pbr_maps.get(&id)).copied(),
+                    },
+                    clamp,
+                    &buf,
+                );
+                scene
+                    .bind_groups
+                    .insert(key, (bind_group.clone(), buf.clone()));
+                (bind_group, buf)
+            }
+        };
+        scene.materials.push(Material {
+            texture,
+            alpha,
+            color,
+            unlit,
+            no_z_write,
+            no_z_check,
+            z_bias,
+            nightmap,
+            lightmap,
+            envmap,
+            env_mask,
+            bump,
+            emissive,
+            transmap,
+            clamp,
+            uniform,
+            buf,
+            bind_group,
+        });
+        Some(scene.materials.len() - 1)
+    }
+
     /// Terrain material: uv is tile space, the ground texture repeats `repeats` times per
     /// tile, its detail texture `detail` times, and the optional mask (alpha 0 = cut) is
     /// sampled in tile space.
@@ -4393,7 +4536,9 @@ impl Renderer {
                 if lightmap.is_some() { 1.0 } else { 0.0 },
                 envmap.map(|e| e.1).unwrap_or(0.0),
                 moisture,
-                if env_mask.is_some() { 1.0 } else { 0.0 },
+                // bit 1: a [matl_envmap_mask]; bit 2: a [matl_transmap] (see the shaders)
+                (if env_mask.is_some() { 1.0 } else { 0.0 })
+                    + if extra.transmap_declared || transmap.is_some() { 2.0 } else { 0.0 },
             ],
             emissive: [emissive[0], emissive[1], emissive[2], if extra.rain_film { 2.0 } else if extra.glass { 1.0 } else if extra.display { -1.0 } else { 0.0 }],
             specular: extra.specular,
@@ -4404,7 +4549,15 @@ impl Renderer {
                 if extra.no_z_check { 1.0 } else { 0.0 },
             ],
             pbr: texture.and_then(|t| scene.pbr_maps.get(&t)).map(|m| m.flags).unwrap_or([0.0; 4]),
-            flags: [if extra.screen { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+            flags: {
+                let b = extra.border.unwrap_or([0.0; 4]).map(|c| (c.clamp(0.0, 1.0) * 255.0).round());
+                [
+                    if extra.screen { 1.0 } else { 0.0 },
+                    if extra.border.is_some() { 1.0 } else { 0.0 },
+                    b[0] * 65536.0 + b[1] * 256.0 + b[2],
+                    b[3] / 255.0,
+                ]
+            },
         };
         let slot = |t: Option<TextureId>| {
             t.and_then(|t| scene.textures.get(t).map(|g| (t, g.gen)))
@@ -4464,6 +4617,7 @@ impl Renderer {
             emissive,
             transmap,
             clamp,
+            uniform,
             buf,
             bind_group,
         });
@@ -4790,6 +4944,7 @@ impl Renderer {
             any_distance: false,
             mirror_only: false,
             omsi_caster: false,
+            ordered: false,
             casts_shadow: true,
             roof: None,
         });
@@ -4834,6 +4989,7 @@ impl Renderer {
             any_distance: false,
             mirror_only: false,
             omsi_caster: false,
+            ordered: false,
             casts_shadow: false,
             roof: None,
         });
@@ -4921,6 +5077,13 @@ impl Renderer {
     pub fn set_omsi_caster(&self, scene: &mut Scene, instance: usize, on: bool) {
         if let Some(i) = scene.instances.get_mut(instance) {
             i.omsi_caster = on;
+        }
+    }
+
+    /// Draw an instance with all its slots in model order (see [`Instance::ordered`]).
+    pub fn set_ordered(&self, scene: &mut Scene, instance: usize, on: bool) {
+        if let Some(i) = scene.instances.get_mut(instance) {
+            i.ordered = on;
         }
     }
 
@@ -5053,11 +5216,15 @@ impl Renderer {
     }
 
     /// A dynamic alpha value is never allowed to fade an opaque body panel; only
-    /// genuinely transparent materials (blend/test) may follow the script value.
+    /// blended materials follow the script value. An alpha-tested slot is cut out by its
+    /// texture or transmap alone: the Thüringer Wald buses put `[alphascale]
+    /// Envir_Brightness` on their transmapped body and roof (`[matl_alpha] 1`), which is 0
+    /// at night, and scaled by it the whole roof went at dusk - with alpha to coverage
+    /// under MSAA the colour pass drew none of its samples - while in OMSI it stays.
     pub fn clamp_slot_alpha(alpha: f32, material_alpha: AlphaMode) -> f32 {
         match material_alpha {
-            AlphaMode::Opaque => 1.0,
-            _ => alpha,
+            AlphaMode::Opaque | AlphaMode::Test => 1.0,
+            AlphaMode::Blend => alpha,
         }
     }
 
@@ -6949,10 +7116,20 @@ impl Renderer {
         // hand-over cost more than the work (5 ms a frame for 8 500 instances while the
         // traffic's scripts kept the workers busy).
         // (the main view's last picture, for the hysteresis)
-        let drawn_before = if with_overlays { std::mem::take(&mut *self.cull_drawn.borrow_mut()) } else { Vec::new() };
+        let mut drawn_before = if with_overlays {
+            std::mem::take(&mut *self.cull_drawn.borrow_mut())
+        } else {
+            Vec::new()
+        };
         let was_drawn = |i: usize| drawn_before.get(i / 64).is_some_and(|w| w & (1u64 << (i % 64)) != 0);
-        let sizes_before = if with_overlays { std::mem::take(&mut *self.object_sizes.borrow_mut()) } else { HashMap::new() };
-        let sizes_now: std::cell::RefCell<HashMap<[u64; 4], f32>> = Default::default();
+        let (mut sizes_before, mut sizes_now) = if with_overlays {
+            let sizes_before = std::mem::take(&mut *self.object_sizes.borrow_mut());
+            let mut sizes_now = std::mem::take(&mut *self.object_sizes_scratch.borrow_mut());
+            sizes_now.clear();
+            (sizes_before, sizes_now)
+        } else {
+            (HashMap::new(), HashMap::new())
+        };
         let visible: Vec<(usize, f32, bool)> = {
             (0..scene.instances.len())
                 .filter_map(|i| {
@@ -7024,7 +7201,7 @@ impl Renderer {
                                 _ => fresh,
                             };
                             if with_overlays {
-                                sizes_now.borrow_mut().insert(key, size);
+                                sizes_now.insert(key, size);
                             }
                             size
                         }
@@ -7059,14 +7236,17 @@ impl Renderer {
                 .collect()
         };
         if with_overlays {
-            *self.object_sizes.borrow_mut() = sizes_now.into_inner();
+            *self.object_sizes.borrow_mut() = sizes_now;
+            sizes_before.clear();
+            *self.object_sizes_scratch.borrow_mut() = sizes_before;
         }
         if with_overlays {
-            let mut bits = vec![0u64; scene.instances.len().div_ceil(64)];
+            drawn_before.resize(scene.instances.len().div_ceil(64), 0);
+            drawn_before.fill(0);
             for &(i, _, _) in &visible {
-                bits[i / 64] |= 1u64 << (i % 64);
+                drawn_before[i / 64] |= 1u64 << (i % 64);
             }
-            *self.cull_drawn.borrow_mut() = bits;
+            *self.cull_drawn.borrow_mut() = drawn_before;
         }
         // OMSI_DEBUG_FLICKER: a near instance in view in two frames running that is drawn in
         // one and not in the other - the objects blinking in and out as the view moves
@@ -7160,6 +7340,10 @@ impl Renderer {
             let mut blended: Vec<usize> = Vec::new();
             for &(i, _, _) in &visible {
                 let inst = &scene.instances[i];
+                if inst.ordered {
+                    blended.push(i);
+                    continue;
+                }
                 let mut has_blend = false;
                 let cull = culls_back_faces(scene, inst);
                 for (ri, (_, _, slot)) in scene.meshes[inst.mesh].ranges.iter().enumerate() {
@@ -7296,7 +7480,7 @@ impl Renderer {
                 for (ri, (_, _, slot)) in scene.meshes[inst.mesh].ranges.iter().enumerate() {
                     let mat_id = inst.materials.get(*slot as usize).copied().unwrap_or(0);
                     let mat = &scene.materials[mat_id];
-                    if (mat.alpha != AlphaMode::Blend && !mat.no_z_check)
+                    if (mat.alpha != AlphaMode::Blend && !mat.no_z_check && !inst.ordered)
                         || exclude_texture.is_some_and(|t| mat.uses_texture(t))
                     {
                         continue;
@@ -7319,7 +7503,10 @@ impl Renderer {
                     // the whole bus (the steering wheel in front of the counter, the body over
                     // the shadow), so it is drawn with the surfaces' depth bias instead: on
                     // top of its base, behind whatever really stands in front of it.
-                    let kind = if mat.no_z_write || mat.no_z_check {
+                    let kind = if mat.alpha != AlphaMode::Blend && !mat.no_z_check {
+                        // (a model drawn in order: its opaque and cut-out slots too)
+                        kind_of(mat.alpha)
+                    } else if mat.no_z_write || mat.no_z_check {
                         PIPE_BLEND_NO_WRITE
                     } else {
                         PIPE_BLEND
@@ -9289,6 +9476,7 @@ impl Renderer {
             emissive: [0.0; 3],
             transmap: None,
             clamp: false,
+            uniform: <MaterialUniform as bytemuck::Zeroable>::zeroed(),
             buf,
             bind_group,
         };
@@ -9708,7 +9896,8 @@ mod tests {
     fn opaque_materials_ignore_dynamic_alpha() {
         assert_eq!(Renderer::clamp_slot_alpha(0.0, AlphaMode::Opaque), 1.0);
         assert_eq!(Renderer::clamp_slot_alpha(0.35, AlphaMode::Opaque), 1.0);
-        assert_eq!(Renderer::clamp_slot_alpha(0.35, AlphaMode::Test), 0.35);
+        assert_eq!(Renderer::clamp_slot_alpha(0.0, AlphaMode::Test), 1.0);
+        assert_eq!(Renderer::clamp_slot_alpha(0.35, AlphaMode::Test), 1.0);
         assert_eq!(Renderer::clamp_slot_alpha(0.85, AlphaMode::Blend), 0.85);
     }
 }

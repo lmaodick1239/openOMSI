@@ -26,6 +26,9 @@ pub enum Msg {
     Installed(Result<core::install::Progress, String>),
     Join(serde_json::Value),
     Server { address: String, info: Result<omsi_net::ws::ServerInfo, String> },
+    /// A background job stopped on an error of its own (a panic): whatever it was loading
+    /// is not coming.
+    Crashed(String),
 }
 
 /// A server in the Multiplayer page's list (`~/.openomsi/servers.json`), as the player
@@ -50,6 +53,14 @@ fn host_status(code: &str) -> Result<omsi_net::ws::ServerInfo, String> {
         Some(url) => omsi_net::ws::query(&url, false),
         None => Err("the host did not answer".into()),
     }
+}
+
+/// The list as saved, with the official server first when it is not in it.
+fn with_official(mut list: Vec<ServerEntry>) -> Vec<ServerEntry> {
+    if !list.iter().any(|s| omsi_net::official::is_alias(&s.address)) {
+        list.insert(0, ServerEntry { name: omsi_net::official::NAME.into(), address: omsi_net::official::ALIAS.into() });
+    }
+    list
 }
 
 fn servers_path() -> std::path::PathBuf {
@@ -245,7 +256,7 @@ impl State {
             poll_t: 0.0,
             polling: false,
             second_armed: None,
-            servers: std::fs::read(servers_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default(),
+            servers: with_official(std::fs::read(servers_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()),
             server_info: Default::default(),
             server_asked: Default::default(),
             joined_server: None,
@@ -269,7 +280,17 @@ impl State {
     fn spawn(&self, f: impl FnOnce() -> Msg + Send + 'static) {
         let tx = self.tx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(f());
+            // (a job that panics - an odd file of some mod - sent nothing, and the page
+            // it was loading for said "loading" for ever: it says what went wrong instead)
+            let m = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|e| {
+                let why = e
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+                    .unwrap_or_else(|| "an unknown error".into());
+                Msg::Crashed(why)
+            });
+            let _ = tx.send(m);
         });
     }
 
@@ -388,7 +409,9 @@ impl State {
         }
         self.choice.map = info.map.clone();
         self.choice.lan_mode = "join".into();
-        self.choice.lan_addr = address.to_string();
+        // (a server added by its bare address is joined where it answered: its web gateway)
+        let bare = omsi_net::ws::ws_url(address).is_none() && !omsi_net::official::is_alias(address);
+        self.choice.lan_addr = if bare && !info.reached_at.is_empty() { info.reached_at.clone() } else { address.to_string() };
         self.joined_server = Some(address.to_string());
         self.join = (true, format!("the server {}", info.name));
         self.join_checked = address.to_string();
@@ -446,8 +469,17 @@ impl State {
             "join" => format!("join:{}", c.lan_addr.trim()),
             _ => "off".to_string(),
         };
+        // Joining: the host's map, as its status gives it (a code's host is asked when the
+        // code is typed). The game takes it from the host's welcome too, but only when that
+        // comes before the map is loaded: through a tunnel it came later, the game started
+        // on the map chosen here, and the players never met ("the host drives on X10 Berlin,
+        // you on Berlin-Spandau"). A map not installed here comes with the host's mods.
+        let host_map = (c.lan_mode == "join")
+            .then(|| self.joined_server.clone().unwrap_or_else(|| c.lan_addr.clone()))
+            .and_then(|k| self.server_info.get(&k).and_then(|x| x.1.as_ref().ok()).map(|i| i.map.trim().replace('\\', "/")))
+            .filter(|m| m.to_ascii_lowercase().contains("maps/"));
         core::Duty {
-            map: c.map.clone(),
+            map: host_map.unwrap_or_else(|| c.map.clone()),
             bus: c.bus.clone(),
             paint: Some(c.paint.clone()).filter(|p| !p.is_empty()),
             hof: Some(c.hof.clone()).filter(|p| !p.is_empty()),
@@ -546,7 +578,30 @@ impl State {
 
     fn handle(&mut self, m: Msg) {
         match m {
+            Msg::Crashed(why) => {
+                log::error!("launcher: a background job stopped: {why}");
+                self.loading_content = false;
+                self.loading_lines = false;
+                self.set_status(format!("Reading the content stopped on an error: {why}"), true);
+            }
             Msg::Server { address, info } => {
+                // the host of the code typed in: its map is the one the duty is chosen on
+                // (installed here: the line, tour and entry point of another map go)
+                if self.choice.lan_mode == "join" && self.joined_server.is_none() && address == self.choice.lan_addr {
+                    if let Ok(i) = &info {
+                        let theirs = i.map.trim().replace('\\', "/");
+                        if let Some((file, name)) = self.maps.iter().find(|m| m.file.eq_ignore_ascii_case(&theirs)).map(|m| (m.file.clone(), m.name.clone())) {
+                            if !self.choice.map.eq_ignore_ascii_case(&file) {
+                                self.choice.map = file;
+                                self.choice.line = None;
+                                self.choice.tour = None;
+                                self.choice.entry = 0;
+                                self.touched();
+                                self.set_status(format!("The host drives on {name}: that map is chosen"), false);
+                            }
+                        }
+                    }
+                }
                 self.server_info.insert(address, (Instant::now(), info));
             }
             Msg::Content(Ok((maps, vehicles, weathers))) => {
