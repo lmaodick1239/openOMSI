@@ -241,7 +241,7 @@ fn test_inspector_main_view_enrichment() {
         ],
     };
 
-    let view = InspectorMainView::from(&selection).with_snapshot(&snapshot);
+    let view = InspectorMainView::from(&selection).with_snapshot(&snapshot).unwrap();
 
     assert_eq!(view.position, Some([100.0, 50.0, 200.0]));
     assert_eq!(view.model_path, Some("vehicles/bus.cfg".to_string()));

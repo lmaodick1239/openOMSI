@@ -6,6 +6,72 @@
 use serde::{Deserialize, Serialize};
 use crate::inspector::core::*;
 
+/// Subsystem adapter trait for building view models from runtime state.
+///
+/// Each inspector subsystem (material, render, human, etc.) implements this
+/// trait to snapshot its current state into an owned, serializable view model.
+pub trait SubsystemAdapter {
+    /// The view model type this adapter produces.
+    type ViewModel;
+    
+    /// Snapshot the current subsystem state for the given selection target.
+    fn snapshot(&self, target: &SelectionTarget) -> Option<Self::ViewModel>;
+}
+
+/// Material subsystem adapter interface.
+pub trait MaterialAdapter: SubsystemAdapter<ViewModel = MaterialView> {
+    /// Check if sandbox mode is active for the target.
+    fn is_sandbox_active(&self, target: &SelectionTarget) -> bool;
+    
+    /// Get current mipmap level for the target material.
+    fn get_mipmap_level(&self, target: &SelectionTarget) -> Option<u8>;
+}
+
+/// Render subsystem adapter interface.
+pub trait RenderAdapter: SubsystemAdapter<ViewModel = RenderView> {
+    /// Get active isolation mode.
+    fn get_isolation_mode(&self) -> Option<String>;
+    
+    /// Check if wireframe mode is enabled.
+    fn is_wireframe_enabled(&self) -> bool;
+}
+
+/// Human subsystem adapter interface.
+pub trait HumanAdapter: SubsystemAdapter<ViewModel = HumanView> {
+    /// Get current playback control state.
+    fn get_playback_state(&self, target: &SelectionTarget) -> Option<String>;
+    
+    /// Get animation phase for the target human.
+    fn get_animation_phase(&self, target: &SelectionTarget) -> Option<f32>;
+}
+
+/// Telemetry subsystem adapter interface.
+pub trait TelemetryAdapter: SubsystemAdapter<ViewModel = TelemetryView> {
+    /// Get current frame time in milliseconds.
+    fn get_frame_time_ms(&self) -> f32;
+    
+    /// Get inspector query time in milliseconds.
+    fn get_query_time_ms(&self) -> f32;
+}
+
+/// Editor subsystem adapter interface.
+pub trait EditorAdapter: SubsystemAdapter<ViewModel = EditorView> {
+    /// Check if a transform sandbox is active for the target.
+    fn is_sandbox_active(&self, target: &SelectionTarget) -> bool;
+    
+    /// Get the active sandbox target, if any.
+    fn get_sandbox_target(&self) -> Option<SelectionTarget>;
+}
+
+/// Export subsystem adapter interface.
+pub trait ExportAdapter: SubsystemAdapter<ViewModel = ExportView> {
+    /// Get current export status.
+    fn get_export_status(&self) -> ExportStatus;
+    
+    /// Get export destination path, if an export is in progress.
+    fn get_export_destination(&self) -> Option<String>;
+}
+
 /// Material panel view model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MaterialView {
@@ -258,13 +324,79 @@ impl From<&InspectorSelection> for InspectorMainView {
 }
 
 impl InspectorMainView {
-    /// Enrich with snapshot data.
-    pub fn with_snapshot(mut self, snapshot: &InspectorSnapshot) -> Self {
+    /// Enrich with snapshot data. Validates that the snapshot target matches the view's selection.
+    pub fn with_snapshot(mut self, snapshot: &InspectorSnapshot) -> Result<Self, String> {
+        // Validate snapshot matches the view's current selection
+        if self.selection_status == "No selection" {
+            return Err("Cannot enrich view with no selection".to_string());
+        }
+        
+        if self.selection_status.starts_with("Invalidated") {
+            return Err("Cannot enrich invalidated selection".to_string());
+        }
+
+        // Additional validation: check that entity types match
+        let snapshot_type = match &snapshot.target {
+            SelectionTarget::Vehicle { .. } => "Vehicle",
+            SelectionTarget::Scenery { .. } => "Scenery",
+            SelectionTarget::Human { .. } => "Human",
+        };
+        
+        if let Some(ref view_type) = self.entity_type {
+            if view_type != snapshot_type {
+                return Err(format!(
+                    "Snapshot type mismatch: view has {}, snapshot has {}",
+                    view_type, snapshot_type
+                ));
+            }
+        }
+
         self.position = snapshot.position;
         self.rotation = snapshot.rotation;
         self.model_path = snapshot.model_path.clone();
         self.mesh_name = snapshot.mesh_name.clone();
         self.metadata = snapshot.metadata.clone();
-        self
+        Ok(self)
+    }
+}
+
+impl PartialEq for MaterialView {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.shader_variant == other.shader_variant
+            && self.alpha_mode == other.alpha_mode
+            && self.blend_mode == other.blend_mode
+            && self.base_color == other.base_color
+            && (self.metallic - other.metallic).abs() < 1e-6
+            && (self.roughness - other.roughness).abs() < 1e-6
+            && self.base_texture == other.base_texture
+            && self.mipmap_level == other.mipmap_level
+            && self.sandbox_active == other.sandbox_active
+    }
+}
+
+impl PartialEq for RenderView {
+    fn eq(&self, other: &Self) -> bool {
+        (self.total_frame_time_ms - other.total_frame_time_ms).abs() < 1e-6
+            && self.total_draw_calls == other.total_draw_calls
+            && self.total_triangles == other.total_triangles
+            && self.isolation_mode == other.isolation_mode
+            && self.wireframe_enabled == other.wireframe_enabled
+            && self.collision_hulls_enabled == other.collision_hulls_enabled
+            && self.show_normals == other.show_normals
+            && self.show_uv_seams == other.show_uv_seams
+    }
+}
+
+impl PartialEq for HumanView {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.generation == other.generation
+            && self.is_driver == other.is_driver
+            && (self.velocity - other.velocity).abs() < 1e-6
+            && self.current_animation == other.current_animation
+            && (self.animation_phase - other.animation_phase).abs() < 1e-6
+            && self.bone_count == other.bone_count
+            && self.playback == other.playback
     }
 }

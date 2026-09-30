@@ -46,14 +46,14 @@ pub enum ViewToggle {
 /// Material-specific commands.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MaterialCommand {
-    /// Set mipmap level.
-    SetMipmapLevel(u8),
-    /// Toggle sandbox mode.
-    ToggleSandbox,
-    /// Set PBR parameter override.
-    SetPBROverride { metallic: f32, roughness: f32 },
-    /// Clear PBR overrides.
-    ClearOverrides,
+    /// Set mipmap level for a specific target.
+    SetMipmapLevel { target: SelectionTarget, level: u8 },
+    /// Toggle sandbox mode for a specific target.
+    ToggleSandbox { target: SelectionTarget },
+    /// Set PBR parameter override for a specific target.
+    SetPBROverride { target: SelectionTarget, metallic: f32, roughness: f32 },
+    /// Clear PBR overrides for a specific target.
+    ClearOverrides { target: SelectionTarget },
 }
 
 /// Render-specific commands.
@@ -78,10 +78,10 @@ pub enum RenderCommand {
 /// Human-specific commands.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HumanCommand {
-    /// Set playback control mode.
-    SetPlayback(PlaybackMode),
-    /// Toggle bone tree node collapsed state.
-    ToggleBone(String),
+    /// Set playback control mode for a specific human.
+    SetPlayback { target: SelectionTarget, mode: PlaybackMode },
+    /// Toggle bone tree node collapsed state for a specific human.
+    ToggleBone { target: SelectionTarget, bone_name: String },
 }
 
 /// Playback control mode.
@@ -96,22 +96,22 @@ pub enum PlaybackMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EditorCommand {
     /// Start transform sandbox for entity.
-    StartSandbox(String),
-    /// Update sandbox transform.
-    UpdateTransform { position: [f32; 3], rotation: [f32; 3] },
-    /// Apply sandbox changes.
-    ApplySandbox,
-    /// Revert sandbox changes.
-    RevertSandbox,
-    /// Close sandbox.
-    CloseSandbox,
+    StartSandbox { target: SelectionTarget },
+    /// Update sandbox transform for the active sandbox target.
+    UpdateTransform { target: SelectionTarget, position: [f32; 3], rotation: [f32; 3] },
+    /// Apply sandbox changes for the active sandbox target.
+    ApplySandbox { target: SelectionTarget },
+    /// Revert sandbox changes for the active sandbox target.
+    RevertSandbox { target: SelectionTarget },
+    /// Close sandbox for the active sandbox target.
+    CloseSandbox { target: SelectionTarget },
 }
 
 /// Export-specific commands.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ExportCommand {
     /// Export selected entity to glTF.
-    ExportSelection { destination: String },
+    ExportSelection { target: SelectionTarget, destination: String },
     /// Cancel ongoing export.
     CancelExport,
 }
@@ -195,9 +195,9 @@ pub fn validate_command(
         }
         InspectorCommand::Material(cmd) => validate_material_command(cmd, selection),
         InspectorCommand::Render(_) => Ok(()), // Render commands are global
-        InspectorCommand::Human(_) => validate_human_command(selection),
+        InspectorCommand::Human(cmd) => validate_human_command(cmd, selection),
         InspectorCommand::Editor(cmd) => validate_editor_command(cmd, selection),
-        InspectorCommand::Export(_) => validate_export_command(selection),
+        InspectorCommand::Export(cmd) => validate_export_command(cmd, selection),
         InspectorCommand::Telemetry(_) => Ok(()), // Telemetry commands are global
     }
 }
@@ -206,91 +206,120 @@ fn validate_material_command(
     cmd: &MaterialCommand,
     selection: &InspectorSelection,
 ) -> CommandResult {
-    if !selection.is_active() {
-        return Err(CommandError::StaleSelection(
-            "No active selection for material command".to_string(),
-        ));
-    }
-
-    match cmd {
-        MaterialCommand::SetMipmapLevel(level) => {
+    let cmd_target = match cmd {
+        MaterialCommand::SetMipmapLevel { target, level } => {
             if *level > 15 {
-                Err(CommandError::InvalidParameter(format!(
+                return Err(CommandError::InvalidParameter(format!(
                     "Mipmap level {} exceeds maximum (15)",
                     level
-                )))
-            } else {
-                Ok(())
+                )));
             }
+            target
         }
-        MaterialCommand::SetPBROverride { metallic, roughness } => {
+        MaterialCommand::ToggleSandbox { target } => target,
+        MaterialCommand::SetPBROverride { target, metallic, roughness } => {
             if !(*metallic >= 0.0 && *metallic <= 1.0) {
-                Err(CommandError::InvalidParameter(format!(
+                return Err(CommandError::InvalidParameter(format!(
                     "Metallic {} out of range [0.0, 1.0]",
                     metallic
-                )))
-            } else if !(*roughness >= 0.0 && *roughness <= 1.0) {
-                Err(CommandError::InvalidParameter(format!(
+                )));
+            }
+            if !(*roughness >= 0.0 && *roughness <= 1.0) {
+                return Err(CommandError::InvalidParameter(format!(
                     "Roughness {} out of range [0.0, 1.0]",
                     roughness
-                )))
-            } else {
-                Ok(())
+                )));
             }
+            target
         }
-        _ => Ok(()),
-    }
+        MaterialCommand::ClearOverrides { target } => target,
+    };
+
+    validate_target_matches_selection(cmd_target, selection)
 }
 
-fn validate_human_command(selection: &InspectorSelection) -> CommandResult {
-    if !selection.is_active() {
-        return Err(CommandError::StaleSelection(
-            "No active selection for human command".to_string(),
+fn validate_human_command(cmd: &HumanCommand, selection: &InspectorSelection) -> CommandResult {
+    let cmd_target = match cmd {
+        HumanCommand::SetPlayback { target, .. } => target,
+        HumanCommand::ToggleBone { target, .. } => target,
+    };
+
+    // Validate type match
+    if !matches!(cmd_target, SelectionTarget::Human { .. }) {
+        return Err(CommandError::NotSupported(
+            "Human commands require human selection".to_string(),
         ));
     }
 
-    match &selection.status {
-        SelectionStatus::Selected(SelectionTarget::Human { .. }) => Ok(()),
-        SelectionStatus::Selected(_) => Err(CommandError::NotSupported(
-            "Human commands require human selection".to_string(),
-        )),
-        _ => Err(CommandError::StaleSelection(
-            "No active selection".to_string(),
-        )),
-    }
+    validate_target_matches_selection(cmd_target, selection)
 }
 
 fn validate_editor_command(
     cmd: &EditorCommand,
     selection: &InspectorSelection,
 ) -> CommandResult {
+    let cmd_target = match cmd {
+        EditorCommand::StartSandbox { target } => target,
+        EditorCommand::UpdateTransform { target, .. } => target,
+        EditorCommand::ApplySandbox { target } => target,
+        EditorCommand::RevertSandbox { target } => target,
+        EditorCommand::CloseSandbox { target } => target,
+    };
+
+    validate_target_matches_selection(cmd_target, selection)
+}
+
+fn validate_export_command(cmd: &ExportCommand, selection: &InspectorSelection) -> CommandResult {
     match cmd {
-        EditorCommand::StartSandbox(_) => {
-            if !selection.is_active() {
+        ExportCommand::ExportSelection { target, .. } => {
+            validate_target_matches_selection(target, selection)
+        }
+        ExportCommand::CancelExport => Ok(()),
+    }
+}
+
+/// Validate that a command target matches the current selection.
+/// Checks both type and generation counters for stable identity.
+fn validate_target_matches_selection(
+    cmd_target: &SelectionTarget,
+    selection: &InspectorSelection,
+) -> CommandResult {
+    match &selection.status {
+        SelectionStatus::None => Err(CommandError::StaleSelection(
+            "No active selection".to_string(),
+        )),
+        SelectionStatus::Invalidated { reason } => Err(CommandError::StaleSelection(format!(
+            "Selection invalidated: {}",
+            reason
+        ))),
+        SelectionStatus::Selected(current_target) => {
+            if !targets_match(cmd_target, current_target) {
                 Err(CommandError::StaleSelection(
-                    "No active selection for editor sandbox".to_string(),
+                    "Command target does not match current selection".to_string(),
                 ))
             } else {
                 Ok(())
             }
         }
-        EditorCommand::UpdateTransform { .. }
-        | EditorCommand::ApplySandbox
-        | EditorCommand::RevertSandbox
-        | EditorCommand::CloseSandbox => {
-            // These require an active sandbox, validated at execution time
-            Ok(())
-        }
     }
 }
 
-fn validate_export_command(selection: &InspectorSelection) -> CommandResult {
-    if !selection.is_active() {
-        Err(CommandError::StaleSelection(
-            "No active selection to export".to_string(),
-        ))
-    } else {
-        Ok(())
+/// Check if two selection targets match (same entity with same generation).
+fn targets_match(a: &SelectionTarget, b: &SelectionTarget) -> bool {
+    match (a, b) {
+        (
+            SelectionTarget::Vehicle { key: k1, mesh: m1 },
+            SelectionTarget::Vehicle { key: k2, mesh: m2 },
+        ) => k1 == k2 && m1 == m2,
+        (
+            SelectionTarget::Scenery { key: k1, mesh: m1 },
+            SelectionTarget::Scenery { key: k2, mesh: m2 },
+        ) => k1 == k2 && m1 == m2,
+        (
+            SelectionTarget::Human { key: k1, mesh_id: m1 },
+            SelectionTarget::Human { key: k2, mesh_id: m2 },
+        ) => k1 == k2 && m1 == m2,
+        _ => false,
     }
 }
 
