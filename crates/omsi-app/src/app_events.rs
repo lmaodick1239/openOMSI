@@ -34,7 +34,26 @@ impl ApplicationHandler for App {
         self.save_last_situation();
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        #[cfg(not(target_os = "android"))]
+        let imgui_captures = self.inspector_ui.as_mut().map(|ui| {
+            if let Some(window) = self.window.as_ref() {
+                ui.handle_event(window, &winit::event::Event::<()>::WindowEvent {
+                    window_id: id,
+                    event: event.clone(),
+                });
+            }
+            let inspector_toggle = matches!(
+                &event,
+                WindowEvent::KeyboardInput { event, .. }
+                    if event.physical_key == PhysicalKey::Code(KeyCode::KeyI)
+                        && (self.keys.contains(&KeyCode::ControlLeft)
+                            || self.keys.contains(&KeyCode::ControlRight))
+            );
+            ui.captures_input() && !inspector_toggle
+        }).unwrap_or(false);
+        #[cfg(target_os = "android")]
+        let imgui_captures = false;
         match event {
             WindowEvent::CloseRequested => {
                 self.finish_session();
@@ -65,6 +84,9 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                if imgui_captures {
+                    return;
+                }
                 // '/' opens the chat's input box wherever the keyboard has it (the key
                 // itself is then swallowed by the chat)
                 if event.state == ElementState::Pressed
@@ -113,6 +135,9 @@ impl ApplicationHandler for App {
                 button: winit::event::MouseButton::Right,
                 ..
             } => {
+                if imgui_captures {
+                    return;
+                }
                 if self.navigator.as_ref().map(|n| n.map_open()).unwrap_or(false) {
                     return;
                 }
@@ -147,6 +172,9 @@ impl ApplicationHandler for App {
                 button: winit::event::MouseButton::Middle,
                 ..
             } => {
+                if imgui_captures {
+                    return;
+                }
                 if self.navigator.as_ref().map(|n| n.map_open()).unwrap_or(false) {
                     return;
                 }
@@ -154,6 +182,9 @@ impl ApplicationHandler for App {
                 self.update_hover();
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                if imgui_captures {
+                    return;
+                }
                 let amount = match delta {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => y,
                     winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
@@ -161,6 +192,9 @@ impl ApplicationHandler for App {
                 self.wheel(amount);
             }
             WindowEvent::CursorMoved { position, .. } => {
+                if imgui_captures {
+                    return;
+                }
                 // (the on-screen controls on a computer, `OMSI_TOUCH=1`: the mouse is a
                 // finger on them - from #202)
                 if self.touch.enabled {
@@ -183,6 +217,9 @@ impl ApplicationHandler for App {
                 button: winit::event::MouseButton::Left,
                 ..
             } => {
+                if imgui_captures {
+                    return;
+                }
                 if self.touch.enabled {
                     let p = glam::Vec2::new(self.cursor.0, self.cursor.1);
                     if state == ElementState::Pressed {
@@ -1667,6 +1704,16 @@ impl ApplicationHandler for App {
                     *self.profile.entry("hud").or_default() += __t.elapsed().as_secs_f64();
                 }
 
+                #[cfg(not(target_os = "android"))]
+                if self.inspector_active {
+                    let snapshot = self.inspector_snapshot();
+                    if let (Some(window), Some(inspector)) = (self.window.as_ref(), self.inspector_ui.as_mut()) {
+                        if inspector.begin_frame(window) {
+                            inspector.draw(window, &snapshot);
+                        }
+                    }
+                }
+
                 let mut lighting = match self.weather.as_ref() {
                     Some(w) => {
                         self.wetness = road_wetness(precip_of(w).1, dt as f64, self.wetness);
@@ -1919,6 +1966,35 @@ impl ApplicationHandler for App {
                         }
                         // the on-screen controls over the picture (a phone)
                         self.touch.render(r, &view, s.config.width, s.config.height);
+                        #[cfg(not(target_os = "android"))]
+                        if self.inspector_active && frame.is_some() {
+                            if let Some(inspector) = self.inspector_ui.as_mut() {
+                                let mut encoder = r.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                    label: Some("imgui inspector"),
+                                });
+                                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                    label: Some("imgui inspector pass"),
+                                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                        view: &view,
+                                        depth_slice: None,
+                                        resolve_target: None,
+                                        ops: wgpu::Operations {
+                                            load: wgpu::LoadOp::Load,
+                                            store: wgpu::StoreOp::Store,
+                                        },
+                                    })],
+                                    depth_stencil_attachment: None,
+                                    timestamp_writes: None,
+                                    occlusion_query_set: None,
+                                    multiview_mask: None,
+                                });
+                                if let Err(error) = inspector.render(win, &r.queue, &r.device, &mut pass) {
+                                    log::warn!("ImGui inspector backend unavailable: {}", error.0);
+                                }
+                                drop(pass);
+                                r.queue.submit(std::iter::once(encoder.finish()));
+                            }
+                        }
                         *self.profile.entry("render").or_default() += __t.elapsed().as_secs_f64();
                         if omsi_cfg::env::var_os("OMSI_PROFILE_GPU").is_some() {
                             // wait for the GPU here, so that its time shows as a stage of its own
@@ -2075,6 +2151,8 @@ impl ApplicationHandler for App {
                     }
                     win.request_redraw();
                 }
+                #[cfg(not(target_os = "android"))]
+                self.process_inspector_commands();
                 if reconfigure {
                     // the drawable went away under us (display change, lost surface)
                     if let (Some(s), Some(r), Some(win)) = (
@@ -2136,6 +2214,14 @@ impl ApplicationHandler for App {
     /// quit signal): the session is written and the LAN peers hear that we left, before
     /// anything else is torn down (Cmd+Q ends the process without returning from the loop).
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        #[cfg(not(target_os = "android"))]
+        if let Some(inspector) = self.inspector_ui.as_ref() {
+            if let Ok(path) = crate::inspector::persistence::InspectorLayout::config_path() {
+                if let Err(error) = inspector.layout.save(&path) {
+                    log::debug!("could not save ImGui inspector layout: {error}");
+                }
+            }
+        }
         self.finish_session();
         if let Some(lan) = self.lan.take() {
             // dropping the session says goodbye (BYE) to the host or the players

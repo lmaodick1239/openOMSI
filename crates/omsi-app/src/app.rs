@@ -195,6 +195,8 @@ pub(crate) struct App {
     /// Sandboxed variable override manager for live debugging.
     #[allow(dead_code)]
     pub(crate) inspector_overrides: crate::inspector_overrides::OverrideManager,
+    #[cfg(not(target_os = "android"))]
+    pub(crate) inspector_ui: Option<crate::inspector::imgui_inspector::InspectorUi>,
     /// OMSI's timetable window (`view_set_schedule`, Insert).
     pub(crate) timetable: bool,
     /// The left button is held on a switch: mouse movement turns it.
@@ -258,6 +260,62 @@ pub(crate) struct App {
 }
 
 impl App {
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn inspector_snapshot(&self) -> crate::inspector::imgui_inspector::InspectorUiSnapshot {
+        crate::inspector::imgui_inspector::InspectorUiSnapshot {
+            inspector: self
+                .inspector_selection
+                .as_ref()
+                .map(crate::inspector::InspectorMainView::from),
+            ..Default::default()
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn process_inspector_commands(&mut self) {
+        let commands = self
+            .inspector_ui
+            .as_mut()
+            .map(|ui| ui.drain_commands())
+            .unwrap_or_default();
+        for command in commands {
+            let selection = self.inspector_selection.clone().unwrap_or_default();
+            if let Err(error) = crate::inspector::validate_command(&command, &selection) {
+                log::debug!("inspector command rejected: {error}");
+                continue;
+            }
+            let result = match &command {
+                crate::inspector::InspectorCommand::Select(target) => {
+                    self.inspector_selection = Some(crate::inspector::InspectorSelection::new(target.clone()));
+                    Ok(())
+                }
+                crate::inspector::InspectorCommand::ClearSelection => {
+                    self.inspector_selection = None;
+                    Ok(())
+                }
+                crate::inspector::InspectorCommand::CycleNextHit => self
+                    .inspector_selection
+                    .as_mut()
+                    .map(|selection| { selection.cycle_next_hit(); Ok(()) })
+                    .unwrap_or_else(|| Err(crate::inspector::CommandError::StaleSelection("No active selection".into()))),
+                crate::inspector::InspectorCommand::CyclePrevHit => self
+                    .inspector_selection
+                    .as_mut()
+                    .map(|selection| { selection.cycle_prev_hit(); Ok(()) })
+                    .unwrap_or_else(|| Err(crate::inspector::CommandError::StaleSelection("No active selection".into()))),
+                crate::inspector::InspectorCommand::JumpToHit(index) => self
+                    .inspector_selection
+                    .as_mut()
+                    .map(|selection| { selection.jump_to_hit(*index); Ok(()) })
+                    .unwrap_or_else(|| Err(crate::inspector::CommandError::StaleSelection("No active selection".into()))),
+                _ => Ok(()),
+            };
+            if let Err(error) = result {
+                log::debug!("inspector command ignored: {error}");
+            }
+        }
+    }
+
     #[cfg(windows)]
     pub(crate) fn vr_active(&self) -> bool { self.vr.is_some() }
 
@@ -353,6 +411,16 @@ impl App {
             surface.config.present_mode
         );
         let scene = renderer.new_scene();
+        #[cfg(not(target_os = "android"))]
+        {
+            let layout = crate::inspector::persistence::InspectorLayout::config_path()
+                .ok()
+                .map(|path| crate::inspector::imgui_inspector::ImGuiLayout::load(&path))
+                .unwrap_or_default();
+            let mut inspector = crate::inspector::imgui_inspector::InspectorUi::new().with_layout(layout);
+            inspector.attach_renderer(&renderer.device, &renderer.queue, surface.config.format);
+            self.inspector_ui = Some(inspector);
+        }
         self.window = Some(window);
         self.surface = Some(surface);
         self.renderer = Some(renderer);

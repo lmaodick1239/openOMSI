@@ -180,6 +180,18 @@ pub struct InputCaptureState {
     pub keyboard: bool,
 }
 
+impl InputCaptureState {
+    /// Whether a game keyboard handler must yield to ImGui.
+    pub const fn blocks_keyboard(self) -> bool {
+        self.keyboard
+    }
+
+    /// Whether a game pointer handler must yield to ImGui.
+    pub const fn blocks_pointer(self) -> bool {
+        self.pointer
+    }
+}
+
 /// Recoverable renderer error state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackendError(pub String);
@@ -558,6 +570,25 @@ mod tests {
             ]
         );
         assert_eq!(BLUE_TITLE_ACTIVE, [0.05, 0.3, 0.62, 1.0]);
+    }
+
+    #[test]
+    fn input_capture_routes_keyboard_and_pointer_independently() {
+        let keyboard = InputCaptureState { pointer: false, keyboard: true };
+        assert!(keyboard.blocks_keyboard());
+        assert!(!keyboard.blocks_pointer());
+        let pointer = InputCaptureState { pointer: true, keyboard: false };
+        assert!(pointer.blocks_pointer());
+        assert!(!pointer.blocks_keyboard());
+        assert!(!InputCaptureState::default().blocks_keyboard());
+        assert!(!InputCaptureState::default().blocks_pointer());
+    }
+
+    #[test]
+    fn backend_without_renderer_is_non_fatal() {
+        let error = BackendError("surface unavailable".into());
+        assert_eq!(error.0, "surface unavailable");
+        assert!(!InputCaptureState::default().blocks_pointer());
     }
 
     #[test]

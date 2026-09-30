@@ -531,6 +531,8 @@ pub(crate) fn make_app(mut args: Args, server_cfg: Option<server::ServerCfg>) ->
         inspector_active: false,
         inspector_selection: None,
         inspector_overrides: inspector_overrides::OverrideManager::new(),
+        #[cfg(not(target_os = "android"))]
+        inspector_ui: None,
         lan: None,
         remotes: Default::default(),
         spikes: 0,
