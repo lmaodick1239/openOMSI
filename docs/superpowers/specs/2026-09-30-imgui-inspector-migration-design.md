@@ -20,6 +20,7 @@ Rescope the openOMSI inspector from a game-overlay/debug panel into a desktop-st
 - Replacing the renderer's overlay pipeline for ordinary game UI.
 - Supporting ImGui rendering in Android or XR during the initial migration.
 - Introducing a second scene/entity model solely for the UI.
+- Maintaining a second inspector frontend after ImGui parity is reached.
 
 ## Recommended technology
 
@@ -66,15 +67,28 @@ The ImGui pass must be composited after the world so windows remain readable and
 
 The initial desktop layout consists of:
 
-- **Inspector**: selected-object summary, identity, transform, properties, and action buttons.
-- **Hierarchy**: selectable scene/entity tree with visibility toggles where supported.
-- **Log**: scrollable diagnostic/application log with clear and follow-tail controls.
-- **Materials**: material, texture, blend, and shader-related data for a selected mesh/material.
-- **Render**: render flags, bounds, LOD, and debug visualization controls.
-- **Humans**: selected human/driver data and raycast/debug information.
-- **Telemetry**: frame timing and inspector performance counters.
+- **Inspector**: selected-object summary, stable identity, transform, object metadata, and action buttons. It displays vehicle, trailer, scenery, human, mesh, and material selections and clearly reports stale selections.
+- **Hierarchy**: selectable scene/entity tree with visibility toggles where supported, stable-key selection, and invalidation feedback.
+- **Log**: scrollable diagnostic/application log with clear and follow-tail controls, including export and backend errors.
+- **Materials**: material, texture, blend, shader, alpha, PBR, mipmap, and sandbox-override data for a selected mesh/material.
+- **Render**: render-pass/frame-graph tree, GPU timings, isolation mode, wireframe, normals, UV seams, collision hulls, and frame-graph export controls.
+- **Humans**: selected human/driver state, raycast, skeleton, path, and pedestrian debug information.
+- **Telemetry**: frame timing, inspector query/validation timing, GPU staging/readback timing, streaming counters, and snapshot statistics.
+- **Editor**: promotion to the object editor for editable targets, transform sandbox controls, transaction history, apply, revert, and rollback actions.
+- **Export**: selected mesh/entity glTF export controls, destination/status, and recoverable error display.
 
-Inspector and Hierarchy are visible by default when inspector mode is enabled. Other windows are opened from a small Inspector menu or toolbar. Each window can be moved, resized, collapsed, closed, and optionally docked.
+ImGui is the only inspector frontend after parity is reached. Existing inspector modules provide UI-independent snapshots, view models, and typed commands; they do not render directly through another UI toolkit. Inspector and Hierarchy are visible by default when inspector mode is enabled. Other windows are opened from a small Inspector menu or toolbar. Each window can be moved, resized, collapsed, closed, and optionally docked.
+
+### Inspector module boundary
+
+The existing inspector modules remain responsible for domain state and operations, but their widget-specific rendering methods are removed or converted to UI-independent APIs. For example, material and render modules expose owned view models and typed commands rather than accepting an `egui::Ui` reference:
+
+```rust
+pub fn material_view(&self) -> Option<MaterialView>;
+pub fn apply_command(&mut self, command: InspectorCommand) -> Result<(), InspectorError>;
+```
+
+The ImGui frontend consumes these view models and queues commands. Commands are applied at the application boundary after validation, preserving stable selection keys and preventing stale UI references from mutating simulation state. This applies to core selection, hierarchy, materials, render debugging, humans, telemetry, export, persistence, and the editor bridge.
 
 ### Visual style
 
@@ -141,8 +155,10 @@ The first implementation should not add docking-specific APIs until the basic fl
 
 ### Unit tests
 
-- Inspector view-model construction is independent of ImGui and preserves stable selection identity.
-- Command validation rejects stale or incompatible selections.
+- Inspector view-model construction is independent of ImGui and preserves stable selection identity for vehicle, trailer, scenery, human, mesh, and material targets.
+- Command validation rejects stale or incompatible selections and prevents unsupported edits.
+- Each migrated panel produces an owned view model without an `egui::Ui` dependency.
+- Material, render, human, telemetry, editor, export, and persistence commands serialize or validate deterministically where applicable.
 - Layout serialization round-trips positions, sizes, open flags, and schema version.
 - Invalid layout data falls back to defaults.
 
@@ -157,7 +173,7 @@ The first implementation should not add docking-specific APIs until the basic fl
 - Exercise the existing export, render override, and debug visualization actions through queued commands.
 - Run the existing targeted inspector tests and the workspace check/build for desktop.
 
-Acceptance is met when the inspector visibly behaves as a collection of movable blue ImGui windows like the reference, while selection identity, existing inspector actions, and normal game controls remain correct outside those windows.
+Acceptance is met when the inspector visibly behaves as a collection of movable blue ImGui windows like the reference, every currently exposed inspector function is reachable through an ImGui window or command, no inspector module requires `egui`, and selection identity, existing inspector actions, and normal game controls remain correct outside those windows.
 
 ## Implementation boundary
 
@@ -170,6 +186,12 @@ Expected primary files:
 - `crates/omsi-app/src/app_events.rs`: event forwarding, frame lifecycle, input capture, and final ImGui rendering.
 - `crates/omsi-app/src/inspector/mod.rs`: shared view-model/command interfaces.
 - `crates/omsi-app/src/inspector_core.rs`: only narrowly scoped adapters required to expose existing data.
+- `crates/omsi-app/src/inspector/material_panel.rs`: UI-independent material view model and material commands.
+- `crates/omsi-app/src/inspector/render_panel.rs`: UI-independent render view model and render commands.
+- `crates/omsi-app/src/inspector/human_panel.rs`: UI-independent human view model and human commands.
+- `crates/omsi-app/src/inspector/editor_bridge.rs`: editor view model and validated editor commands.
+- `crates/omsi-app/src/inspector/export.rs`: export request/status view model and command adapter.
+- `crates/omsi-app/src/inspector/telemetry.rs`: telemetry view model and display-ready counters.
 - `crates/omsi-app/tests/`: view-model, command, and persistence tests.
 - `docs/`: user-facing inspector controls and desktop-only limitation notes.
 
