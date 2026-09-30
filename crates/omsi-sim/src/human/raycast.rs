@@ -246,7 +246,6 @@ impl Default for HumanNarrowphase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use glam::Mat3A;
 
     #[test]
     fn test_ray_sphere_intersection() {

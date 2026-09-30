@@ -5,7 +5,6 @@
 //! pools to avoid blocking Device::poll(Wait) calls.
 
 use crate::{AlphaMode, MaterialId, TextureId};
-use std::collections::HashMap;
 
 /// PBR material parameters exposed for inspection.
 #[derive(Debug, Clone, Copy)]

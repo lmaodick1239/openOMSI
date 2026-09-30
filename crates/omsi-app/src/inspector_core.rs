@@ -1073,7 +1073,8 @@ pub fn build_hit_display_name(target: &SelectionTarget, distance: f32) -> String
 /// # Returns
 /// Vector of `PenetrationHit` with display names, ready for UI presentation.
 /// Limited to the first 20 hits to maintain performance.
-pub fn build_penetration_stack(all_hits: Vec<InspectorHit>) -> Vec<PenetrationHit> {
+pub fn build_penetration_stack(mut all_hits: Vec<InspectorHit>) -> Vec<PenetrationHit> {
+    InspectorHit::order_candidates(&mut all_hits);
     all_hits
         .into_iter()
         .take(20) // Limit to first 20 hits for performance
@@ -1484,7 +1485,8 @@ mod tests {
 /// # Returns
 /// - `Ok(snapshot)`: Valid snapshot with owned data
 /// - `Err(reason)`: Invalidation reason if the selection is stale
-pub fn build_inspector_snapshot(
+#[allow(dead_code)]
+pub(crate) fn build_inspector_snapshot(
     selection: &InspectorSelection,
     player: Option<&crate::player::Player>,
     traffic: Option<&crate::traffic::Traffic>,
@@ -1910,8 +1912,7 @@ mod integration_tests {
     #[test]
     fn test_inspector_mode_toggle_lifecycle() {
         // Test entering inspector mode
-        let mut active = false;
-        active = true;
+        let mut active = true;
         assert!(active, "Inspector mode should be active after toggle on");
 
         // Test exiting inspector mode
@@ -1919,6 +1920,7 @@ mod integration_tests {
         assert!(!active, "Inspector mode should be inactive after toggle off");
 
         // Test multiple toggles
+        active = true;
         for _ in 0..5 {
             active = !active;
         }
@@ -1977,14 +1979,13 @@ mod integration_tests {
 
     #[test]
     fn test_mode_toggle_clears_on_exit() {
-        let mut active = false;
         let mut selection = InspectorSelection::new(SelectionTarget::Vehicle {
             key: VehicleKey::Player { generation: 1 },
             mesh: None,
         });
 
         // Activate inspector mode
-        active = true;
+        let mut active = true;
         assert!(active);
         assert!(selection.is_active());
 

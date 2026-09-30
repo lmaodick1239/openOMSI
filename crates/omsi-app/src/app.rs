@@ -193,6 +193,7 @@ pub(crate) struct App {
     /// Currently selected entity in inspector mode.
     pub(crate) inspector_selection: Option<crate::inspector::InspectorSelection>,
     /// Sandboxed variable override manager for live debugging.
+    #[allow(dead_code)]
     pub(crate) inspector_overrides: crate::inspector_overrides::OverrideManager,
     /// OMSI's timetable window (`view_set_schedule`, Insert).
     pub(crate) timetable: bool,

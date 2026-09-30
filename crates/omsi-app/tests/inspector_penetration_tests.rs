@@ -3,7 +3,7 @@
 //! These tests verify that the penetration stack correctly collects, orders, and allows
 //! cycling through multiple overlapping hits along a raycast.
 
-use omsi_app::inspector::{
+use openomsi_game::inspector::{
     build_hit_display_name, build_penetration_stack, InspectorHit, InspectorSelection,
     PenetrationHit, SceneryKey, SelectionTarget, VehicleKey,
 };
@@ -277,7 +277,7 @@ fn test_clear_resets_penetration_stack() {
 
 #[test]
 fn test_build_hit_display_name_vehicle() {
-    use omsi_app::inspector::MeshIdentity;
+    use openomsi_game::inspector::MeshIdentity;
 
     let mesh_id = MeshIdentity::new(
         "models/bus.cfg".to_string(),
@@ -297,7 +297,7 @@ fn test_build_hit_display_name_vehicle() {
 
 #[test]
 fn test_build_hit_display_name_scenery() {
-    use omsi_app::inspector::MeshIdentity;
+    use openomsi_game::inspector::MeshIdentity;
 
     let mesh_id = MeshIdentity::new(
         "scenery/building.sco".to_string(),

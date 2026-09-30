@@ -9,7 +9,7 @@
 use glam::{Affine3A, Vec3};
 use omsi_geometry::bvh::{Bvh, Ray};
 use omsi_sim::human::{
-    HumanKey, HumanRegistry, HumanCylinder, HumanBroadphase, HumanNarrowphase,
+    HumanRegistry, HumanCylinder, HumanBroadphase, HumanNarrowphase,
     spatial::unpack_human_id, SLOTS,
 };
 use std::time::Instant;

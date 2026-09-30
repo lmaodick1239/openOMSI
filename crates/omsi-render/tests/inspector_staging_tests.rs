@@ -1,7 +1,6 @@
 //! Integration tests for inspector texture readback and material queries.
 
 use omsi_render::graphics_inspector::*;
-use omsi_render::staging_pool::StagingPool;
 
 #[test]
 fn test_pbr_params_default() {
@@ -167,8 +166,6 @@ fn test_texture_metadata_resolution() {
 // Async staging pool tests - require wgpu device
 #[cfg(test)]
 mod staging_pool_tests {
-    use super::*;
-
     #[test]
     fn test_align_to() {
         // Test from staging_pool module

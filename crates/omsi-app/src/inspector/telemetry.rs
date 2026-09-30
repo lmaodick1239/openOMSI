@@ -10,9 +10,11 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 /// WebSocket client connection limit.
+#[allow(dead_code)]
 const MAX_CLIENTS: usize = 4;
 
 /// Telemetry broadcast rate in Hz.
+#[allow(dead_code)]
 const TELEMETRY_RATE_HZ: u32 = 30;
 
 /// Inspector snapshot for telemetry broadcast.
@@ -73,12 +75,14 @@ pub struct WatchValue {
 
 /// WebSocket telemetry server state.
 pub struct TelemetryServer {
+    #[allow(dead_code)]
     port: u16,
     clients: Arc<RwLock<Vec<WebSocketClient>>>,
     running: Arc<RwLock<bool>>,
 }
 
 /// WebSocket client connection (stub).
+#[allow(dead_code)]
 #[derive(Debug)]
 struct WebSocketClient {
     id: u32,

@@ -618,10 +618,12 @@ pub struct TilePinLease {
 }
 
 impl TilePinLease {
+    #[allow(dead_code)]
     fn new(tile: (i32, i32), generation: u64) -> Self {
         Self { tile, generation }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn tile(&self) -> (i32, i32) {
         self.tile
     }
@@ -629,6 +631,7 @@ impl TilePinLease {
 
 /// Tracks a single pinned tile with generation-based stale detection.
 /// Only one tile may be pinned at a time (single-lease policy).
+#[allow(dead_code)]
 struct TilePins {
     /// The currently pinned tile and its generation, if any.
     pinned: Option<((i32, i32), u64)>,
@@ -636,6 +639,7 @@ struct TilePins {
     next_generation: u64,
 }
 
+#[allow(dead_code)]
 impl TilePins {
     fn new() -> Self {
         Self {
@@ -788,21 +792,25 @@ impl Streamer {
     /// Acquire a pin on `tile` for inspector selection. Returns None if a different tile
     /// is already pinned (single-lease policy). The returned lease must be released via
     /// `unpin_tile` when the selection is cleared or replaced.
+    #[allow(dead_code)]
     pub fn pin_tile(&self, tile: (i32, i32)) -> Option<TilePinLease> {
         self.tile_pins.lock().acquire(tile)
     }
 
     /// Release a tile pin using the lease token. Returns true if the lease was valid.
+    #[allow(dead_code)]
     pub fn unpin_tile(&self, lease: TilePinLease) -> bool {
         self.tile_pins.lock().release(lease)
     }
 
     /// Check if a tile is currently pinned by the inspector.
+    #[allow(dead_code)]
     pub fn is_tile_pinned(&self, tile: (i32, i32)) -> bool {
         self.tile_pins.lock().is_pinned(tile)
     }
 
     /// Release all tile pins (for world teardown or inspector exit).
+    #[allow(dead_code)]
     pub fn release_all_pins(&self) {
         self.tile_pins.lock().release_all();
     }

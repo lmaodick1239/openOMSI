@@ -5,7 +5,7 @@
 
 use crate::graphics_inspector::*;
 use crate::staging_pool::StagingPool;
-use crate::{AlphaMode, MaterialId, Scene, TextureId};
+use crate::{AlphaMode, MaterialId, Scene};
 use std::collections::HashMap;
 
 /// Inspector state attached to a Scene for diagnostic queries.

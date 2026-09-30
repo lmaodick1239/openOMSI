@@ -6,8 +6,8 @@
 
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
-use glam::{Mat4, Vec3, Quat};
+use std::path::PathBuf;
+use glam::Mat4;
 
 /// glTF export error types.
 #[derive(Debug)]
