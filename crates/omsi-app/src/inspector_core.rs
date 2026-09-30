@@ -6,6 +6,7 @@
 
 use std::cmp::Ordering;
 use glam::{DVec3, Vec3};
+use serde::{Deserialize, Serialize};
 
 /// Stable identity for a vehicle entity across frames.
 ///
@@ -14,7 +15,7 @@ use glam::{DVec3, Vec3};
 /// - AI traffic: stable monotonic ID, but vec index is unstable (swap_remove)
 /// - Remote (LAN): player ID, but same ID may be replaced (type change); needs generation
 /// - Trailer parts: index-based; invalidate on coupling/length changes
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum VehicleKey {
     /// The player's vehicle. Generation increments on vehicle replacement.
     Player { generation: u64 },
@@ -115,7 +116,7 @@ impl Ord for VehicleKey {
 ///
 /// Scenery objects are keyed by map ID for editable objects, or by tile + collision key
 /// for non-editable objects. Tile unload or reload invalidates the selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum SceneryKey {
     /// Editable scenery object by map ID.
     Editable { map_id: i64 },
@@ -129,7 +130,7 @@ pub enum SceneryKey {
 ///
 /// Humans use monotonic ID with generational invalidation. The generation counter
 /// increments when a human despawns/respawns, preventing stale references.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct HumanKey {
     /// Stable monotonic ID for the human entity.
     pub id: u32,
@@ -159,7 +160,7 @@ impl Ord for HumanKey {
 /// A mesh is identified by its source model path, definition index, and a disambiguator
 /// for duplicate mesh names. When the selected mesh is absent at the current LOD, the
 /// fallback policy selects the closest available mesh by definition index.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MeshIdentity {
     /// Model source path (e.g., `.sco` or vehicle `.cfg` relative path).
     pub model_path: String,
@@ -221,7 +222,7 @@ impl MeshIdentity {
 }
 
 /// Selection target: vehicle, scenery, or human.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SelectionTarget {
     Vehicle {
         key: VehicleKey,

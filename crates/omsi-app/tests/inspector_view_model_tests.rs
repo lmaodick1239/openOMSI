@@ -1,6 +1,7 @@
 //! Tests for UI-independent inspector view models.
 
-use omsi_app::inspector::*;
+use openomsi_game::inspector::core::*;
+use openomsi_game::inspector::view_models::*;
 
 #[test]
 fn test_inspector_main_view_from_selection_none() {

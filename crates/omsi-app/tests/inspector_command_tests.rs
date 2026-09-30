@@ -1,6 +1,7 @@
 //! Tests for UI-independent inspector commands.
 
-use omsi_app::inspector::*;
+use openomsi_game::inspector::core::*;
+use openomsi_game::inspector::commands::*;
 
 #[test]
 fn test_command_serialization_select() {
