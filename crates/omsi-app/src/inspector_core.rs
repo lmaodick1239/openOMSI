@@ -125,6 +125,35 @@ pub enum SceneryKey {
     Parked { key: i64 },
 }
 
+/// Stable identity for a human/pedestrian entity across frames.
+///
+/// Humans use monotonic ID with generational invalidation. The generation counter
+/// increments when a human despawns/respawns, preventing stale references.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HumanKey {
+    /// Stable monotonic ID for the human entity.
+    pub id: u32,
+    /// Generation counter incremented on despawn/respawn.
+    pub generation: u64,
+    /// Whether this human is a driver (distinct from vehicle selection).
+    pub is_driver: bool,
+}
+
+impl PartialOrd for HumanKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for HumanKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.id
+            .cmp(&other.id)
+            .then(self.generation.cmp(&other.generation))
+            .then(self.is_driver.cmp(&other.is_driver))
+    }
+}
+
 /// Logical mesh identity within a model.
 ///
 /// A mesh is identified by its source model path, definition index, and a disambiguator
@@ -191,7 +220,7 @@ impl MeshIdentity {
     }
 }
 
-/// Selection target: vehicle or scenery.
+/// Selection target: vehicle, scenery, or human.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SelectionTarget {
     Vehicle {
@@ -201,6 +230,10 @@ pub enum SelectionTarget {
     Scenery {
         key: SceneryKey,
         mesh: Option<MeshIdentity>,
+    },
+    Human {
+        key: HumanKey,
+        mesh_id: Option<usize>,
     },
 }
 
@@ -244,8 +277,12 @@ impl InspectorHit {
         match (a, b) {
             (Vehicle { key: k1, .. }, Vehicle { key: k2, .. }) => k1.cmp(k2),
             (Scenery { key: k1, .. }, Scenery { key: k2, .. }) => k1.cmp(k2),
-            (Vehicle { .. }, Scenery { .. }) => Ordering::Less,
-            (Scenery { .. }, Vehicle { .. }) => Ordering::Greater,
+            (Human { key: k1, .. }, Human { key: k2, .. }) => k1.cmp(k2),
+            // Cross-variant ordering: Vehicle < Human < Scenery
+            (Vehicle { .. }, Human { .. }) | (Vehicle { .. }, Scenery { .. }) => Ordering::Less,
+            (Human { .. }, Vehicle { .. }) => Ordering::Greater,
+            (Human { .. }, Scenery { .. }) => Ordering::Less,
+            (Scenery { .. }, Vehicle { .. }) | (Scenery { .. }, Human { .. }) => Ordering::Greater,
         }
     }
 }
@@ -270,6 +307,30 @@ pub struct ViewToggles {
     pub show_mesh_name: bool,
 }
 
+/// A single hit in the penetration stack with display metadata.
+///
+/// Stores the hit target, distance, and display name for UI presentation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PenetrationHit {
+    /// Hit distance from ray origin (meters).
+    pub distance: f32,
+    /// Selection target.
+    pub target: SelectionTarget,
+    /// Display name for the hit (e.g., "cockpit_speedo.o3d").
+    pub display_name: String,
+}
+
+impl PenetrationHit {
+    /// Create a new penetration hit.
+    pub fn new(distance: f32, target: SelectionTarget, display_name: String) -> Self {
+        Self {
+            distance,
+            target,
+            display_name,
+        }
+    }
+}
+
 /// Current inspector selection with owned state.
 ///
 /// No renderer IDs or borrowed references. All state is owned and serializable.
@@ -277,6 +338,24 @@ pub struct ViewToggles {
 pub struct InspectorSelection {
     pub status: SelectionStatus,
     pub view: ViewToggles,
+    /// Penetration stack: all hits along the raycast, sorted by distance.
+    pub penetration_stack: Vec<PenetrationHit>,
+    /// Current hit index in the penetration stack (for Tab cycling).
+    pub current_hit_index: usize,
+}
+
+impl Eq for PenetrationHit {}
+
+impl PartialOrd for PenetrationHit {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.distance.partial_cmp(&other.distance)
+    }
+}
+
+impl Ord for PenetrationHit {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.partial_cmp(other).unwrap_or(Ordering::Equal)
+    }
 }
 
 impl Default for InspectorSelection {
@@ -284,6 +363,8 @@ impl Default for InspectorSelection {
         Self {
             status: SelectionStatus::None,
             view: ViewToggles::default(),
+            penetration_stack: Vec::new(),
+            current_hit_index: 0,
         }
     }
 }
@@ -294,6 +375,8 @@ impl InspectorSelection {
         Self {
             status: SelectionStatus::Selected(target),
             view: ViewToggles::default(),
+            penetration_stack: Vec::new(),
+            current_hit_index: 0,
         }
     }
 
@@ -307,11 +390,63 @@ impl InspectorSelection {
     /// Clear the selection.
     pub fn clear(&mut self) {
         self.status = SelectionStatus::None;
+        self.penetration_stack.clear();
+        self.current_hit_index = 0;
     }
 
     /// Check if a selection is active (not `None` or `Invalidated`).
     pub fn is_active(&self) -> bool {
         matches!(self.status, SelectionStatus::Selected(_))
+    }
+
+    /// Set the penetration stack with all hits along the raycast.
+    pub fn set_penetration_stack(&mut self, hits: Vec<PenetrationHit>) {
+        self.penetration_stack = hits;
+        self.current_hit_index = 0;
+        if let Some(first) = self.penetration_stack.first() {
+            self.status = SelectionStatus::Selected(first.target.clone());
+        }
+    }
+
+    /// Cycle to the next hit in the penetration stack (Tab key).
+    pub fn cycle_next_hit(&mut self) {
+        if self.penetration_stack.is_empty() {
+            return;
+        }
+        self.current_hit_index = (self.current_hit_index + 1) % self.penetration_stack.len();
+        if let Some(hit) = self.penetration_stack.get(self.current_hit_index) {
+            self.status = SelectionStatus::Selected(hit.target.clone());
+        }
+    }
+
+    /// Cycle to the previous hit in the penetration stack (Shift+Tab key).
+    pub fn cycle_prev_hit(&mut self) {
+        if self.penetration_stack.is_empty() {
+            return;
+        }
+        if self.current_hit_index == 0 {
+            self.current_hit_index = self.penetration_stack.len() - 1;
+        } else {
+            self.current_hit_index -= 1;
+        }
+        if let Some(hit) = self.penetration_stack.get(self.current_hit_index) {
+            self.status = SelectionStatus::Selected(hit.target.clone());
+        }
+    }
+
+    /// Jump to a specific hit index in the penetration stack.
+    pub fn jump_to_hit(&mut self, index: usize) {
+        if index < self.penetration_stack.len() {
+            self.current_hit_index = index;
+            if let Some(hit) = self.penetration_stack.get(index) {
+                self.status = SelectionStatus::Selected(hit.target.clone());
+            }
+        }
+    }
+
+    /// Get the current hit in the penetration stack.
+    pub fn current_hit(&self) -> Option<&PenetrationHit> {
+        self.penetration_stack.get(self.current_hit_index)
     }
 }
 
@@ -898,6 +1033,57 @@ fn determine_lod_level(_object_type: &crate::scene::ObjectType, _distance: f64) 
     0
 }
 
+/// Build a display name for a hit target for UI presentation.
+///
+/// Returns a human-readable string like "[1.2m] cockpit_speedo.o3d" or "[2.4m] dashboard_casing.o3d".
+pub fn build_hit_display_name(target: &SelectionTarget, distance: f32) -> String {
+    match target {
+        SelectionTarget::Vehicle { mesh, .. } => {
+            if let Some(mesh_id) = mesh {
+                format!("[{:.1}m] {}", distance, mesh_id.mesh_name)
+            } else {
+                format!("[{:.1}m] Vehicle", distance)
+            }
+        }
+        SelectionTarget::Scenery { key, mesh } => {
+            let mesh_name = mesh.as_ref().map(|m| m.mesh_name.as_str()).unwrap_or("object");
+            let location = match key {
+                SceneryKey::Editable { map_id } => format!("Editable #{}", map_id),
+                SceneryKey::NonEditable { tile_x, tile_y, .. } => {
+                    format!("Tile ({}, {})", tile_x, tile_y)
+                }
+                SceneryKey::Parked { key } => format!("Parked #{}", key),
+            };
+            format!("[{:.1}m] {} ({})", distance, mesh_name, location)
+        }
+        SelectionTarget::Human { .. } => {
+            format!("[{:.1}m] Human/Pedestrian", distance)
+        }
+    }
+}
+
+/// Collect all hits along a raycast into a penetration stack.
+///
+/// This is the main entry point for building the multi-hit corridor that allows
+/// Tab-cycling through overlapping geometry.
+///
+/// # Parameters
+/// - `all_hits`: All inspector hits collected from raycast functions, sorted by distance
+///
+/// # Returns
+/// Vector of `PenetrationHit` with display names, ready for UI presentation.
+/// Limited to the first 20 hits to maintain performance.
+pub fn build_penetration_stack(all_hits: Vec<InspectorHit>) -> Vec<PenetrationHit> {
+    all_hits
+        .into_iter()
+        .take(20) // Limit to first 20 hits for performance
+        .map(|hit| {
+            let display_name = build_hit_display_name(&hit.target, hit.distance);
+            PenetrationHit::new(hit.distance, hit.target, display_name)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1318,6 +1504,9 @@ pub fn build_inspector_snapshot(
         }
         SelectionTarget::Scenery { key, mesh } => {
             validate_scenery_snapshot(key, mesh, streamer)
+        }
+        SelectionTarget::Human { .. } => {
+            Err("Human selection not yet supported in inspector".to_string())
         }
     }
 }

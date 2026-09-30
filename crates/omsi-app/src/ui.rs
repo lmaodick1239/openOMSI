@@ -873,6 +873,9 @@ fn format_inspector_target(target: &crate::inspector::SelectionTarget, mesh_name
                 base
             }
         }
+        SelectionTarget::Human { key, .. } => {
+            format!("Human #{}", key.id)
+        }
     }
 }
 

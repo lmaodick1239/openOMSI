@@ -1,0 +1,557 @@
+# openOMSI Unified Visual Debug Inspector: Advanced Extras & Scope-Creep Specification
+
+**Target Workspace:** `openOMSI` (`lmaodick1239/openOMSI` / `turbo-devv/openOMSI`)  
+**Document Status:** Architectural Specification & Evolutionary Scope-Creep Blueprint  
+**Date:** 2026-09-30  
+**Baseline Commit:** `e8f101c` (Inspector MVP Tasks 1–10 Merged + Upstream Sync Complete)  
+**Target Crates:** `omsi-app`, `omsi-render`, `omsi-sim`, `omsi-geometry`, `omsi-model`, `omsi-scenery`
+
+---
+
+## 1. Executive Summary & Strategic Motivation
+
+### 1.1 Baseline Status & Transition
+The **Unified Visual Debug Inspector MVP** successfully established a rock-solid, read-only foundation in `openOMSI`:
+- Dedicated toggleable inspector mode (`Ctrl+I`) with strict input precedence.
+- Precise, raycasted mesh selection for vehicle parts (player, AI, remote, articulated trailers) and placed scenery instances.
+- Generational key tracking (`VehicleKey`, `SceneryKey`) preventing handle aliasing upon despawn or stream reload.
+- Safe, reference-counted single-tile pin leases preventing streaming unloads of selected scenery.
+- Compact, responsive, multi-lingual side panel rendering world/local transforms, bounding boxes, and asset paths.
+- Clean integration with 53 upstream commits from `turbo-devv/openOMSI` (commit `e8f101c`).
+
+### 1.2 The Scope-Creep Mandate: "From Static Geometry to Simulation Observatory"
+While the MVP solved visual entity identification, debugging a high-fidelity bus and transit simulator demands far more than static transform inspection. OMSI 2 modding and map creation are notorious for invisible points of failure:
+- Cryptic `.osc` script state machines silently failing door interlocks or pneumatic pressure builds.
+- Complex multi-pass PBR materials and dynamic textures (scripttextures, texttextures, LED matrix displays) misbehaving due to bad alpha thresholds or missing mipmaps.
+- Pedestrian navigation breakdowns where passenger agents fail to pathfind across bus doors or depot queues.
+- Spline connectivity and road traffic path errors causing AI gridlock.
+- Mispositioned 3D audio cones and acoustic attenuation bugs.
+
+This specification elevates the approved follow-on extras (**A, B, C, E, G, I**) and strategically integrates deferred high-value targets (**D: Splines & Paths, H: Audio & Environment, F: Editor Bridge**). We "scope creep the scope creep" by designing not merely a list of ad-hoc features, but a **unified, interactive simulation diagnostic lab and authoring bridge**—built with rigorous performance guarantees, zero GPU stalls, thread-safe snapshot boundaries, and fail-closed safety semantics.
+
+---
+
+## 2. Core Architectural Guarantees & Constraints
+
+All features detailed in this specification must conform strictly to four architectural pillars:
+
+```
++------------------------------------------------------------------------------------------+
+|                               FOUR INVIOLABLE PILLARS                                    |
++------------------------------------------------------------------------------------------+
+| 1. ZERO-STALL GPU PIPELINE                                                               |
+|    - Texture reads, frame graph inspects, and VRAM queries must use async staging pools. |
+|    - No synchronous `wgpu::Device::poll(Wait)` calls on the simulation or render thread. |
++------------------------------------------------------------------------------------------+
+| 2. SNAPSHOT ISOLATION & LOCK FREEDOM                                                     |
+|    - The UI layer NEVER directly holds `Mutex` or `RwLock` guards across frames.         |
+|    - Snapshot construction is an atomic, single-pass query at the frame synchronization   |
+|      boundary (`app_events.rs`), producing owned, UI-safe data structures.               |
++------------------------------------------------------------------------------------------+
+| 3. FAIL-CLOSED RUNTIME INTEGRITY                                                         |
+|    - All mutation capabilities (live script overrides, editor promotions) are sandboxed. |
+|    - Instant 1-click rollback, bounded range validation, and explicit transactional logs.|
+|    - Despawn, network disconnect, or tile unload instantly revokes live edit leases.     |
++------------------------------------------------------------------------------------------+
+| 4. FRAME TIME BUDGET: < 1.0 ms TOTAL OVERHEAD                                            |
+|    - Baseline active inspector overhead must not exceed 1.0 ms per frame.                |
+|    - Spatial acceleration (BVH) bounds raycasting to < 0.4 ms even in 100k-triangle maps.|
+|    - Zero cost (0.0 ms) when inspector mode is toggled off (`Ctrl+I`).                   |
++------------------------------------------------------------------------------------------+
+```
+
+---
+
+## 3. Detailed Subsystem Specifications
+
+```
+                              EXTENDED INSPECTOR ARCHITECTURE
+                             
+                     +---------------------------------------+
+                     |         Cursor Input / Raycast        |
+                     +---------------------------------------+
+                                         |
+                                         v
+                     +---------------------------------------+
+                     |   Broadphase Spatial Acceleration     |
+                     |   (Dynamic BVH / Candidate Collector) |
+                     +---------------------------------------+
+                                         |
+                       +-----------------+-----------------+
+                       |                                   |
+                       v                                   v
+             [Vehicle & Trailer Parts]           [Placed Scenery Objects]
+             [Pedestrian / Human Mesh]           [Road Splines & Paths]
+             [Audio Emitter Nodes]               [Light & Weather Probes]
+                       |                                   |
+                       +-----------------+-----------------+
+                                         |
+                                         v
+                     +---------------------------------------+
+                     |      Multi-Hit Penetration Stack      |
+                     |  (Distance-Sorted Candidate Corridor) |
+                     +---------------------------------------+
+                                         |
+                                         v
+                     +---------------------------------------+
+                     |       Atomic Snapshot Builder         |
+                     |   - Generational Identity Validation  |
+                     |   - Scenery Single-Tile Pin Lease     |
+                     +---------------------------------------+
+                                         |
+       +---------------+-----------------+---------------+---------------+
+       |               |                 |               |               |
+       v               v                 v               v               v
+  [Material &     [Script VM &     [Render Pass     [Kinematics &   [Diagnostic
+   Dynamic Tex]    Watch Sandbox]   Isolation]       Pose Graph]     Telemetry]
+```
+
+---
+
+### 3.1 Subsystem E & E+: Human, Pedestrian & Skeletal Kinematics Inspector
+*Status: Promoted from Extra E. Expands pedestrian raycasting into full crowd and kinematics telemetry.*
+
+#### Core Mechanics (E)
+1. **Selection & Handle:**
+   - Define `HumanKey { id: usize, generation: u64, is_driver: bool }`.
+   - Broadphase: Fast bounding cylinder intersection $(r \approx 0.35\text{m}, h \approx 1.85\text{m})$.
+   - Narrowphase: Triangle-level raycast against current animated skeletal pose (derived from `omsi-sim::human` and `crates/omsi-app/src/humans.rs`).
+2. **Snapshot Data:**
+   - Pedestrian unique ID, character model file path (`.hum`).
+   - Current world position, heading angle, walking velocity ($\text{m/s}$).
+   - High-level behavior state: `Wandering`, `WalkingToStop`, `WaitingAtStop`, `BoardingBus`, `BuyingTicket`, `FindingSeat`, `Seated`, `Alighting`.
+
+#### Advanced Scope-Creep Tier (E+)
+1. **Skeletal Joint & Bone Visualization:**
+   - 3D overlay displaying the active bone hierarchy (Spine, Neck, Head, Clavicles, Arms, Legs, Feet) connected by color-coded debug lines.
+   - Rotational Euler angles displayed per joint in a collapsible tree view in the inspector panel.
+2. **Animation Clip & State Machine Telemetry:**
+   - Real-time display of active animation clips (e.g. `walk.ani`, `sit_down.ani`, `idle_shiver.ani`).
+   - Animation parameters: Normalized phase time $[0.0..1.0]$, playback speed scalar, blend weight between concurrent animation layers.
+   - *Time-Freeze / Step Control:* Inspector UI affordance to pause pedestrian animation, scrub forward/backward frame-by-frame, or force $0.1\times$ slow-motion to inspect foot-sliding or door-clipping artifacts.
+3. **Navigation Mesh & Path Intent Vector:**
+   - 3D visual projection of the agent's planned path:
+     - Target waypoint coordinate, destination bus stop marker, and current steering vector (Cyan arrow).
+     - Desired path line projected onto tile terrain.
+     - Collision avoidance repulsion vector when navigating around other passengers or static obstacles.
+4. **Passenger Economy & Disposition Telemetry:**
+   - Inspect internal psychological and financial state of passengers boarded on the player's bus:
+     - Ticket transaction status: Requested ticket type (e.g., *Normal Fahrschein*, *Kurzstrecke*), offered cash amount, pending change calculation.
+     - Comfort & Satisfaction Index ($0..100\%$): Degraded by rough driving, excessive lateral G-forces, cold cabin temperature ($< 18^\circ\text{C}$), or lack of fresh air.
+     - Desired destination stop name and planned alighting request status (`passenger_say_stop_requested`).
+
+---
+
+### 3.2 Subsystem A & A+: Material, Texture, Shader & Dynamic Display Inspector
+*Status: Promoted from Extra A (Phases A1, A2, A3). Elevates surface diagnostics to a real-time graphics laboratory.*
+
+#### Core Mechanics (A1–A3)
+1. **A1: Material Properties Readout:**
+   - Display shader variant name (e.g. `enhanced.wgsl`, `shader.wgsl`), draw call index, render pass classification (Opaque, Transparent, Cutout, Shadow).
+   - Display texture coordinates, UV scale/bias factors, blend modes (`Alpha`, `Additive`, `Multiply`), double-sided flag, alpha-test cutoff value.
+2. **A2: Safe Texture Preview:**
+   - Inspect diffuse/albedo, normal/bump, roughness, metallic, and specular reflection maps.
+   - Display texture metadata: Format (`BC7`, `BC3`, `BC1`, `RGBA8Unorm`), native pixel resolution, aspect ratio, mipmap count, compressed VRAM byte size.
+   - Mini thumbnail rendered in the UI panel using non-blocking texture binding.
+3. **A3: Texture Dump & Mipmap Explorer:**
+   - Single-click action: "Export Texture to PNG" saving to `Screenshots/inspector_dump_<name>.png` via async readback.
+   - Interactive Mipmap Slider: Force the renderer to isolate individual mip levels ($0, 1, 2, \dots$) on the selected mesh to evaluate texture filtering and shimmering.
+
+#### Advanced Scope-Creep Tier (A+)
+1. **Dynamic Display & ScriptTexture Live Visualizer:**
+   OMSI vehicles dynamically render passenger displays, matrix rollbands, ticket printers, and IBIS monitors directly into memory textures via `[scripttexture]` and `[texttexture]` blocks:
+   - Live real-time UI preview of dynamic textures updating at full simulation rate (e.g., ticking digital clocks, scrolling destination text).
+   - Interactive Pixel-Grid Zoom ($1\times, 2\times, 4\times, 8\times$) with pixel coordinate and hex color readout under the mouse cursor.
+   - Diagnostic text overlay showing the backing font configuration file, character raster dimensions, and string source variables (e.g. `$IBIS_terminus_name`).
+2. **Real-Time PBR Parameter Sandbox:**
+   - Non-destructive, live property sliders in the inspector panel:
+     - Roughness override $[0.0..1.0]$
+     - Metalness override $[0.0..1.0]$
+     - Normal map intensity multiplier $[0.0..2.0]$
+     - Environment reflection intensity $[0.0..3.0]$
+     - Emissive intensity boost (evaluating night glow of gauges and dials)
+   - Interactive Split-Screen Wipe: A vertical divider across the mesh allowing direct comparison between original material values and sandboxed overrides.
+   - "Copy Configuration Block" button: Formats modified values directly into OMSI `.cfg` syntax (e.g., `[matl]`, `[matl_envmap]`, `[matl_roughness]`) to clipboard for immediate modder authoring.
+3. **Texture Memory & Mipmap Heatmap Mode:**
+   - Full-scene diagnostic shader pass (`OMSI_DEBUG_ENHANCED=18` / Inspector toggle) color-coding surface texel density against screen pixel density:
+     - Blue: Undersampled (texture resolution too low, blurry).
+     - Green: Optimal 1:1 texel-to-pixel ratio.
+     - Red: Oversampled (texture resolution wastefully high, causing cache thrashing and moiré).
+4. **WGSL Shader Uniform & Binding Inspector:**
+   - Live inspection of GPU uniform buffers tied to the active draw call:
+     - Model-View-Projection matrix, camera eye position, solar directional vector, ambient sky color.
+     - Material flags bitfield (determining alpha testing, envmap reflection, and lighting calculation paths).
+   - Live Hot-Reload Trigger: Hot-reloads WGSL shader files from disk without restarting the application, immediately re-binding pipelines and reflecting shader code edits.
+
+---
+
+### 3.3 Subsystem B & B+: OMSI Script VM, Variable Watcher, Live Override & Time-Travel Debugger
+*Status: Promoted from Extra B (Phases B1, B2, B3). Extends script variable reads into a full virtual machine telemetry suite.*
+
+#### Core Mechanics (B1–B3)
+1. **B1: Read-Only Variable Inspector:**
+   - Enumerate all floating-point and string variables (`L.var`, `S.var`) associated with the selected vehicle or scripted scenery object.
+   - Categorize variables by origin script file (e.g., `engine.osc`, `door.osc`, `cockpit.osc`, `matrix.osc`).
+   - Real-time search/filter input with instant debounce.
+2. **B2: Gated Live Variable Overrides:**
+   - Editable numeric and string fields beside variable names.
+   - Clamped validation based on known physical bounds (e.g., throttle $[0.0..1.0]$, door state $[0.0..1.0]$, engine RPM $[0.0..3000.0]$).
+   - Safety isolation: Live edits mutate only in-memory simulation state; source files on disk are never touched.
+   - Prominent, persistent "Reset All Overrides" button that immediately purges artificial values and resynchronizes with physical simulation equations.
+3. **B3: Watch Expression Table:**
+   - Dedicated watch panel where users pin up to 16 variables of interest.
+   - Supports computed mathematical expressions:
+     $$\text{expression} = (\text{L.cockpit\_speed} \times 3.6) + \text{L.engine\_temperature} / 2.0$$
+   - Color-coded value changes: Green flash on increment, Red flash on decrement, Gray when static.
+
+#### Advanced Scope-Creep Tier (B+)
+1. **Variable Sparklines & Mini-Oscilloscope HUD:**
+   - Embedded real-time sparkline graphs (60–120 historical samples) rendered directly in the inspector watch table.
+   - Visualizes oscillations, damping curves, and peak transients (critical for pneumatic suspension leveling, ABS wheel-slip pulsing, and transmission gearshift RPM matching).
+   - Displays running statistics: Min, Max, Mean, and $\Delta/\text{second}$.
+2. **Script VM Call Stack & Opcode Execution Tracer:**
+   OMSI uses a reverse Polish notation (RPN) stack-based bytecode interpreter:
+   - Live visualization of the RPN Evaluation Stack: View the top 8 elements of the float stack (`[ 42.0, 1.25, 0.0, ... ]`) during frame evaluation.
+   - Active Macro & Trigger Monitor: Displays which macro (`{macro:Engine_Calc}`) or trigger (`{trigger:door_front_open}`) is currently firing.
+   - Breakpoint / Trap On Condition:
+     - Set non-halting trigger traps: e.g. "Notify when `L.door_state` exceeds $1.0$" or "Log when `L.air_pressure` drops below $5.5\text{ bar}$".
+     - Captures an instant diagnostic snapshot of all vehicle variables at the moment the trap condition evaluates to true.
+3. **Visual Variable Dependency Graph (Reactive DAG):**
+   - Interactive node graph showing variable propagation:
+     ```
+     [L.cockpit_throttle] ---> [L.engine_injection_rate] ---> [L.engine_rpm]
+                                                                     |
+                               +-------------------------------------+
+                               |
+                               v
+                     [L.sound_pitch_engine] ---> [omsi-audio mixer]
+     ```
+   - Instantly highlights upstream causes when an output variable fails to respond.
+4. **Simulation Time-Travel Scrubbing Buffer:**
+   - Maintains a high-performance in-memory ring buffer of the last 10 seconds of vehicle state (600 simulation ticks at 60 Hz).
+   - *Scrubbing Toolbar:* Pause the simulation, drag a time slider backwards, and inspect the exact variable state, throttle position, door switches, and air pressures that caused a bug (e.g., identifying why the bus failed to engage first gear 3 seconds ago).
+
+---
+
+### 3.4 Subsystem C & C+: Render Pass Frame Graph, Mesh Isolation & Collision Hull Visualizer
+*Status: Promoted from Extra C (Phases C1, C2). Converts render controls into a complete graphics debugging suite.*
+
+#### Core Mechanics (C1–C2)
+1. **C1: Render Pass & Wireframe Toggles:**
+   - Selectively toggle render passes: Sun Shadow Cascades (0, 1, 2, 3), SSAO Occlusion, Opaque Forward/PBR, Alpha-Blended Glass, Tonemapping & FXAA.
+   - Global or entity-scoped wireframe overlay using `wgpu::PolygonMode::Line`.
+2. **C2: Mesh-Level Isolation:**
+   - Single-click action: "Isolate Selected Mesh" (hides every other mesh instance in the entire scene, rendering the selected part against a neutral clear color).
+   - Single-click action: "Hide Selected Mesh" (temporarily suppresses rendering of the chosen mesh instance to look inside enclosed assemblies like engine blocks or gearboxes).
+   - Automatic cleanup: All visibility overrides reset instantly upon exiting inspector mode (`Ctrl+I`) or selecting a different entity.
+
+#### Advanced Scope-Creep Tier (C+)
+1. **Visual Render Pass Frame Graph:**
+   - Hierarchical UI tree displaying the GPU execution sequence for the current frame:
+     ```
+     [Frame #18420 - Total GPU: 8.42ms]
+       ├── [Pass 0] Shadow Map Cascade 0 (2048x2048) ............. 0.85ms
+       ├── [Pass 1] Shadow Map Cascade 1 (2048x2048) ............. 0.72ms
+       ├── [Pass 2] SSAO Depth Prepass (1920x1080) ............... 1.10ms
+       ├── [Pass 3] SSAO Compute & Bilateral Blur ................ 0.95ms
+       ├── [Pass 4] Main Forward PBR Pass (142 Draw Calls) ....... 3.80ms
+       │     ├── Opaque Terrains (12 calls) ...................... 0.65ms
+       │     ├── Scenery Meshes (84 calls) ....................... 1.85ms
+       │     └── Vehicle Meshes (46 calls) ....................... 1.30ms
+       ├── [Pass 5] Glass / Transparent Blend Pass ............... 0.60ms
+       └── [Pass 6] Post-Processing (Tonemap, Bloom, FXAA) ....... 0.40ms
+     ```
+   - Each pass features an independent freeze, bypass, and GPU microsecond execution meter.
+2. **"Ghost / X-Ray" Focus Mode:**
+   - Rather than harshly hiding unselected geometry, the inspector dims all unselected world elements to $15\%$ luminance with a cool monochrome desaturation tint.
+   - The selected entity renders in full PBR brilliance with a glowing silhouette edge, providing spatial context without visual clutter.
+3. **Collision Hull vs Render Mesh Discrepancy Overlay:**
+   - Renders the physical simulation bounding shapes (`omsi-sim::rigid`) concurrently with the visual rendering geometry:
+     - Chassis box collision hull (Cyan wireframe).
+     - Wheel collision cylinders and ray probes (Yellow wireframe).
+     - Scenery collision boxes and ground contact planes (Magenta wireframe).
+   - Instantly reveals collision discrepancies, such as bus bumpers clipping through curbs before physical contact or ground clearance height mismatches.
+4. **Surface Normal, Tangent & UV Seam 3D Visualizer:**
+   - Geometry debug shader pass projecting 3D vector lines directly from mesh vertices:
+     - Blue spikes: Surface normals ($\vec{N}$).
+     - Red spikes: Tangent vectors ($\vec{T}$).
+     - Green spikes: Bitangents ($\vec{B}$).
+   - Highlights texture UV seam discontinuities in bright orange, instantly pinpointing normal-mapping distortion and smoothing group seams.
+
+---
+
+### 3.5 Subsystem G & G+: Penetration Stacks, Depth Peeling & Hierarchical Breadcrumbs
+*Status: Promoted from Extra G (Phases G1, G2, G3). Solves selection occlusion and multi-layered geometry picking.*
+
+#### Core Mechanics (G1–G3)
+1. **G1: Multi-Entity Hit List (Penetration Corridor):**
+   - Cursor raycast intersects every bounding volume along its infinite forward path.
+   - Collects all valid hits sorted strictly by distance from camera near plane.
+   - Inspector panel displays an interactive vertical list:
+     ```
+     [Hit Corridor: 5 Entities Penetrated]
+       1. [0.82m] Bus Windshield Glass (MAN_SD200/windshield.o3d)
+       2. [1.15m] Wiper Blade Left (MAN_SD200/wiper_L.o3d)
+       3. [1.85m] Dashboard Switch (MAN_SD200/sw_hazard.o3d)
+       4. [2.40m] Driver Seat Cushion (MAN_SD200/seat_driver.o3d)
+       5. [14.2m] Ground Asphalt Spline (Terrain Tile 4850, 3170)
+     ```
+   - Clicking any row instantly focuses and pins that specific entity.
+2. **G2: Cycle-Through Hotkey (`Tab` / Wheel Scroll):**
+   - While hovering over geometry with the cursor, pressing `Tab` or `Shift+MouseWheel` cycles selection progressively down the hit corridor without moving the mouse.
+   - Selected entity is outlined with a depth-tested highlight; occluding objects in front are rendered with semi-transparent stipple dithering.
+3. **G3: Parent-Child Navigation:**
+   - Affordances to navigate the logical hierarchy:
+     - "Select Parent Vehicle" (from a wheel or switch).
+     - "Select Coupled Trailer" / "Select Articulation Section".
+     - "Select All Similar Instances" (highlights all identical scenery models placed on the current map tile).
+
+#### Advanced Scope-Creep Tier (G+)
+1. **3D Volumetric Ray Penetration Corridor:**
+   - In-world debug visualizer rendering the cursor ray as a thin glowing laser beam with small translucent spheres at each intersection point.
+   - Renders entry and exit points for thick volumes (e.g. bus cabins and building interiors).
+2. **Interactive "Onion-Skin" Depth Peeling Slider:**
+   - A smooth UI slider $(0..100\%)$ that slices away geometry layers starting from the camera position along the view vector.
+   - Peeling away the bus exterior skin cleanly exposes internal wiring, HVAC conduits, seat frames, passenger placement points, and drivetrain components.
+3. **Interactive Breadcrumb Navigation Bar:**
+   - Sticky header bar at the top of the inspector panel showing full scene hierarchy:
+     $$\text{World} \longrightarrow \text{Tile (4850, 3170)} \longrightarrow \text{Vehicle \#0 (MAN SD200)} \longrightarrow \text{Hitch Joint} \longrightarrow \text{Trailer Body} \longrightarrow \text{Door 2} \longrightarrow \text{Glass Pane}$$
+   - Clicking any ancestor breadcrumb instantly elevates the inspection target and reconfigures the property panel.
+4. **Sub-Pixel Proximity Ray Snapping:**
+   - Addresses the notorious problem of selecting ultra-thin geometry (catenary tram overhead wires, telephone poles, radio antennae, wiper needles).
+   - When exact triangle raycast misses by less than 8 screen pixels, snaps to the nearest line or slender bounding capsule, rendering a cyan guide reticle.
+
+---
+
+### 3.6 Subsystem I & I+: Persistent Layouts, Scripted Automation, CI Diagnostics & WebSocket Telemetry
+*Status: Promoted from Extra I (Phases I1, I2, I3). Connects the inspector to modding workflows, CI automation, and external tools.*
+
+#### Core Mechanics (I1–I3)
+1. **I1: Persistent Panel State:**
+   - Serializes panel geometry (screen position, width, collapsed/expanded sections, active tab) to `~/.config/openomsi/inspector_layout.json`.
+   - Remembers user watch tables and filter search strings across game restarts.
+2. **I2: Scripted Automation Hooks:**
+   - Full integration with `OMSI_INPUT` automation command grammar:
+     ```
+     OMSI_INPUT="t=1.0 inspect_select 400,300; t=1.5 inspect_assert mesh=='tacho.o3d'; t=2.0 inspect_set_var L.throttle=0.85; t=2.5 shot test_pass.png"
+     ```
+   - Enables headless automated testing of cockpit animations and scenery placement.
+3. **I3: Multi-Format Data Export:**
+   - Export selected entity diagnostic report to JSON, CSV, or YAML with a single click.
+   - Output includes world coordinates, orientation quaternions, mesh statistics, material definitions, and current script state.
+
+#### Advanced Scope-Creep Tier (I+)
+1. **Single-Click glTF 2.0 Export (`.glb`):**
+   - Direct export button: "Export Selection to glTF".
+   - Bakes the selected vehicle part or scenery object—including resolved world/local transforms, vertex colors, PBR material properties, and embedded PNG textures—into a standard `.glb` file.
+   - Modders can instantly import the exported model into Blender to inspect mesh geometry, UV mapping, or pivot alignments in an external DCC tool.
+2. **Headless Map & Asset Validation CLI (`--inspect-check`):**
+   - Command-line diagnostic validation tool executing without an active window:
+     ```bash
+     openomsi --inspect-check maps/Grundorf/global.cfg --report grundorf_audit.json
+     ```
+   - Automated audit passes:
+     - Detects missing or corrupted `.o3d` mesh files.
+     - Detects missing textures and uncompressed high-resolution textures.
+     - Identifies broken `.osc` script variables (variables written but never initialized or read).
+     - Finds unpinned scenery objects with invalid coordinate transforms or inverted normals.
+3. **Real-Time Remote Telemetry WebSocket Server:**
+   - Optional diagnostic server (`--telemetry-port 9002`):
+     - Broadcasts live JSON packets at 30 Hz containing vehicle velocity, engine RPM, gear status, door states, selected entity properties, and watch table values.
+     - Modders and virtual bus companies can connect web dashboards, hardware gauge clusters, or secondary tablet displays across the local network without modifying the engine core.
+4. **Session Trace Recording & Regression Diffing:**
+   - Record an entire driving run into a compact `.omsi-trace` binary stream.
+   - In-game "Trace Diff" tool: Replay a recorded trace side-by-side with live simulation to detect physics regressions, animation timing drifts, or script divergence after code modifications.
+
+---
+
+### 3.7 Subsystem D & D+: Road Splines, Traffic Graph, Path Network & Signal Phase Inspector
+*Status: Promoted from Deferred Register D. Unlocks the infrastructure backbone of OMSI maps.*
+
+#### Core Mechanics (D)
+1. **Spline Geometry Raycasting:**
+   - Define `SplineKey { tile_x: i32, tile_y: i32, spline_id: usize }`.
+   - Raycast directly against extruded road spline surfaces (`.sli`) using `omsi-geometry` cross-section bounds.
+   - Display spline profile path, segment length ($\text{m}$), elevation gradient ($\%$, pitch), banking/cant angle, and horizontal radius of curvature.
+
+#### Advanced Scope-Creep Tier (D+)
+1. **Traffic Path Network Overlay:**
+   - 3D visual projection of vehicle traffic paths running across the selected road spline:
+     - Directional vector lines color-coded by traffic group (Cars, Buses only, Trucks, Trams, Pedestrians).
+     - Active speed limit indicators displayed above path nodes ($30, 50, 80\text{ km/h}$).
+     - Overtaking permission flags, lane-change links, and merging yield priorities.
+2. **Traffic Signal Phase & Detector Loop Probe:**
+   - Clicking a traffic light or road junction displays the active Signal Controller state:
+     - Current signal phase (Rot, Rot-Gelb, Grün, Gelb) with countdown timer to next phase change.
+     - Active vehicle detector loop boxes projected in 3D onto the road surface (highlighting green when occupied by a vehicle chassis).
+     - Signal program schedule matrix and priority override triggers for approaching scheduled buses.
+3. **Spline Connection & Discontinuity Auditor:**
+   - Visual inspection of spline joints:
+     - Detects height mismatches ($> 1\text{mm}$) between adjoining splines causing vehicle tire hopping.
+     - Identifies angular kinks ($> 0.5^\circ$) that break AI path following.
+
+---
+
+### 3.8 Subsystem H & H+: Spatial Audio Emitters & Environmental Weather Probes
+*Status: Promoted from Deferred Register H. Illuminates invisible acoustics and climate variables.*
+
+#### Core Mechanics (H)
+1. **3D Sound Source Emitter Visualization:**
+   - Enumerate all spatial sound instances generated by `omsi-app` and `omsi-audio` (engine intake/exhaust, transmission whine, turbocharger spool, air brake hiss, door pneumatic solenoids, curved-track wheel screech).
+   - 3D wireframe sphere positioned at sound source origin in vehicle-local or world space.
+
+#### Advanced Scope-Creep Tier (H+)
+1. **Acoustic Cone & Attenuation Range Spheres:**
+   - Visual representation of audio propagation parameters:
+     - Inner radius sphere (full volume, $1.0\times$ gain).
+     - Outer radius sphere (fade to cutoff).
+     - Directional sound cone geometry (for horn and exhaust orientation).
+   - Real-time readout of active audio variables: Current volume decibels ($\text{dB}$), frequency pitch modulation factor ($0.5\times..2.0\times$), Doppler frequency shift.
+2. **Environmental & Climate Surface Probe:**
+   - Inspect environmental conditions affecting the selected entity's location:
+     - Solar direct irradiance ($\text{W/m}^2$), diffuse sky irradiance, sun azimuth and altitude angles.
+     - Surface wetness factor $[0.0..1.0]$ and dynamic tire adhesion friction coefficient ($\mu$).
+     - Ambient air temperature, road surface temperature, wind direction vector, and rain precipitation intensity.
+
+---
+
+### 3.9 Subsystem F & F+: Bidirectional Inspector-to-Editor Workflow & Non-Destructive Tweaking
+*Status: Promoted from Deferred Register F. Seamlessly connects inspection with the Scenery Object Editor.*
+
+#### Core Mechanics (F)
+1. **Seamless Mode Handover:**
+   - When inspecting a placed scenery object, a single UI button **"Promote to Object Editor"** executes a graceful, atomic transition:
+     - Retains the exact selected object instance.
+     - Deactivates Inspector Mode (`Ctrl+I`).
+     - Activates Object Editor Mode (`Ctrl+Shift+E`).
+     - Automatically pins the editor gizmo to the object, preserving user context without requiring re-selection.
+
+#### Advanced Scope-Creep Tier (F+)
+1. **Non-Destructive Transform Sandbox:**
+   - Allows temporary translation ($X, Y, Z$) and rotation (Yaw, Pitch, Roll) testing directly within the inspector panel.
+   - Shows live delta offsets from original map placement.
+   - "Revert" button instantly snaps the object back to map coordinates.
+   - "Commit to Map" button pushes modified coordinates into the editor undo/save queue (`tile_x_y.map`).
+
+---
+
+## 4. Unified UI/UX Architecture & Layout System
+
+The extended inspector interface organizes these powerful tools into a compact, responsive, docked side panel:
+
+```
++------------------------------------------------------------------------------------------+
+|  UNIFIED VISUAL DEBUG INSPECTOR                                          [Pin] [X] Close |
++------------------------------------------------------------------------------------------+
+|  Selected: "MAN_SD200/model/cockpit_speedo.o3d"                                          |
+|  Parent:   Vehicle #0 (MAN SD80) | Class: Lead Vehicle (Player)                          |
++------------------------------------------------------------------------------------------+
+|  [Transforms] | [Material/Tex] | [Script VM] | [Render/Pass] | [Kinematics] | [Audio/Env] |
++------------------------------------------------------------------------------------------+
+|  WORLD POSE                                                                              |
+|    Pos:  [ 4852.124, -318.450,   4.215 ] m                                               |
+|    Rot:  Yaw 182.40°, Pitch -1.25°, Roll 0.00°                                           |
+|  LOCAL POSE (Chassis Basis)                                                              |
+|    Pos:  [    0.420,    1.150,   0.850 ] m                                               |
+|    Rot:  Pitch 48.20° (Animated via `L.cockpit_speedo`)                                  |
+|                                                                                          |
+|  BOUNDS & MESH METRICS                                                                   |
+|    Vertices: 1,420 | Triangles: 2,140 | Radius: 0.185 m                                  |
+|    Asset: "Vehicles/MAN_SD200/Model/model_SD80.cfg" [Line 412]                           |
++------------------------------------------------------------------------------------------+
+|  MULTI-HIT CORRIDOR (Cycle: Tab / Scroll)                                                |
+|    ► 1. [0.82m] cockpit_speedo.o3d (Selected)                                           |
+|      2. [1.10m] dashboard_casing.o3d                                                     |
+|      3. [2.40m] chassis_frame.o3d                                                        |
++------------------------------------------------------------------------------------------+
+|  ACTIONS                                                                                 |
+|    [X-Ray Focus]  [Isolate Mesh]  [Add Watch]  [Dump GLB]  [Promote to Editor]            |
++------------------------------------------------------------------------------------------+
+```
+
+### UI Design Principles
+1. **Responsive Docking:** Clamps to left or right screen edge; automatically adapts from $1080\text{p}$ up to $4\text{K}$ high-DPI displays with physical-pixel scaling.
+2. **Strict Mouse Passthrough Prevention:** Panel bounding region consumes all mouse hover, click, and scroll events; clicks within the UI rect never pick or alter world geometry.
+3. **Complete Internationalization (i18n):** All labels, tabs, status indicators, and tooltips draw from `crates/omsi-app/locales/app.yml` across all 24 supported languages.
+
+---
+
+## 5. Phased Implementation Roadmap & SDD Task Graph
+
+Following the Subagent-Driven Development (SDD) paradigm, the scope creep is partitioned into five distinct, sequential phases with rigorous review checkpoints:
+
+```
+[Phase 1: Raycast & Spatial Corridor]
+   ├── Task 1.1: Dynamic BVH Spatial Acceleration
+   ├── Task 1.2: Multi-Hit Penetration Stack & Ray Corridor (G1, G2)
+   └── Task 1.3: Pedestrian / Human Raycasting & Key Model (E Core)
+           |
+           v
+[Phase 2: Simulation Observability & Script VM]
+   ├── Task 2.1: Human Kinematics, Poses & Pathfinding Vectors (E+)
+   ├── Task 2.2: Read-Only Script Variable Inspector & Search (B1)
+   ├── Task 2.3: Sandboxed Variable Overrides & Clamping (B2)
+   ├── Task 2.4: Sparklines, RPN Stack Tracer & Watch Tables (B3, B+)
+   └── Task 2.5: Simulation Time-Travel Scrubbing Buffer (B+)
+           |
+           v
+[Phase 3: Material, Textures & Render Pipeline]
+   ├── Task 3.1: Material Metadata & Async Texture Previews (A1, A2)
+   ├── Task 3.2: Dynamic ScriptTexture / TextTexture Live Zoomer (A+)
+   ├── Task 3.3: Texture Mipmap Heatmap & VRAM Profiler (A3, A+)
+   ├── Task 3.4: Render Pass Frame Graph & Mesh Isolation (C1, C2)
+   └── Task 3.5: Ghost/X-Ray Mode & Collision Hull Overlays (C+)
+           |
+           v
+[Phase 4: World Infrastructure, Audio & Environment]
+   ├── Task 4.1: Road Spline Geometry & Cross-Section Probe (D Core)
+   ├── Task 4.2: Traffic Path Graph & Signal Phase Timers (D+)
+   ├── Task 4.3: 3D Sound Emitters & Acoustic Cones (H Core, H+)
+   └── Task 4.4: Ambient Weather & Friction Surface Probe (H+)
+           |
+           v
+[Phase 5: Automation, Persistence, Export & External Telemetry]
+   ├── Task 5.1: Persistent Layouts & User Preferences (I1)
+   ├── Task 5.2: Automated Script Testing via OMSI_INPUT (I2)
+   ├── Task 5.3: Single-Click glTF 2.0 Export (`.glb`) (I3, I+)
+   ├── Task 5.4: Remote Telemetry WebSocket Server (I+)
+   └── Task 5.5: Non-Destructive Editor Handover Bridge (F, F+)
+```
+
+---
+
+## 6. Comprehensive Verification Matrix & Acceptance Criteria
+
+| Feature Area | Verification Scenario | Target Success Criteria |
+| :--- | :--- | :--- |
+| **Spatial Picking (G, E)** | Raycast into crowded bus interior with passengers and driver. | Generates ordered multi-hit corridor; `Tab` cycles hits cleanly; raycast execution $< 0.4\text{ ms}$. |
+| **Human Kinematics (E+)** | Inspect animated pedestrian boarding bus and scanning ticket. | Visualizes bone links, animation phase $[0..1]$, and destination stop node without jitter or lock contention. |
+| **Script VM Sandbox (B, B+)** | Live override of `L.cockpit_throttle` and `L.door_state`. | Value clamps to valid range; bus physics responds; "Reset Overrides" instantly restores simulation authority. |
+| **Time-Travel Scrubbing (B+)** | Scrub 5 seconds backward after deliberate engine stall. | Accurately reconstructs historical variable states; zero memory growth beyond allocated ring buffer. |
+| **Dynamic Textures (A+)** | Inspect rolling destination blind and digital IBIS display. | Live updating thumbnail; pixel-grid zoom shows crisp font rendering; zero GPU frame stalls. |
+| **PBR Tweak Sandbox (A+)** | Modify roughness and metalness on bus exterior body panels. | Split-screen wipe shows immediate visual comparison; zero permanent mutation of disk assets. |
+| **Render Isolation (C, C+)** | Activate "X-Ray Focus" and "Isolate Mesh" on speedo needle. | Surrounding scene dims to $15\%$; target mesh renders clearly in wireframe/solid; clean restore on exit. |
+| **Collision Hull Overlay (C+)** | Inspect bus bumper approaching curb and uneven road spline. | Visualizes physical box and wheel cylinders concurrently with visual triangles; clipping is visible. |
+| **Road Spline & Traffic (D+)** | Inspect busy intersection with traffic lights and AI paths. | Displays path lane vectors, speed limits, and traffic signal countdown timers in real time. |
+| **Audio Cones (H+)** | Inspect rear diesel engine sound source while revving. | Visualizes inner/outer acoustic radius spheres; gain/pitch modulation updates smoothly. |
+| **glTF Export (I+)** | Export selected articulated bus section to `.glb`. | Valid glTF 2.0 file created; opens cleanly in Blender with correct transforms, hierarchy, and textures. |
+| **Headless CI Check (I+)** | Run `openomsi --inspect-check` on Spandau map. | Produces comprehensive JSON audit of broken paths, missing textures, and variable errors within 30s. |
+| **Editor Bridge (F+)** | Click "Promote to Editor" on placed scenery building. | Seamlessly transitions into `Ctrl+Shift+E` object editor with building selected; no selection lost. |
+| **Performance Budget** | Full stress test: 30 AI buses, Spandau map, heavy rain, all tabs. | Frame time overhead $< 1.0\text{ ms}$; zero frame drops; memory overhead $< 32\text{ MB}$. |
+
+---
+
+## 7. Safety, Invariant Preservation & Fail-Closed Protocols
+
+1. **Stale Selection Handling:**
+   Whenever an entity is despawned (AI traffic leaves streaming radius, remote player disconnects, pedestrian enters building), the inspector snapshot detects generational invalidation within 1 frame:
+   - Immediately clears live overrides.
+   - Releases any active tile pin leases.
+   - Transitions UI status to `Entity Unavailable (Despawned)`.
+2. **Tile Pin Memory Ceiling:**
+   - Strict maximum of **one** pinned scenery tile at any time.
+   - Selecting a new scenery object atomically transfers the lease to the new tile and permits the old tile to stream out cleanly.
+   - Exiting inspector mode instantly releases all tile leases.
+3. **No File System Infiltration:**
+   - The inspector never writes to original game installation files.
+   - All diagnostic exports (PNGs, GLBs, JSON reports) are constrained strictly to the user's `Screenshots/` or standard configuration folders.

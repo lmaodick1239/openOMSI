@@ -32,7 +32,8 @@ mod driver;
 mod export;
 mod hud;
 mod humans;
-mod inspector;
+pub mod inspector;
+pub mod inspector_overrides;
 mod keys;
 mod lan;
 mod lan_world;
@@ -521,6 +522,7 @@ pub(crate) fn make_app(mut args: Args, server_cfg: Option<server::ServerCfg>) ->
         settings,
         inspector_active: false,
         inspector_selection: None,
+        inspector_overrides: inspector_overrides::OverrideManager::new(),
         lan: None,
         remotes: Default::default(),
         spikes: 0,

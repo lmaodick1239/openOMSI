@@ -9,11 +9,13 @@
 pub mod compat;
 pub mod compile;
 pub mod constfile;
+pub mod inspector;
 pub mod sysvar;
 pub mod vm;
 
 pub use compile::{compile, CompileInput, Program, ScriptError};
 pub use constfile::{ConstFile, Curve};
+pub use inspector::{EntityVarSnapshot, VarSnapshot, VarType, VarValue};
 pub use sysvar::SysVar;
 pub use vm::{set_session_seed, Host, NullHost, Stacks, State, Vm};
 

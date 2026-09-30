@@ -8,3 +8,6 @@ description = "model.cfg parser: meshes, materials, animations, lights, text tex
 [dependencies]
 omsi-cfg = { path = "../omsi-cfg" }
 log.workspace = true
+glam.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -181,6 +181,8 @@ pub(crate) struct App {
     pub(crate) inspector_active: bool,
     /// Currently selected entity in inspector mode.
     pub(crate) inspector_selection: Option<crate::inspector::InspectorSelection>,
+    /// Sandboxed variable override manager for live debugging.
+    pub(crate) inspector_overrides: crate::inspector_overrides::OverrideManager,
     /// OMSI's timetable window (`view_set_schedule`, Shift+Insert).
     pub(crate) timetable: bool,
     /// The left button is held on a switch: mouse movement turns it.

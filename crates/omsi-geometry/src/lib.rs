@@ -2,6 +2,8 @@
 //!
 //! World frame: x east, y north, z up, metres. Headings in degrees, 0 = +y, clockwise.
 
+pub mod bvh;
+
 use glam::{DVec2, DVec3, Mat4, Quat, Vec2, Vec3};
 use omsi_map::{tile_size, MapSpline, Terrain};
 use omsi_scenery::Spline;

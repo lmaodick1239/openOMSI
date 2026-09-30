@@ -1793,6 +1793,8 @@ pub struct Humans {
     pub people: Vec<Person>,
     rng: u64,
     next_id: u32,
+    /// Generation counter per human ID for inspector invalidation.
+    generations: HashMap<u32, u64>,
     /// Seconds since the start.
     time: f64,
     /// Passenger cabins by vehicle files (the front vehicle and its coupled parts).
@@ -2040,6 +2042,7 @@ impl Humans {
             people: Vec::new(),
             rng: 0x1234_5678_9ABC_DEF1,
             next_id: 1,
+            generations: HashMap::new(),
             time: 0.0,
             cabins: HashMap::new(),
             player_cabin: None,
