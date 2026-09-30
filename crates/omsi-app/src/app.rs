@@ -261,13 +261,183 @@ pub(crate) struct App {
 
 impl App {
     #[cfg(not(target_os = "android"))]
-    pub(crate) fn inspector_snapshot(&self) -> crate::inspector::imgui_inspector::InspectorUiSnapshot {
-        crate::inspector::imgui_inspector::InspectorUiSnapshot {
-            inspector: self
-                .inspector_selection
+    pub(crate) fn inspector_snapshot(
+        &self,
+    ) -> crate::inspector::imgui_inspector::InspectorUiSnapshot {
+        use crate::inspector::{
+            EditorView, ExportStatus, ExportView, HumanView, MaterialView, RenderView,
+            TelemetryView,
+        };
+
+        let inspector = self
+            .inspector_selection
+            .as_ref()
+            .map(crate::inspector::InspectorMainView::from);
+        let target = inspector
+            .as_ref()
+            .and_then(|view| view.selection_target.clone());
+        let material = self.scene.as_ref().and_then(|scene| {
+            target
                 .as_ref()
-                .map(crate::inspector::InspectorMainView::from),
-            ..Default::default()
+                .and_then(|_| scene.query_material_snapshot(0))
+                .map(|snapshot| MaterialView {
+                    name: target
+                        .as_ref()
+                        .map(|t| format!("{t:?}"))
+                        .unwrap_or_else(|| "Material 0".into()),
+                    shader_variant: snapshot.shader_variant,
+                    alpha_mode: format!("{:?}", snapshot.alpha_mode),
+                    blend_mode: format!("{:?}", snapshot.blend_mode),
+                    base_color: snapshot.color,
+                    metallic: snapshot.pbr_params.metalness,
+                    roughness: snapshot.pbr_params.roughness,
+                    base_texture: snapshot
+                        .diffuse_tex
+                        .map(|texture| format!("{:?}", texture.id)),
+                    mipmap_level: 0,
+                    sandbox_active: false,
+                })
+        });
+        let render = Some(RenderView {
+            passes: Vec::new(),
+            total_frame_time_ms: self.profile.get("render").copied().unwrap_or_default() as f32
+                * 1000.0,
+            total_draw_calls: 0,
+            total_triangles: 0,
+            isolation_mode: None,
+            wireframe_enabled: false,
+            collision_hulls_enabled: false,
+            show_normals: false,
+            show_uv_seams: false,
+        });
+        let human = match target {
+            Some(crate::inspector::SelectionTarget::Human { key, .. }) => Some(HumanView {
+                id: key.id,
+                generation: key.generation,
+                is_driver: key.is_driver,
+                position: [0.0; 3],
+                velocity: 0.0,
+                current_animation: "unavailable".into(),
+                animation_phase: 0.0,
+                bone_count: 0,
+                playback: "Playing".into(),
+            }),
+            _ => None,
+        };
+        let editor = Some(EditorView {
+            sandbox_active: false,
+            original_transform: None,
+            current_transform: None,
+            entity_key: self
+                .editor
+                .as_ref()
+                .and_then(|editor| editor.selected.map(|id| id.to_string())),
+            transaction_count: self
+                .editor
+                .as_ref()
+                .map(|editor| editor.added.len())
+                .unwrap_or_default(),
+        });
+        let telemetry = Some(TelemetryView {
+            timestamp_ms: self.started.elapsed().as_millis() as u64,
+            frame_time_ms: self.profile.get("frame").copied().unwrap_or_default() as f32 * 1000.0,
+            inspector_query_time_ms: self.profile.get("inspector").copied().unwrap_or_default()
+                as f32
+                * 1000.0,
+            gpu_staging_time_ms: self.profile.get("gpu").copied().unwrap_or_default() as f32
+                * 1000.0,
+            watch_expressions: Vec::new(),
+        });
+        let mut hierarchy = Vec::new();
+        if let Some(view) = inspector.as_ref() {
+            if let Some(identity) = view.entity_identity.as_ref() {
+                hierarchy.push(identity.clone());
+            }
+        }
+        hierarchy.extend(
+            self.placed
+                .iter()
+                .enumerate()
+                .map(|(index, _)| format!("Placed vehicle {index}")),
+        );
+        let mut log_lines = Vec::new();
+        if let Some((message, _)) = &self.service_msg {
+            log_lines.push(message.clone());
+        }
+        log_lines.push(format!("View: {}", self.view));
+        crate::inspector::imgui_inspector::InspectorUiSnapshot {
+            inspector,
+            material,
+            render,
+            human,
+            telemetry,
+            editor,
+            export: Some(ExportView {
+                status: ExportStatus::Idle,
+                destination: None,
+                error: None,
+            }),
+            hierarchy,
+            log_lines,
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn dispatch_inspector_command(
+        &mut self,
+        command: &crate::inspector::InspectorCommand,
+    ) -> crate::inspector::CommandResult {
+        let selection = self.inspector_selection.clone().unwrap_or_default();
+        crate::inspector::validate_command(command, &selection)?;
+        match command {
+            crate::inspector::InspectorCommand::Select(target) => {
+                self.inspector_selection =
+                    Some(crate::inspector::InspectorSelection::new(target.clone()));
+                Ok(())
+            }
+            crate::inspector::InspectorCommand::ClearSelection => {
+                self.inspector_selection = None;
+                Ok(())
+            }
+            crate::inspector::InspectorCommand::CycleNextHit => self
+                .inspector_selection
+                .as_mut()
+                .map(|selection| {
+                    selection.cycle_next_hit();
+                    Ok(())
+                })
+                .unwrap_or_else(|| {
+                    Err(crate::inspector::CommandError::StaleSelection(
+                        "No active selection".into(),
+                    ))
+                }),
+            crate::inspector::InspectorCommand::CyclePrevHit => self
+                .inspector_selection
+                .as_mut()
+                .map(|selection| {
+                    selection.cycle_prev_hit();
+                    Ok(())
+                })
+                .unwrap_or_else(|| {
+                    Err(crate::inspector::CommandError::StaleSelection(
+                        "No active selection".into(),
+                    ))
+                }),
+            crate::inspector::InspectorCommand::JumpToHit(index) => self
+                .inspector_selection
+                .as_mut()
+                .map(|selection| {
+                    selection.jump_to_hit(*index);
+                    Ok(())
+                })
+                .unwrap_or_else(|| {
+                    Err(crate::inspector::CommandError::StaleSelection(
+                        "No active selection".into(),
+                    ))
+                }),
+            _ => Err(crate::inspector::CommandError::NotSupported(
+                "Inspector command has no application boundary yet".into(),
+            )),
         }
     }
 
@@ -279,48 +449,21 @@ impl App {
             .map(|ui| ui.drain_commands())
             .unwrap_or_default();
         for command in commands {
-            let selection = self.inspector_selection.clone().unwrap_or_default();
-            if let Err(error) = crate::inspector::validate_command(&command, &selection) {
-                log::debug!("inspector command rejected: {error}");
-                continue;
-            }
-            let result = match &command {
-                crate::inspector::InspectorCommand::Select(target) => {
-                    self.inspector_selection = Some(crate::inspector::InspectorSelection::new(target.clone()));
-                    Ok(())
-                }
-                crate::inspector::InspectorCommand::ClearSelection => {
-                    self.inspector_selection = None;
-                    Ok(())
-                }
-                crate::inspector::InspectorCommand::CycleNextHit => self
-                    .inspector_selection
-                    .as_mut()
-                    .map(|selection| { selection.cycle_next_hit(); Ok(()) })
-                    .unwrap_or_else(|| Err(crate::inspector::CommandError::StaleSelection("No active selection".into()))),
-                crate::inspector::InspectorCommand::CyclePrevHit => self
-                    .inspector_selection
-                    .as_mut()
-                    .map(|selection| { selection.cycle_prev_hit(); Ok(()) })
-                    .unwrap_or_else(|| Err(crate::inspector::CommandError::StaleSelection("No active selection".into()))),
-                crate::inspector::InspectorCommand::JumpToHit(index) => self
-                    .inspector_selection
-                    .as_mut()
-                    .map(|selection| { selection.jump_to_hit(*index); Ok(()) })
-                    .unwrap_or_else(|| Err(crate::inspector::CommandError::StaleSelection("No active selection".into()))),
-                _ => Ok(()),
-            };
-            if let Err(error) = result {
-                log::debug!("inspector command ignored: {error}");
+            if let Err(error) = self.dispatch_inspector_command(&command) {
+                log::error!("inspector command failed: {error}");
             }
         }
     }
 
     #[cfg(windows)]
-    pub(crate) fn vr_active(&self) -> bool { self.vr.is_some() }
+    pub(crate) fn vr_active(&self) -> bool {
+        self.vr.is_some()
+    }
 
     #[cfg(not(windows))]
-    pub(crate) fn vr_active(&self) -> bool { false }
+    pub(crate) fn vr_active(&self) -> bool {
+        false
+    }
 
     pub(crate) fn resumed_impl(&mut self, event_loop: &ActiveEventLoop) {
         if let Some(window) = self.window.clone() {
@@ -329,7 +472,15 @@ impl App {
                 if let Some(r) = self.renderer.as_ref() {
                     let size = window.inner_size();
                     let vsync = self.settings.vsync && !self.vr_active();
-                    self.surface = SurfaceState::new_with(&self.instance, window.clone(), r, size.width.max(1), size.height.max(1), vsync).ok();
+                    self.surface = SurfaceState::new_with(
+                        &self.instance,
+                        window.clone(),
+                        r,
+                        size.width.max(1),
+                        size.height.max(1),
+                        vsync,
+                    )
+                    .ok();
                     self.last = Instant::now();
                 }
             }
@@ -340,7 +491,11 @@ impl App {
 
     /// The game's window (or the launcher's, handed over on a phone), its surface and the
     /// renderer; then the menu or, when the session is given, the world.
-    pub(crate) fn create_window(&mut self, event_loop: &ActiveEventLoop, given: Option<Arc<Window>>) {
+    pub(crate) fn create_window(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        given: Option<Arc<Window>>,
+    ) {
         // --size sets the window's size in points as well (1600x900 unless given)
         let (lw, lh) = self
             .args
@@ -369,17 +524,22 @@ impl App {
             Some(w) => w,
             None => Arc::new(event_loop.create_window(attrs).expect("window")),
         };
-        let mut renderer = match window_renderer(&mut self.instance, &window, self.settings.render_options()) {
-            Ok(r) => r,
-            Err(e) => {
-                fatal_message(&format!("The game cannot draw on this computer: {e:#}"));
-                crate::platform::exit(event_loop);
-                return;
-            }
-        };
+        let mut renderer =
+            match window_renderer(&mut self.instance, &window, self.settings.render_options()) {
+                Ok(r) => r,
+                Err(e) => {
+                    fatal_message(&format!("The game cannot draw on this computer: {e:#}"));
+                    crate::platform::exit(event_loop);
+                    return;
+                }
+            };
         #[cfg(windows)]
         if self.settings.vr_requested() {
-            match crate::openxr::Vr::new(&renderer, self.settings.vr_scale, self.settings.vr_desktop_mirror) {
+            match crate::openxr::Vr::new(
+                &renderer,
+                self.settings.vr_scale,
+                self.settings.vr_desktop_mirror,
+            ) {
                 Ok(vr) => self.vr = Some(vr),
                 Err(e) => log::error!("OpenXR could not start: {e:#}"),
             }
@@ -417,7 +577,8 @@ impl App {
                 .ok()
                 .map(|path| crate::inspector::imgui_inspector::ImGuiLayout::load(&path))
                 .unwrap_or_default();
-            let mut inspector = crate::inspector::imgui_inspector::InspectorUi::new().with_layout(layout);
+            let mut inspector =
+                crate::inspector::imgui_inspector::InspectorUi::new().with_layout(layout);
             inspector.attach_renderer(&renderer.device, &renderer.queue, surface.config.format);
             self.inspector_ui = Some(inspector);
         }
@@ -446,11 +607,17 @@ impl App {
         self.envir = omsi_content::Envir::load(&self.args.root.join("envir.cfg")).ok();
         // the weather cycle: a first weather that suits the month, the others after it
         if crate::weather_cycle::is_cycle(self.args.weather.as_deref()) {
-            let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(7);
+            let seed = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(7);
             let mut c = crate::weather_cycle::Cycle::new(seed);
             let month = start_clock(&self.args).day_month().1;
             let all = crate::weather_cycle::installed();
-            let clear = omsi_content::weather::Weather { fog: (50000.0, 1.0), ..Default::default() };
+            let clear = omsi_content::weather::Weather {
+                fog: (50000.0, 1.0),
+                ..Default::default()
+            };
             let r = c.rand();
             self.args.weather = crate::weather_cycle::pick(&all, &clear, "", month, r);
             log::info!("weather cycle: starting with {:?}", self.args.weather);
@@ -461,7 +628,13 @@ impl App {
         // offscreen: a session begun in the rain used to open on a bone-dry street
         self.wetness = self.weather.as_ref().map(initial_wetness).unwrap_or(0.0);
         self.clock = start_clock(&self.args);
-        setup_sky(&self.args, &renderer, &mut scene, self.envir.as_ref(), self.weather.as_ref());
+        setup_sky(
+            &self.args,
+            &renderer,
+            &mut scene,
+            self.envir.as_ref(),
+            self.weather.as_ref(),
+        );
         // the window streams the tiles around the camera unless a fixed area was asked for
         if !self.args.all && self.args.radius.is_none() {
             match open_world(&self.args) {
@@ -531,7 +704,13 @@ impl App {
                     Err(e) if self.args.bus.is_some() => {
                         log::warn!("the bus could not be put down ({e:#}); trying again");
                         spawn_player(&self.args, &w, &renderer, &mut scene).map_err(|e2| {
-                            self.service_msg = Some((format!("The bus could not be loaded: {}", format!("{e2:#}").lines().next().unwrap_or_default()), 15.0));
+                            self.service_msg = Some((
+                                format!(
+                                    "The bus could not be loaded: {}",
+                                    format!("{e2:#}").lines().next().unwrap_or_default()
+                                ),
+                                15.0,
+                            ));
                             e2
                         })
                     }
@@ -541,7 +720,8 @@ impl App {
                     Ok(mut p) => {
                         let audio = omsi_audio::AudioEngine::new();
                         if let Some(p) = p.as_mut() {
-                            p.vehicle.host.auto_clutch = if self.settings.auto_clutch { 1.0 } else { 0.0 };
+                            p.vehicle.host.auto_clutch =
+                                if self.settings.auto_clutch { 1.0 } else { 0.0 };
                             p.load_sounds(&audio);
                             p.ibis_background = true;
                             // --autostart applies in the window too, not only offscreen
@@ -552,7 +732,13 @@ impl App {
                             // a pack this bus borrows parts from is not installed: say so
                             // once, it explains dark displays and missing devices
                             if !p.vehicle.ty.missing_packs.is_empty() {
-                                let packs: Vec<String> = p.vehicle.ty.missing_packs.iter().map(|(n, _)| n.clone()).collect();
+                                let packs: Vec<String> = p
+                                    .vehicle
+                                    .ty
+                                    .missing_packs
+                                    .iter()
+                                    .map(|(n, _)| n.clone())
+                                    .collect();
                                 let msg = format!(
                                     "This bus takes parts from vehicle pack(s) that are not installed: {} (install them for its displays and devices)",
                                     packs.join(", ")
@@ -621,7 +807,11 @@ impl App {
                     }
                     h.exact_fare = self.settings.exact_fare;
                     h.boarding = self.settings.boarding.clone();
-                    h.voices = match self.settings.pax_voices.as_str() { "off" => 2, "tickets" => 1, _ => 0 };
+                    h.voices = match self.settings.pax_voices.as_str() {
+                        "off" => 2,
+                        "tickets" => 1,
+                        _ => 0,
+                    };
                     if let Some(p) = self.player.as_mut() {
                         h.set_cabin(&mut p.vehicle);
                         h.ticket_key = ticket_key_name(&self.args.root, &p.bindings);
@@ -642,7 +832,11 @@ impl App {
                 }
                 // (a player who joins draws the host's traffic in it, whatever their own count
                 // says: the host's cars had nowhere to go without it)
-                if self.args.traffic > 0 || self.args.schedule || crate::rail_drive::args_rail(&self.args) || self.args.lan_join.is_some() {
+                if self.args.traffic > 0
+                    || self.args.schedule
+                    || crate::rail_drive::args_rail(&self.args)
+                    || self.args.lan_join.is_some()
+                {
                     match traffic::Traffic::new(&self.args.root, &w, self.args.traffic) {
                         Ok(mut t) => {
                             if let Some(lan) = self.lan.as_ref() {
@@ -841,7 +1035,12 @@ impl App {
         let mut centers: Vec<DVec3> = self.camera.iter().map(|c| c.position).collect();
         centers.extend(self.player.iter().map(|p| p.vehicle.position));
         // a LAN host simulates the world around every player: the ground and the roads there
-        if self.lan.as_ref().map(|l| l.role == omsi_net::Role::Host).unwrap_or(false) {
+        if self
+            .lan
+            .as_ref()
+            .map(|l| l.role == omsi_net::Role::Host)
+            .unwrap_or(false)
+        {
             centers.extend(self.remotes.remotes.values().map(|r| r.vehicle().position));
         }
         let (Some(streamer), Some(w), Some(r), Some(scene)) = (
@@ -873,7 +1072,10 @@ impl App {
         }
         if let Some(p) = self.player.as_mut() {
             // (OMSI's [no_collision]: no solid object stops the bus)
-            p.vehicle.collision = self.settings.collision_objects.then(|| w.collision.lock().clone());
+            p.vehicle.collision = self
+                .settings
+                .collision_objects
+                .then(|| w.collision.lock().clone());
             p.vehicle.wheel_walls = self.settings.collision_objects;
         }
         match self.traffic.as_mut() {
@@ -918,9 +1120,15 @@ pub(crate) fn report_missing_content(w: &World, msg: &mut Option<(String, f32)>)
     let addon = |f: &str| f.split('/').take(2).collect::<Vec<_>>().join("/");
     let mut by_addon: std::collections::BTreeMap<String, Vec<String>> = Default::default();
     for (f, what) in &files {
-        by_addon.entry(addon(f)).or_default().push(format!("{what}: {f}"));
+        by_addon
+            .entry(addon(f))
+            .or_default()
+            .push(format!("{what}: {f}"));
     }
-    let mut text = format!("openOMSI: content this map uses that is not installed\nmap: {}\n\n", w.map_dir.display());
+    let mut text = format!(
+        "openOMSI: content this map uses that is not installed\nmap: {}\n\n",
+        w.map_dir.display()
+    );
     for (a, list) in &by_addon {
         text.push_str(&format!("{a} ({} files)\n", list.len()));
         for l in list {
@@ -933,14 +1141,24 @@ pub(crate) fn report_missing_content(w: &World, msg: &mut Option<(String, f32)>)
             text.push_str(&format!("  {t}\n"));
         }
     }
-    let Some(dir) = crate::lan::data_dir() else { return };
+    let Some(dir) = crate::lan::data_dir() else {
+        return;
+    };
     let path = dir.join("missing_content.txt");
     let _ = std::fs::write(&path, text);
     let objects = files.iter().filter(|(_, w)| *w != "spline").count();
     let splines = files.len() - objects;
     let addons: Vec<&String> = by_addon.keys().take(4).collect();
-    let more = if by_addon.len() > 4 { format!(" and {} more", by_addon.len() - 4) } else { String::new() };
-    log::warn!("missing content: {objects} objects, {splines} splines, {} textures (list: {})", textures.len(), path.display());
+    let more = if by_addon.len() > 4 {
+        format!(" and {} more", by_addon.len() - 4)
+    } else {
+        String::new()
+    };
+    log::warn!(
+        "missing content: {objects} objects, {splines} splines, {} textures (list: {})",
+        textures.len(),
+        path.display()
+    );
     if !files.is_empty() {
         *msg = Some((
             format!(

@@ -2323,6 +2323,10 @@ impl ApplicationHandler for App {
                     *self.profile.entry("acquire").or_default() += __t.elapsed().as_secs_f64();
                     if frame.is_none() {
                         self.hidden_frames += 1;
+                        #[cfg(not(target_os = "android"))]
+                        if let Some(inspector) = self.inspector_ui.as_mut() {
+                            inspector.abort_frame();
+                        }
                     }
                     let view = frame
                         .as_ref()

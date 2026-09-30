@@ -293,6 +293,17 @@ impl InspectorUi {
         let mut captured_layout = layout.windows;
         let mut commands = VecDeque::new();
         let ui = self.context.frame();
+        ui.main_menu_bar(|| {
+            ui.menu("Windows", || {
+                for window in InspectorWindow::all() {
+                    let mut open = captured_layout[window.index()].open;
+                    if ui.menu_item_config(window.name()).selected(open).build() {
+                        open = true;
+                    }
+                    captured_layout[window.index()].open = open;
+                }
+            });
+        });
         captured_layout[InspectorWindow::Inspector.index()] = draw_window(
             ui,
             layout.windows[InspectorWindow::Inspector.index()],
@@ -408,6 +419,15 @@ impl InspectorUi {
                 })?;
         }
         Ok(())
+    }
+
+    /// End a frame when no render pass/surface is available.
+    pub fn abort_frame(&mut self) {
+        if self.frame_started {
+            let _ = self.context.render();
+            self.frame_started = false;
+        }
+        self.clear_input_capture();
     }
 
     /// Queue a typed command from a widget or integration layer.
@@ -665,6 +685,20 @@ fn draw_human(
         "Playback: {}  phase {:.2}  bones {}",
         view.playback, view.animation_phase, view.bone_count
     ));
+    if ui.collapsing_header("Skeleton", imgui::TreeNodeFlags::empty()) {
+        for index in 0..view.bone_count {
+            let bone_name = format!("bone_{index}");
+            if ui.small_button(format!("Toggle {bone_name}")) {
+                if let Some(target) = selected_target(inspector) {
+                    commands.push_back(InspectorCommand::Human(
+                        crate::inspector::HumanCommand::ToggleBone { target, bone_name },
+                    ));
+                }
+            }
+        }
+    }
+    ui.separator();
+    ui.text("Navigation and economy diagnostics are snapshot-owned.");
     let Some(target) = selected_target(inspector) else {
         return;
     };
@@ -893,6 +927,18 @@ mod tests {
         let error = BackendError("surface unavailable".into());
         assert_eq!(error.0, "surface unavailable");
         assert!(!InputCaptureState::default().blocks_pointer());
+    }
+
+    #[test]
+    fn abort_without_active_frame_clears_capture() {
+        let mut inspector = InspectorUi::new();
+        inspector.input_capture = InputCaptureState {
+            pointer: true,
+            keyboard: true,
+        };
+        inspector.abort_frame();
+        assert!(!inspector.frame_started);
+        assert_eq!(inspector.input_capture, InputCaptureState::default());
     }
 
     #[test]
