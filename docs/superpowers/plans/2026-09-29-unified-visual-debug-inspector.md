@@ -2,16 +2,18 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a separate in-game inspector mode that selects a precise vehicle mesh/part or loaded scenery object, shows its parent and read-only identity/transforms, and highlights it without changing existing driving or object-editor behavior outside inspector mode.
+**Goal:** Add a separate in-game inspector window with mutually exclusive selection modes for vehicle meshes/parts and loaded scenery objects, read-only identity/transforms, selected-entity highlighting, and opt-in CPU/GPU/renderer profilers without changing existing driving or object-editor behavior outside the active debug mode.
 
-**Architecture:** Keep the feature in `omsi-app`, using a dedicated inspector module to own selection handles, candidate collection, invalidation, and displayed snapshot data. Reuse existing vehicle/scenery geometry and render/UI systems; keep simulation entities authoritative, represent render-only scenery with stable map/tile identity, and add a reference-counted tile pin for the selected scenery target. Inspector input takes precedence only while its mode is active; ordinary cockpit and editor paths remain intact otherwise.
+**Architecture:** Keep the feature in `omsi-app`, using dedicated inspector state for mode selection, stable handles, candidate collection, invalidation, and displayed snapshot data. Vehicle-mesh selection and scenery-object selection are separate modes rather than one mixed picker; profiler views are separate diagnostic modes and never alter selection identity. Reuse existing vehicle/scenery geometry and render/UI systems; keep simulation entities authoritative, represent render-only scenery with stable map/tile identity, and add a reference-counted tile pin for the selected scenery target. The inspector window owns mouse hit-testing, focus, dragging/scrolling, buttons, and pointer capture; world clicks are considered only when the window does not consume the event. Ordinary cockpit and editor paths remain intact when debug modes are inactive.
 
 **Tech Stack:** Rust workspace, `glam`, existing `omsi_geometry::ray_mesh`, `omsi_render` scene/overlay APIs, custom `omsi-app::ui`, `cargo test`, and existing scripted/offscreen test facilities.
 
 ## Global Constraints
 
 - Keep the feature in the existing Rust workspace and use established dependencies; the MVP adds no UI or rendering dependency.
-- Preserve cockpit control and object editor semantics when inspector mode is inactive.
+- Preserve cockpit control and object editor semantics when inspector/debug modes are inactive.
+- Selection modes are mutually exclusive: Vehicle Mesh Select, Scenery Object Select, and no-selection mode. Changing mode clears incompatible selection state and releases any scenery pin lease.
+- Profiler modes are separate from selection modes: CPU frame profile, GPU pass timers, renderer draw/cull diagnostics, and texture/memory diagnostics. They are opt-in, read-only, bounded to the inspector window, and may be enabled independently only where the underlying diagnostic source supports it.
 - Inspector selection is read-only: no transforms, script values, material state, or render state may be changed through the MVP.
 - Select the specific vehicle mesh/part and display its parent vehicle; selecting a scenery object identifies both the placed object instance and the selected mesh when available.
 - Vehicle candidates include the player, AI traffic, remote vehicles, parked vehicles if represented by runtime vehicle meshes, and coupled/trailer parts. Scenery candidates include every loaded scenery object, editable and non-editable. Humans, terrain and splines are deferred.
@@ -27,22 +29,23 @@
 
 ### MVP in scope
 
-- A dedicated toggleable inspector mode. The candidate key from the audit (`Ctrl+``) is not final; pick an available, non-conflicting binding by inspecting current input mappings and expose it in the UI/help text.
-- Click-to-select the closest valid mesh hit on the cursor ray.
-- Vehicle selections identify a mesh and the owning vehicle, with trailer/coupled section identity where relevant.
-- Scenery selections identify the placed instance and mesh. Include loaded editable and non-editable objects; do not limit this to `World::edit_objects` because that collection is specifically editor-oriented and incomplete for generic visual inspection.
+- A dedicated toggleable inspector window. The candidate key from the audit (`Ctrl+``) is not final; pick an available, non-conflicting binding by inspecting current input mappings and expose it in the UI/help text.
+- Separate mutually exclusive selection modes: Vehicle Mesh Select and Scenery Object Select. Each mode has its own candidate collector, stable identity, empty-click behavior, and panel summary; switching modes clears the prior selection and releases any scenery lease.
+- Click-to-select the closest valid hit on the cursor ray for the active selection mode only.
+- A mouse-interactive inspector window: click mode tabs/buttons, drag the window by its title bar, scroll long snapshots, activate clear/close controls, and capture pointer input while dragging or interacting. Window clicks must never select world objects behind the panel.
 - A compact, read-only side panel with kind, parent, mesh, source path, world/local transform, and bounds where real data exists.
 - Selection marker and optional bounds/local-axis debug visualization.
-- Explicit clear-selection and inspector-exit behavior.
+- Separate profiler tabs/modes for CPU frame stages (`OMSI_PROFILE`), GPU pass timestamps (`OMSI_GPU_TIMERS`), renderer draw/cull/flicker diagnostics, and texture/VRAM diagnostics where existing hooks provide data. Profiler output is displayed as snapshots/ring-buffer summaries, not unbounded per-frame log spam.
+- Explicit clear-selection, mode-switch, profiler-toggle, and inspector-exit behavior.
 - Selection continuity for loaded scenery through tile pinning, subject to the safety constraints below.
-- Focused tests for hit ordering, identity stability, stale selections, input routing, pin lifecycle, and UI geometry.
+- Focused tests for hit ordering, identity stability, stale selections, mode isolation, mouse hit-testing/pointer capture, pin lifecycle, profiler sampling, and UI geometry.
 
 ### Deliberately deferred
 
 - Human/pedestrian hit tests; terrain and spline picking.
-- Texture/material preview, mip inspection, PNG export, dynamic texture capture.
+- Texture/material preview, mip inspection, PNG export, dynamic texture capture. The MVP profiler may show aggregate texture/VRAM counters only; it does not read back image content.
 - Script-variable watches, editing, trigger execution, or watch-table UX.
-- Wireframe pipeline, render-pass controls, mesh hiding/isolation, forced material changes.
+- Wireframe pipeline, render-pass controls, mesh hiding/isolation, forced material changes. Diagnostic counters/timestamps are allowed; mutating render controls are not.
 - Scenery transform manipulation or replacement of the existing object editor.
 - Persistent inspector selection across game sessions.
 - Multiplayer synchronization of inspector selection or server-authoritative inspection.
@@ -194,7 +197,7 @@ A `InspectorHit` carries the handle, ray distance, part-local transform, world t
 
 **Exit criteria:** A selected scenery instance cannot be unloaded behind the inspector, and no tile remains pinned after its selection becomes invalid or the inspector closes.
 
-### Task 6: Wire inspector mode and input precedence
+### Task 6: Wire separate selection modes and mouse precedence
 
 **Files:**
 - Modify: `crates/omsi-app/src/app.rs`.
@@ -202,12 +205,13 @@ A `InspectorHit` carries the handle, ray distance, part-local transform, world t
 - Modify: `crates/omsi-app/src/app_events.rs`.
 - Modify: `crates/omsi-app/src/ui.rs`.
 
-- [ ] Choose an available key binding after checking `app_events.rs`, `input_script.rs`, and OMSI `keyboard.cfg` handling. Avoid assuming the audit's `Ctrl+`` binding is free; document the chosen binding in UI/help text.
-- [ ] Add inspector mode and click actions to `App`. Mode entry clears stale hover/drag state as needed; mode exit releases tile leases and clears debug overlays/selection.
-- [ ] Give inspector mode first refusal over world left-clicks, before cockpit `Player::click`, object editor picking/drag, and mouse-driven interaction. Keep escape/menu, chat typing, panel interaction, and pointer capture behavior coherent.
-- [ ] Ensure a click on the inspector panel or another existing UI region is consumed by UI and does not select behind it. Empty-space world clicks clear selection. A new hit replaces selection and pin lease in one operation.
+- [ ] Choose available bindings after checking `app_events.rs`, `input_script.rs`, and OMSI `keyboard.cfg` handling. Avoid assuming the audit's `Ctrl+`` binding is free; document the inspector toggle and selection-mode shortcuts in UI/help text.
+- [ ] Add explicit `None`, `VehicleMeshSelect`, and `SceneryObjectSelect` modes to `App`. Mode entry clears incompatible selection/hover/drag state; mode exit releases tile leases and clears debug overlays/selection.
+- [ ] Give the active selection mode first refusal over world left-clicks, before cockpit `Player::click`, object editor picking/drag, and mouse-driven interaction. Keep escape/menu, chat typing, panel interaction, and pointer capture behavior coherent.
+- [ ] Make the inspector window mouse-interactive: hit-test title bar, mode tabs, profiler tabs, close/clear buttons, scroll region, and resize/drag affordances if supported; capture and release the pointer deterministically so drag/scroll events cannot leak to the world.
+- [ ] Ensure a click inside the inspector window or another existing UI region is consumed by UI and does not select behind it. Empty-space world clicks clear only the active mode's selection. A new hit replaces selection and pin lease in one operation.
 - [ ] Preserve existing editor behavior when editor mode is active outside inspector mode. If both modes can be entered, define and enforce mutual exclusion or explicit activation transition; never let both consume the same click.
-- [ ] Add deterministic input-routing tests for inspector-on/off, cockpit switch under cursor, editor active, panel hit, chat/menu open, and mode exit.
+- [ ] Add deterministic input-routing tests for mode isolation, inspector-on/off, panel/title/tab/button/scroll clicks, pointer capture, chat/menu open, cockpit switch under cursor, editor active, and mode exit.
 - [ ] If `OMSI_INPUT` can automate clicks/keys for this app, add or adapt commands so this mode and world selection can be covered in scripted runs without introducing test-only production behavior.
 - [ ] Run `cargo test -p omsi-app input_script::` and the new inspector routing tests.
 
@@ -246,6 +250,24 @@ A `InspectorHit` carries the handle, ray distance, part-local transform, world t
 
 **Exit criteria:** Selection is unambiguous in the scene and overlay geometry follows the live selected transform without lingering after invalidation.
 
+### Task 8a: Add profiler modes and bounded diagnostic sampling
+
+**Files:**
+- Modify: `crates/omsi-app/src/app.rs`.
+- Modify: `crates/omsi-app/src/app_events.rs`.
+- Modify: `crates/omsi-app/src/ui.rs`.
+- Modify: `crates/omsi-render/src/lib.rs` only where existing diagnostic hooks need an inspector-facing snapshot boundary.
+- Test: existing renderer/app profiling and diagnostic test seams.
+
+- [ ] Define profiler mode state independently from selection mode: CPU frame stages, GPU pass timestamps, draw/cull/flicker counters, and texture/VRAM aggregate diagnostics.
+- [ ] Reuse existing `OMSI_PROFILE`, `OMSI_GPU_TIMERS`, `OMSI_DEBUG_DRAWS`, `OMSI_DEBUG_CULL`, `OMSI_DEBUG_FLICKER`, and `OMSI_DEBUG_TEXTURES` hooks where available; do not duplicate timers or introduce a second logging pipeline.
+- [ ] Convert diagnostic data into bounded per-frame or rolling-window snapshots owned by the inspector window. Cap history and sampling frequency, and make unsupported GPU counters display as unavailable rather than blocking the frame.
+- [ ] Add profiler tab/button/scroll interactions to the same mouse-capture contract as selection modes. Toggling a profiler never changes the selected entity, tile lease, camera, or simulation state.
+- [ ] Test mode independence, bounded history, unsupported timestamp-query fallback, profiler-off behavior, and no unbounded log/memory growth.
+- [ ] Run focused profiler/renderer tests and `cargo check -p omsi-app -p omsi-render`.
+
+**Exit criteria:** The inspector can show actionable CPU/GPU/renderer/texture diagnostic summaries through separate profiler modes without changing selection behavior or destabilizing frame execution.
+
 ### Task 9: Add compact custom inspector panel and localization
 
 **Files:**
@@ -253,9 +275,9 @@ A `InspectorHit` carries the handle, ray distance, part-local transform, world t
 - Modify: `crates/omsi-app/src/app_events.rs`.
 - Modify: `crates/omsi-app/locales/app.yml`.
 
-- [ ] Add an owned inspector view input containing mode state, optional snapshot/status, and supported display toggles. Keep `ui.rs` independent of mutable simulation entities.
-- [ ] Lay out a compact side panel with title/mode state, selected object/part, parent, asset, world position/rotation, local position/rotation, bounds, tile if applicable, and clear/close actions.
-- [ ] Define a pure panel layout/hit-test method so input routing can consume panel clicks before world picking. Use physical-pixel coordinates and the same scale conventions as existing widgets.
+- [ ] Add an owned inspector view input containing selection mode, profiler mode, optional snapshot/status, and supported display toggles. Keep `ui.rs` independent of mutable simulation entities.
+- [ ] Lay out a compact, draggable and scrollable window with title/mode state, selection-mode tabs, profiler tabs, selected object/part, parent, asset, world position/rotation, local position/rotation, bounds, tile if applicable, and clear/close actions.
+- [ ] Define pure layout/hit-test methods for title bar, tabs, buttons, scroll region, and world-transparent areas so input routing can consume window clicks before world picking. Use physical-pixel coordinates and the same scale conventions as existing widgets.
 - [ ] Make the panel responsive to small and large surfaces: clamp dimensions, avoid chat/menu/cursor tooltip overlap where practical, and ensure long asset paths wrap, truncate with an accessible full-path alternative, or clip within the panel bounds without escaping it.
 - [ ] Add localized labels and statuses in every supported locale section, following existing fallback conventions. Avoid adding implementation prose into visible UI.
 - [ ] Add tests for panel hit-test boundaries, small/large screen layout, no-selection state, unavailable status, and long paths.
@@ -272,7 +294,8 @@ A `InspectorHit` carries the handle, ray distance, part-local transform, world t
 
 - [ ] Document the selected key, toggle lifecycle, click-to-select/empty-click-to-clear, supported target types, mesh/parent distinction, panel fields, and limitations.
 - [ ] Add or extend scripted end-to-end coverage for entering inspector mode, selecting a vehicle part, selecting scenery, replacing a selection, clearing, and exiting.
-- [ ] Add a busy-scene performance check or profiling recipe covering the player bus, traffic, remotes, and loaded scenery; establish a measurable budget before optimization work.
+- [ ] Add a busy-scene performance check and profiling recipe covering the player bus, traffic, remotes, loaded scenery, CPU stages, GPU passes, draw/cull counters, and texture/VRAM summaries; establish measurable budgets before optimization work.
+- [ ] Verify each selection mode and profiler tab through mouse interaction, including drag, scroll, button activation, pointer capture, and clicks that must not pass through the inspector window.
 - [ ] Run `cargo test -p omsi-geometry`, `cargo test -p omsi-app`, and `cargo check --workspace` after focused tests pass.
 - [ ] Manually verify normal gameplay, cockpit hover/click, object editor select/drag, chat, menu, free camera, and stream boundaries with inspector both on and off.
 - [ ] Inspect the final diff for unrelated edits and ensure no texture, script-editing, or render-control capabilities slipped into the MVP.
@@ -409,6 +432,8 @@ Promotion criteria: collect measured candidate counts and raycast timings first.
 ## Completion Checklist
 
 - [ ] MVP boundaries above are met; all follow-on register items remain out of scope unless explicitly approved.
+- [ ] Vehicle Mesh Select and Scenery Object Select are separate, mutually exclusive modes with independent hit-testing and lifecycle behavior.
+- [ ] CPU, GPU, renderer, and texture/VRAM profiler tabs are separate from selection modes, bounded, read-only, and safe when diagnostics are unavailable.
 - [ ] A selected vehicle mesh reports a stable parent vehicle and coupled section where applicable.
 - [ ] Any loaded scenery instance is selectable and remains valid through its one-tile lease, or displays unavailable after reload/removal.
 - [ ] Clicking inspector UI never picks world geometry; inspector off preserves existing click behavior.
