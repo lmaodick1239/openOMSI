@@ -232,6 +232,20 @@ pub fn validate_command_with_context(
     }
 }
 
+/// Validate a command using the active sandbox state exposed by an editor adapter.
+/// This is the command-boundary entry point when editor state is available.
+pub fn validate_command_with_editor_adapter(
+    command: &InspectorCommand,
+    selection: &InspectorSelection,
+    editor: &dyn crate::inspector::view_models::EditorAdapter,
+) -> CommandResult {
+    let sandbox_target = editor.get_sandbox_target();
+    let context = ValidationContext {
+        sandbox_target: sandbox_target.as_ref(),
+    };
+    validate_command_with_context(command, selection, &context)
+}
+
 fn validate_material_command(
     cmd: &MaterialCommand,
     selection: &InspectorSelection,
@@ -477,12 +491,16 @@ mod tests {
 
     #[test]
     fn test_validate_material_mipmap_level() {
-        let selection = InspectorSelection::new(SelectionTarget::Vehicle {
+        let target = SelectionTarget::Vehicle {
             key: VehicleKey::Player { generation: 1 },
             mesh: None,
-        });
+        };
+        let selection = InspectorSelection::new(target.clone());
 
-        let cmd = InspectorCommand::Material(MaterialCommand::SetMipmapLevel(20));
+        let cmd = InspectorCommand::Material(MaterialCommand::SetMipmapLevel {
+            target,
+            level: 20,
+        });
         let result = validate_command(&cmd, &selection);
         assert!(result.is_err());
     }

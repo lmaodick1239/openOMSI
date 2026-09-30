@@ -9,6 +9,18 @@ fn make_vehicle_target(generation: u64) -> SelectionTarget {
     }
 }
 
+fn make_vehicle_mesh_target(generation: u64, mesh_index: usize) -> SelectionTarget {
+    SelectionTarget::Vehicle {
+        key: VehicleKey::Player { generation },
+        mesh: Some(MeshIdentity::new(
+            "vehicle.cfg".to_string(),
+            mesh_index,
+            format!("mesh-{mesh_index}"),
+            None,
+        )),
+    }
+}
+
 fn make_human_target(id: u32, generation: u64) -> SelectionTarget {
     SelectionTarget::Human {
         key: HumanKey {
@@ -74,6 +86,29 @@ fn test_with_snapshot_after_deserialization_validates_generation() {
     assert!(result.is_err());
     let err_msg = result.unwrap_err();
     assert!(err_msg.contains("mismatch") || err_msg.contains("do not match"));
+}
+
+#[test]
+fn test_with_snapshot_after_deserialization_rejects_mesh_mismatch() {
+    let selected_target = make_vehicle_mesh_target(42, 1);
+    let stale_mesh_target = make_vehicle_mesh_target(42, 2);
+    let selection = InspectorSelection::new(selected_target.clone());
+    let view = InspectorMainView::from(&selection);
+    let json = serde_json::to_string(&view).expect("Serialization failed");
+    let deserialized: InspectorMainView =
+        serde_json::from_str(&json).expect("Deserialization failed");
+
+    let snapshot = InspectorSnapshot {
+        target: stale_mesh_target,
+        position: Some([10.0, 20.0, 30.0]),
+        rotation: None,
+        bounds: None,
+        model_path: None,
+        mesh_name: None,
+        metadata: vec![],
+    };
+
+    assert!(deserialized.with_snapshot(&snapshot).is_err());
 }
 
 #[test]
