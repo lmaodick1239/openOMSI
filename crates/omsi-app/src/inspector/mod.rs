@@ -7,6 +7,8 @@ pub mod persistence;
 pub mod export;
 pub mod telemetry;
 pub mod editor_bridge;
+pub mod view_models;
+pub mod commands;
 
 // Re-export core types
 pub use core::*;
@@ -16,3 +18,7 @@ pub use persistence::{InspectorLayout, InspectorTab, PanelGeometry, WatchExpress
 pub use export::{export_to_gltf, ExportError, MeshData, MaterialData, AlphaMode};
 pub use telemetry::{TelemetryServer, InspectorSnapshot as TelemetrySnapshot};
 pub use editor_bridge::{EditorBridge, TransformSandbox, EditorTransition, Transform};
+
+// Re-export view models and commands
+pub use view_models::*;
+pub use commands::*;
