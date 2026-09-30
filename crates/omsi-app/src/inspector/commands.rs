@@ -160,6 +160,7 @@ impl std::fmt::Display for CommandError {
 impl std::error::Error for CommandError {}
 
 /// Validate a command against current selection state.
+/// For editor commands requiring sandbox state, prefer `validate_command_with_context`.
 pub fn validate_command(
     command: &InspectorCommand,
     selection: &InspectorSelection,
@@ -199,9 +200,35 @@ pub fn validate_command(
         InspectorCommand::Material(cmd) => validate_material_command(cmd, selection),
         InspectorCommand::Render(_) => Ok(()), // Render commands are global
         InspectorCommand::Human(cmd) => validate_human_command(cmd, selection),
-        InspectorCommand::Editor(cmd) => validate_editor_command(cmd, selection),
+        InspectorCommand::Editor(cmd) => {
+            // Editor commands that require sandbox state will be rejected here
+            // Callers should use validate_command_with_context when sandbox state is available
+            validate_editor_command(cmd, selection)
+        }
         InspectorCommand::Export(cmd) => validate_export_command(cmd, selection),
         InspectorCommand::Telemetry(_) => Ok(()), // Telemetry commands are global
+    }
+}
+
+/// Validation context for commands requiring subsystem state.
+pub struct ValidationContext<'a> {
+    /// Active sandbox target (from EditorAdapter::get_sandbox_target()).
+    pub sandbox_target: Option<&'a SelectionTarget>,
+}
+
+/// Validate a command with additional subsystem context.
+/// Use this for editor commands when you have access to sandbox state.
+pub fn validate_command_with_context(
+    command: &InspectorCommand,
+    selection: &InspectorSelection,
+    context: &ValidationContext,
+) -> CommandResult {
+    match command {
+        InspectorCommand::Editor(cmd) => {
+            validate_editor_command_with_sandbox(cmd, selection, context.sandbox_target)
+        }
+        // All other commands use standard validation
+        _ => validate_command(command, selection),
     }
 }
 
@@ -273,22 +300,21 @@ fn validate_editor_command(
     validate_target_matches_selection(cmd_target, selection)?;
 
     // UpdateTransform, ApplySandbox, RevertSandbox, and CloseSandbox require an active sandbox
-    // Since we don't have access to sandbox state here, we only validate the target.
-    // The actual sandbox state check should be done at execution time by the subsystem.
-    // However, we add a marker for callers to check sandbox state separately.
+    // When called without sandbox context, we reject these operations
     match cmd {
         EditorCommand::StartSandbox { .. } => {
-            // StartSandbox is OK with just valid target
+            // StartSandbox is OK with just valid target (can't check if sandbox active here)
             Ok(())
         }
         EditorCommand::UpdateTransform { .. }
         | EditorCommand::ApplySandbox { .. }
         | EditorCommand::RevertSandbox { .. }
         | EditorCommand::CloseSandbox { .. } => {
-            // These require active sandbox but we can't validate that here without sandbox state.
-            // Return a specific error that the caller should check sandbox state.
-            // For now, we allow these through and rely on execution-time validation.
-            Ok(())
+            // These require active sandbox state. Without context, we reject them.
+            // Callers must use validate_command_with_context for proper validation.
+            Err(CommandError::SandboxNotActive(
+                "Editor command requires sandbox context; use validate_command_with_context".to_string()
+            ))
         }
     }
 }

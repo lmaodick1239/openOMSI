@@ -251,9 +251,8 @@ pub struct InspectorMainView {
     pub penetration_stack: Vec<PenetrationHitView>,
     /// Current hit index in stack.
     pub current_hit_index: usize,
-    /// Internal: full selection target for snapshot validation.
-    #[serde(skip)]
-    _selection_target: Option<SelectionTarget>,
+    /// Full selection target for snapshot validation (serialized to preserve identity across round-trips).
+    pub selection_target: Option<SelectionTarget>,
 }
 
 /// Penetration hit view.
@@ -323,7 +322,7 @@ impl From<&InspectorSelection> for InspectorMainView {
             penetration_stack,
             current_hit_index: selection.current_hit_index,
             // Store the full selection target for snapshot validation
-            _selection_target: selection_target,
+            selection_target,
         }
     }
 }
@@ -342,28 +341,16 @@ impl InspectorMainView {
         }
 
         // Full typed identity validation: compare generation counters, entity keys, and mesh identity
-        if let Some(ref view_target) = self._selection_target {
+        if let Some(ref view_target) = self.selection_target {
             if !targets_match(view_target, &snapshot.target) {
                 return Err(format!(
                     "Snapshot target mismatch: view and snapshot targets do not match (different generation, entity, or mesh)"
                 ));
             }
         } else {
-            // Fallback to type-only validation if we don't have the full target
-            let snapshot_type = match &snapshot.target {
-                SelectionTarget::Vehicle { .. } => "Vehicle",
-                SelectionTarget::Scenery { .. } => "Scenery",
-                SelectionTarget::Human { .. } => "Human",
-            };
-            
-            if let Some(ref view_type) = self.entity_type {
-                if view_type != snapshot_type {
-                    return Err(format!(
-                        "Snapshot type mismatch: view has {}, snapshot has {}",
-                        view_type, snapshot_type
-                    ));
-                }
-            }
+            // Without full target identity, we cannot safely validate
+            // Reject to prevent stale data acceptance after deserialization
+            return Err("View missing selection target identity; cannot validate snapshot".to_string());
         }
 
         self.position = snapshot.position;
