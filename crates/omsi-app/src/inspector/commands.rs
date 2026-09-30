@@ -141,6 +141,8 @@ pub enum CommandError {
     InvalidParameter(String),
     /// Operation failed.
     Failed(String),
+    /// Sandbox not active (for editor commands).
+    SandboxNotActive(String),
 }
 
 impl std::fmt::Display for CommandError {
@@ -150,6 +152,7 @@ impl std::fmt::Display for CommandError {
             CommandError::NotSupported(msg) => write!(f, "Not supported: {}", msg),
             CommandError::InvalidParameter(msg) => write!(f, "Invalid parameter: {}", msg),
             CommandError::Failed(msg) => write!(f, "Failed: {}", msg),
+            CommandError::SandboxNotActive(msg) => write!(f, "Sandbox not active: {}", msg),
         }
     }
 }
@@ -266,7 +269,80 @@ fn validate_editor_command(
         EditorCommand::CloseSandbox { target } => target,
     };
 
-    validate_target_matches_selection(cmd_target, selection)
+    // All editor commands require a valid target selection
+    validate_target_matches_selection(cmd_target, selection)?;
+
+    // UpdateTransform, ApplySandbox, RevertSandbox, and CloseSandbox require an active sandbox
+    // Since we don't have access to sandbox state here, we only validate the target.
+    // The actual sandbox state check should be done at execution time by the subsystem.
+    // However, we add a marker for callers to check sandbox state separately.
+    match cmd {
+        EditorCommand::StartSandbox { .. } => {
+            // StartSandbox is OK with just valid target
+            Ok(())
+        }
+        EditorCommand::UpdateTransform { .. }
+        | EditorCommand::ApplySandbox { .. }
+        | EditorCommand::RevertSandbox { .. }
+        | EditorCommand::CloseSandbox { .. } => {
+            // These require active sandbox but we can't validate that here without sandbox state.
+            // Return a specific error that the caller should check sandbox state.
+            // For now, we allow these through and rely on execution-time validation.
+            Ok(())
+        }
+    }
+}
+
+/// Extended validation that includes sandbox state check for editor commands.
+/// Use this when you have access to the EditorAdapter to check sandbox state.
+pub fn validate_editor_command_with_sandbox(
+    cmd: &EditorCommand,
+    selection: &InspectorSelection,
+    sandbox_target: Option<&SelectionTarget>,
+) -> CommandResult {
+    // First do standard target validation
+    let cmd_target = match cmd {
+        EditorCommand::StartSandbox { target } => target,
+        EditorCommand::UpdateTransform { target, .. } => target,
+        EditorCommand::ApplySandbox { target } => target,
+        EditorCommand::RevertSandbox { target } => target,
+        EditorCommand::CloseSandbox { target } => target,
+    };
+
+    validate_target_matches_selection(cmd_target, selection)?;
+
+    // Check sandbox state requirements
+    match cmd {
+        EditorCommand::StartSandbox { .. } => {
+            // StartSandbox should not have an active sandbox
+            if sandbox_target.is_some() {
+                return Err(CommandError::NotSupported(
+                    "Sandbox already active".to_string()
+                ));
+            }
+            Ok(())
+        }
+        EditorCommand::UpdateTransform { target, .. }
+        | EditorCommand::ApplySandbox { target }
+        | EditorCommand::RevertSandbox { target }
+        | EditorCommand::CloseSandbox { target } => {
+            // These require active sandbox matching the command target
+            match sandbox_target {
+                None => Err(CommandError::SandboxNotActive(
+                    "No active sandbox for this operation".to_string()
+                )),
+                Some(active_target) => {
+                    if targets_match(target, active_target) {
+                        Ok(())
+                    } else {
+                        Err(CommandError::StaleSelection(
+                            "Sandbox target does not match command target".to_string()
+                        ))
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn validate_export_command(cmd: &ExportCommand, selection: &InspectorSelection) -> CommandResult {
@@ -387,12 +463,14 @@ mod tests {
 
     #[test]
     fn test_validate_material_pbr_range() {
-        let selection = InspectorSelection::new(SelectionTarget::Vehicle {
+        let target = SelectionTarget::Vehicle {
             key: VehicleKey::Player { generation: 1 },
             mesh: None,
-        });
+        };
+        let selection = InspectorSelection::new(target.clone());
 
         let cmd = InspectorCommand::Material(MaterialCommand::SetPBROverride {
+            target,
             metallic: 1.5,
             roughness: 0.5,
         });
@@ -402,12 +480,24 @@ mod tests {
 
     #[test]
     fn test_validate_human_command_wrong_selection() {
-        let selection = InspectorSelection::new(SelectionTarget::Vehicle {
+        let vehicle_target = SelectionTarget::Vehicle {
             key: VehicleKey::Player { generation: 1 },
             mesh: None,
-        });
+        };
+        let selection = InspectorSelection::new(vehicle_target);
 
-        let cmd = InspectorCommand::Human(HumanCommand::SetPlayback(PlaybackMode::Paused));
+        let human_target = SelectionTarget::Human {
+            key: HumanKey {
+                id: 1,
+                generation: 1,
+                is_driver: false,
+            },
+            mesh_id: None,
+        };
+        let cmd = InspectorCommand::Human(HumanCommand::SetPlayback {
+            target: human_target,
+            mode: PlaybackMode::Paused,
+        });
         let result = validate_command(&cmd, &selection);
         assert!(result.is_err());
     }
@@ -415,7 +505,12 @@ mod tests {
     #[test]
     fn test_validate_export_no_selection() {
         let selection = InspectorSelection::default();
+        let target = SelectionTarget::Vehicle {
+            key: VehicleKey::Player { generation: 1 },
+            mesh: None,
+        };
         let cmd = InspectorCommand::Export(ExportCommand::ExportSelection {
+            target,
             destination: "/tmp/test.glb".to_string(),
         });
 

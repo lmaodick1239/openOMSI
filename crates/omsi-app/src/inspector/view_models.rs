@@ -251,6 +251,9 @@ pub struct InspectorMainView {
     pub penetration_stack: Vec<PenetrationHitView>,
     /// Current hit index in stack.
     pub current_hit_index: usize,
+    /// Internal: full selection target for snapshot validation.
+    #[serde(skip)]
+    _selection_target: Option<SelectionTarget>,
 }
 
 /// Penetration hit view.
@@ -264,8 +267,8 @@ pub struct PenetrationHitView {
 
 impl From<&InspectorSelection> for InspectorMainView {
     fn from(selection: &InspectorSelection) -> Self {
-        let (selection_status, entity_type, entity_identity) = match &selection.status {
-            SelectionStatus::None => ("No selection".to_string(), None, None),
+        let (selection_status, entity_type, entity_identity, selection_target) = match &selection.status {
+            SelectionStatus::None => ("No selection".to_string(), None, None, None),
             SelectionStatus::Selected(target) => {
                 let (etype, eid) = match target {
                     SelectionTarget::Vehicle { key, .. } => {
@@ -292,10 +295,10 @@ impl From<&InspectorSelection> for InspectorMainView {
                         ("Human".to_string(), id)
                     }
                 };
-                ("Selected".to_string(), Some(etype), Some(eid))
+                ("Selected".to_string(), Some(etype), Some(eid), Some(target.clone()))
             }
             SelectionStatus::Invalidated { reason } => {
-                (format!("Invalidated: {}", reason), None, None)
+                (format!("Invalidated: {}", reason), None, None, None)
             }
         };
 
@@ -319,12 +322,15 @@ impl From<&InspectorSelection> for InspectorMainView {
             metadata: Vec::new(),
             penetration_stack,
             current_hit_index: selection.current_hit_index,
+            // Store the full selection target for snapshot validation
+            _selection_target: selection_target,
         }
     }
 }
 
 impl InspectorMainView {
     /// Enrich with snapshot data. Validates that the snapshot target matches the view's selection.
+    /// Performs full typed identity validation including generation counters and mesh identity.
     pub fn with_snapshot(mut self, snapshot: &InspectorSnapshot) -> Result<Self, String> {
         // Validate snapshot matches the view's current selection
         if self.selection_status == "No selection" {
@@ -335,19 +341,28 @@ impl InspectorMainView {
             return Err("Cannot enrich invalidated selection".to_string());
         }
 
-        // Additional validation: check that entity types match
-        let snapshot_type = match &snapshot.target {
-            SelectionTarget::Vehicle { .. } => "Vehicle",
-            SelectionTarget::Scenery { .. } => "Scenery",
-            SelectionTarget::Human { .. } => "Human",
-        };
-        
-        if let Some(ref view_type) = self.entity_type {
-            if view_type != snapshot_type {
+        // Full typed identity validation: compare generation counters, entity keys, and mesh identity
+        if let Some(ref view_target) = self._selection_target {
+            if !targets_match(view_target, &snapshot.target) {
                 return Err(format!(
-                    "Snapshot type mismatch: view has {}, snapshot has {}",
-                    view_type, snapshot_type
+                    "Snapshot target mismatch: view and snapshot targets do not match (different generation, entity, or mesh)"
                 ));
+            }
+        } else {
+            // Fallback to type-only validation if we don't have the full target
+            let snapshot_type = match &snapshot.target {
+                SelectionTarget::Vehicle { .. } => "Vehicle",
+                SelectionTarget::Scenery { .. } => "Scenery",
+                SelectionTarget::Human { .. } => "Human",
+            };
+            
+            if let Some(ref view_type) = self.entity_type {
+                if view_type != snapshot_type {
+                    return Err(format!(
+                        "Snapshot type mismatch: view has {}, snapshot has {}",
+                        view_type, snapshot_type
+                    ));
+                }
             }
         }
 
@@ -357,6 +372,26 @@ impl InspectorMainView {
         self.mesh_name = snapshot.mesh_name.clone();
         self.metadata = snapshot.metadata.clone();
         Ok(self)
+    }
+}
+
+/// Helper function to check if two SelectionTargets match (including generation and mesh identity).
+/// This is the same logic used in commands.rs for command validation.
+fn targets_match(a: &SelectionTarget, b: &SelectionTarget) -> bool {
+    match (a, b) {
+        (
+            SelectionTarget::Vehicle { key: key_a, mesh: mesh_a },
+            SelectionTarget::Vehicle { key: key_b, mesh: mesh_b },
+        ) => key_a == key_b && mesh_a == mesh_b,
+        (
+            SelectionTarget::Scenery { key: key_a, mesh: mesh_a },
+            SelectionTarget::Scenery { key: key_b, mesh: mesh_b },
+        ) => key_a == key_b && mesh_a == mesh_b,
+        (
+            SelectionTarget::Human { key: key_a, mesh_id: mesh_a },
+            SelectionTarget::Human { key: key_b, mesh_id: mesh_b },
+        ) => key_a == key_b && mesh_a == mesh_b,
+        _ => false,
     }
 }
 
