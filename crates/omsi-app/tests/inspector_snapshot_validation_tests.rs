@@ -48,7 +48,7 @@ fn test_with_snapshot_matching_generation() {
     let target = make_vehicle_target(1);
     let selection = InspectorSelection::new(target.clone());
     let view = InspectorMainView::from(&selection);
-    
+
     let snapshot = InspectorSnapshot {
         target,
         position: Some([10.0, 20.0, 30.0]),
@@ -58,7 +58,7 @@ fn test_with_snapshot_matching_generation() {
         mesh_name: Some("body".to_string()),
         metadata: vec![],
     };
-    
+
     let result = view.with_snapshot(&snapshot);
     assert!(result.is_ok());
     let enriched = result.unwrap();
@@ -72,7 +72,7 @@ fn test_with_snapshot_stale_generation() {
     let target_gen2 = make_vehicle_target(2);
     let selection = InspectorSelection::new(target_gen2);
     let view = InspectorMainView::from(&selection);
-    
+
     let snapshot = InspectorSnapshot {
         target: target_gen1, // Stale generation
         position: Some([10.0, 20.0, 30.0]),
@@ -82,7 +82,7 @@ fn test_with_snapshot_stale_generation() {
         mesh_name: None,
         metadata: vec![],
     };
-    
+
     let result = view.with_snapshot(&snapshot);
     assert!(result.is_err());
     let err_msg = result.unwrap_err();
@@ -93,13 +93,13 @@ fn test_with_snapshot_stale_generation() {
 fn test_with_snapshot_mesh_identity_mismatch() {
     let mesh1 = make_mesh_identity("body", 0);
     let mesh2 = make_mesh_identity("wheel", 1);
-    
+
     let target_mesh1 = make_vehicle_target_with_mesh(1, mesh1);
     let target_mesh2 = make_vehicle_target_with_mesh(1, mesh2);
-    
+
     let selection = InspectorSelection::new(target_mesh1);
     let view = InspectorMainView::from(&selection);
-    
+
     let snapshot = InspectorSnapshot {
         target: target_mesh2, // Different mesh
         position: Some([10.0, 20.0, 30.0]),
@@ -109,7 +109,7 @@ fn test_with_snapshot_mesh_identity_mismatch() {
         mesh_name: None,
         metadata: vec![],
     };
-    
+
     let result = view.with_snapshot(&snapshot);
     assert!(result.is_err());
 }
@@ -118,10 +118,10 @@ fn test_with_snapshot_mesh_identity_mismatch() {
 fn test_with_snapshot_mesh_identity_match() {
     let mesh = make_mesh_identity("body", 0);
     let target = make_vehicle_target_with_mesh(1, mesh.clone());
-    
+
     let selection = InspectorSelection::new(target.clone());
     let view = InspectorMainView::from(&selection);
-    
+
     let snapshot = InspectorSnapshot {
         target,
         position: Some([10.0, 20.0, 30.0]),
@@ -131,7 +131,7 @@ fn test_with_snapshot_mesh_identity_match() {
         mesh_name: Some("body".to_string()),
         metadata: vec![],
     };
-    
+
     let result = view.with_snapshot(&snapshot);
     assert!(result.is_ok());
 }
@@ -140,10 +140,10 @@ fn test_with_snapshot_mesh_identity_match() {
 fn test_with_snapshot_different_entity_types() {
     let vehicle_target = make_vehicle_target(1);
     let human_target = make_human_target(1, 1);
-    
+
     let selection = InspectorSelection::new(vehicle_target);
     let view = InspectorMainView::from(&selection);
-    
+
     let snapshot = InspectorSnapshot {
         target: human_target, // Wrong type
         position: Some([10.0, 20.0, 30.0]),
@@ -153,7 +153,7 @@ fn test_with_snapshot_different_entity_types() {
         mesh_name: None,
         metadata: vec![],
     };
-    
+
     let result = view.with_snapshot(&snapshot);
     assert!(result.is_err());
     let err_msg = result.unwrap_err();
@@ -164,7 +164,7 @@ fn test_with_snapshot_different_entity_types() {
 fn test_with_snapshot_no_selection() {
     let selection = InspectorSelection::default();
     let view = InspectorMainView::from(&selection);
-    
+
     let snapshot = InspectorSnapshot {
         target: make_vehicle_target(1),
         position: Some([10.0, 20.0, 30.0]),
@@ -174,7 +174,7 @@ fn test_with_snapshot_no_selection() {
         mesh_name: None,
         metadata: vec![],
     };
-    
+
     let result = view.with_snapshot(&snapshot);
     assert!(result.is_err());
     let err_msg = result.unwrap_err();
@@ -186,7 +186,7 @@ fn test_with_snapshot_invalidated_selection() {
     let mut selection = InspectorSelection::new(make_vehicle_target(1));
     selection.invalidate("Entity was destroyed".to_string());
     let view = InspectorMainView::from(&selection);
-    
+
     let snapshot = InspectorSnapshot {
         target: make_vehicle_target(1),
         position: Some([10.0, 20.0, 30.0]),
@@ -196,7 +196,7 @@ fn test_with_snapshot_invalidated_selection() {
         mesh_name: None,
         metadata: vec![],
     };
-    
+
     let result = view.with_snapshot(&snapshot);
     assert!(result.is_err());
     let err_msg = result.unwrap_err();
@@ -207,10 +207,10 @@ fn test_with_snapshot_invalidated_selection() {
 fn test_with_snapshot_human_generation_mismatch() {
     let human_gen1 = make_human_target(42, 1);
     let human_gen2 = make_human_target(42, 2);
-    
+
     let selection = InspectorSelection::new(human_gen2);
     let view = InspectorMainView::from(&selection);
-    
+
     let snapshot = InspectorSnapshot {
         target: human_gen1,
         position: Some([10.0, 20.0, 30.0]),
@@ -220,7 +220,7 @@ fn test_with_snapshot_human_generation_mismatch() {
         mesh_name: None,
         metadata: vec![],
     };
-    
+
     let result = view.with_snapshot(&snapshot);
     assert!(result.is_err());
 }
@@ -229,10 +229,10 @@ fn test_with_snapshot_human_generation_mismatch() {
 fn test_with_snapshot_scenery_key_mismatch() {
     let scenery1 = make_scenery_target(100);
     let scenery2 = make_scenery_target(200);
-    
+
     let selection = InspectorSelection::new(scenery1);
     let view = InspectorMainView::from(&selection);
-    
+
     let snapshot = InspectorSnapshot {
         target: scenery2,
         position: Some([10.0, 20.0, 30.0]),
@@ -242,7 +242,7 @@ fn test_with_snapshot_scenery_key_mismatch() {
         mesh_name: None,
         metadata: vec![],
     };
-    
+
     let result = view.with_snapshot(&snapshot);
     assert!(result.is_err());
 }

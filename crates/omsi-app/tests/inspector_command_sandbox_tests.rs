@@ -21,7 +21,7 @@ fn test_validate_start_sandbox_no_active_sandbox() {
     let target = make_vehicle_target(1);
     let selection = InspectorSelection::new(target.clone());
     let cmd = EditorCommand::StartSandbox { target };
-    
+
     // Should succeed when no sandbox is active
     let result = validate_editor_command_with_sandbox(&cmd, &selection, None);
     assert!(result.is_ok());
@@ -33,7 +33,7 @@ fn test_validate_start_sandbox_with_active_sandbox() {
     let selection = InspectorSelection::new(target.clone());
     let active_sandbox = make_vehicle_target(1);
     let cmd = EditorCommand::StartSandbox { target };
-    
+
     // Should fail when sandbox already active
     let result = validate_editor_command_with_sandbox(&cmd, &selection, Some(&active_sandbox));
     assert!(result.is_err());
@@ -54,7 +54,7 @@ fn test_validate_update_transform_no_sandbox() {
         position: [0.0, 0.0, 0.0],
         rotation: [0.0, 0.0, 0.0],
     };
-    
+
     // Should fail when no sandbox is active
     let result = validate_editor_command_with_sandbox(&cmd, &selection, None);
     assert!(result.is_err());
@@ -76,7 +76,7 @@ fn test_validate_update_transform_matching_sandbox() {
         position: [1.0, 2.0, 3.0],
         rotation: [0.0, 90.0, 0.0],
     };
-    
+
     // Should succeed when sandbox matches target
     let result = validate_editor_command_with_sandbox(&cmd, &selection, Some(&active_sandbox));
     assert!(result.is_ok());
@@ -92,7 +92,7 @@ fn test_validate_update_transform_mismatched_sandbox() {
         position: [1.0, 2.0, 3.0],
         rotation: [0.0, 90.0, 0.0],
     };
-    
+
     // Should fail when sandbox target doesn't match
     let result = validate_editor_command_with_sandbox(&cmd, &selection, Some(&active_sandbox));
     assert!(result.is_err());
@@ -109,7 +109,7 @@ fn test_validate_apply_sandbox_no_sandbox() {
     let target = make_vehicle_target(1);
     let selection = InspectorSelection::new(target.clone());
     let cmd = EditorCommand::ApplySandbox { target };
-    
+
     // Should fail when no sandbox is active
     let result = validate_editor_command_with_sandbox(&cmd, &selection, None);
     assert!(result.is_err());
@@ -125,7 +125,7 @@ fn test_validate_apply_sandbox_matching_sandbox() {
     let selection = InspectorSelection::new(target.clone());
     let active_sandbox = target.clone();
     let cmd = EditorCommand::ApplySandbox { target };
-    
+
     // Should succeed when sandbox matches target
     let result = validate_editor_command_with_sandbox(&cmd, &selection, Some(&active_sandbox));
     assert!(result.is_ok());
@@ -136,7 +136,7 @@ fn test_validate_revert_sandbox_no_sandbox() {
     let target = make_vehicle_target(1);
     let selection = InspectorSelection::new(target.clone());
     let cmd = EditorCommand::RevertSandbox { target };
-    
+
     // Should fail when no sandbox is active
     let result = validate_editor_command_with_sandbox(&cmd, &selection, None);
     assert!(result.is_err());
@@ -151,7 +151,7 @@ fn test_validate_close_sandbox_no_sandbox() {
     let target = make_vehicle_target(1);
     let selection = InspectorSelection::new(target.clone());
     let cmd = EditorCommand::CloseSandbox { target };
-    
+
     // Should fail when no sandbox is active
     let result = validate_editor_command_with_sandbox(&cmd, &selection, None);
     assert!(result.is_err());
@@ -167,13 +167,13 @@ fn test_validate_sandbox_different_entity_types() {
     let scenery_target = make_scenery_target(100);
     let selection = InspectorSelection::new(vehicle_target.clone());
     let active_sandbox = scenery_target.clone();
-    
+
     let cmd = EditorCommand::UpdateTransform {
         target: vehicle_target,
         position: [0.0, 0.0, 0.0],
         rotation: [0.0, 0.0, 0.0],
     };
-    
+
     // Should fail when entity types don't match
     let result = validate_editor_command_with_sandbox(&cmd, &selection, Some(&active_sandbox));
     assert!(result.is_err());

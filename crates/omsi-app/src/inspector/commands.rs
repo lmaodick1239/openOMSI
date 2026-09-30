@@ -165,6 +165,16 @@ pub fn validate_command(
     command: &InspectorCommand,
     selection: &InspectorSelection,
 ) -> CommandResult {
+    let context = ValidationContext {
+        sandbox_target: None,
+    };
+    validate_command_with_context(command, selection, &context)
+}
+
+fn validate_command_without_sandbox_context(
+    command: &InspectorCommand,
+    selection: &InspectorSelection,
+) -> CommandResult {
     match command {
         InspectorCommand::Select(_) => Ok(()),
         InspectorCommand::ClearSelection => Ok(()),
@@ -228,7 +238,7 @@ pub fn validate_command_with_context(
             validate_editor_command_with_sandbox(cmd, selection, context.sandbox_target)
         }
         // All other commands use standard validation
-        _ => validate_command(command, selection),
+        _ => validate_command_without_sandbox_context(command, selection),
     }
 }
 

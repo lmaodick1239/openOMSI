@@ -33,19 +33,40 @@ fn make_human_target(id: u32, generation: u64) -> SelectionTarget {
 }
 
 #[test]
+fn test_inspector_snapshot_serialization_preserves_target_identity() {
+    let target = make_vehicle_mesh_target(42, 3);
+    let snapshot = InspectorSnapshot {
+        target: target.clone(),
+        position: Some([1.0, 2.0, 3.0]),
+        rotation: Some([0.0, 0.0, 0.0, 1.0]),
+        bounds: Some(([0.0, 0.0, 0.0], [2.0, 3.0, 4.0])),
+        model_path: Some("vehicle.cfg".to_string()),
+        mesh_name: Some("mesh-3".to_string()),
+        metadata: vec![("kind".to_string(), "vehicle".to_string())],
+    };
+
+    let json = serde_json::to_string(&snapshot).expect("Serialization failed");
+    let restored: InspectorSnapshot =
+        serde_json::from_str(&json).expect("Deserialization failed");
+
+    assert_eq!(restored, snapshot);
+    assert_eq!(restored.target, target);
+}
+
+#[test]
 fn test_view_serialization_preserves_selection_target() {
     let target = make_vehicle_target(42);
     let selection = InspectorSelection::new(target.clone());
     let view = InspectorMainView::from(&selection);
-    
+
     // Serialize and deserialize
     let json = serde_json::to_string(&view).expect("Serialization failed");
     let deserialized: InspectorMainView = serde_json::from_str(&json).expect("Deserialization failed");
-    
+
     // Verify selection_target is preserved
     assert!(deserialized.selection_target.is_some());
     let restored_target = deserialized.selection_target.unwrap();
-    
+
     match (&target, &restored_target) {
         (
             SelectionTarget::Vehicle { key: k1, mesh: m1 },
@@ -62,14 +83,14 @@ fn test_view_serialization_preserves_selection_target() {
 fn test_with_snapshot_after_deserialization_validates_generation() {
     let target_gen42 = make_vehicle_target(42);
     let target_gen43 = make_vehicle_target(43);
-    
+
     let selection = InspectorSelection::new(target_gen42.clone());
     let view = InspectorMainView::from(&selection);
-    
+
     // Serialize and deserialize
     let json = serde_json::to_string(&view).expect("Serialization failed");
     let deserialized: InspectorMainView = serde_json::from_str(&json).expect("Deserialization failed");
-    
+
     // Create snapshot with different generation
     let snapshot = InspectorSnapshot {
         target: target_gen43,
@@ -80,7 +101,7 @@ fn test_with_snapshot_after_deserialization_validates_generation() {
         mesh_name: None,
         metadata: vec![],
     };
-    
+
     // Should reject stale snapshot even after deserialization
     let result = deserialized.with_snapshot(&snapshot);
     assert!(result.is_err());
@@ -114,14 +135,14 @@ fn test_with_snapshot_after_deserialization_rejects_mesh_mismatch() {
 #[test]
 fn test_with_snapshot_after_deserialization_accepts_matching() {
     let target = make_vehicle_target(42);
-    
+
     let selection = InspectorSelection::new(target.clone());
     let view = InspectorMainView::from(&selection);
-    
+
     // Serialize and deserialize
     let json = serde_json::to_string(&view).expect("Serialization failed");
     let deserialized: InspectorMainView = serde_json::from_str(&json).expect("Deserialization failed");
-    
+
     // Create snapshot with matching target
     let snapshot = InspectorSnapshot {
         target: target.clone(),
@@ -132,7 +153,7 @@ fn test_with_snapshot_after_deserialization_accepts_matching() {
         mesh_name: Some("body".to_string()),
         metadata: vec![],
     };
-    
+
     // Should succeed with matching target after deserialization
     let result = deserialized.with_snapshot(&snapshot);
     assert!(result.is_ok());
@@ -145,14 +166,14 @@ fn test_with_snapshot_after_deserialization_accepts_matching() {
 fn test_with_snapshot_human_generation_after_roundtrip() {
     let human_gen1 = make_human_target(5, 100);
     let human_gen2 = make_human_target(5, 101);
-    
+
     let selection = InspectorSelection::new(human_gen1.clone());
     let view = InspectorMainView::from(&selection);
-    
+
     // Serialize and deserialize
     let json = serde_json::to_string(&view).expect("Serialization failed");
     let deserialized: InspectorMainView = serde_json::from_str(&json).expect("Deserialization failed");
-    
+
     // Try snapshot with different generation
     let snapshot = InspectorSnapshot {
         target: human_gen2,
@@ -163,7 +184,7 @@ fn test_with_snapshot_human_generation_after_roundtrip() {
         mesh_name: None,
         metadata: vec![],
     };
-    
+
     // Should reject mismatched generation
     let result = deserialized.with_snapshot(&snapshot);
     assert!(result.is_err());
@@ -185,9 +206,9 @@ fn test_deserialized_view_without_target_rejects_snapshot() {
         "current_hit_index": 0,
         "selection_target": null
     }"#;
-    
+
     let view: InspectorMainView = serde_json::from_str(json).expect("Deserialization failed");
-    
+
     let snapshot = InspectorSnapshot {
         target: make_vehicle_target(42),
         position: Some([10.0, 20.0, 30.0]),
@@ -197,7 +218,7 @@ fn test_deserialized_view_without_target_rejects_snapshot() {
         mesh_name: None,
         metadata: vec![],
     };
-    
+
     // Should reject because identity is missing
     let result = view.with_snapshot(&snapshot);
     assert!(result.is_err());

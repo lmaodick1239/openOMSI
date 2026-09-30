@@ -456,7 +456,7 @@ impl InspectorSelection {
 /// Resolves stored handles into owned data. Stale handles show as unavailable, then clear.
 /// This type is computed per-frame or on generation change, and contains no locks or
 /// borrowed references.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InspectorSnapshot {
     /// Entity type and identity.
     pub target: SelectionTarget,

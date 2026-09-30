@@ -1207,3 +1207,27 @@ validate_command_with_context(&editor_cmd, &selection, &context)?;
 - `.superpowers/sdd/implementation-plan/task-1-report.md`
 
 No ImGui rendering or Task 2 work was performed.
+
+## Fresh Review Fixes (2026-10-01)
+
+### Fixes
+
+- Routed `validate_command()` through `validate_command_with_context()` with an empty sandbox context. This ensures the production validation entry point uses sandbox-aware editor validation and rejects sandbox operations unless the context-aware or adapter-backed entry point supplies an active matching sandbox.
+- Added `Serialize` and `Deserialize` to core `InspectorSnapshot`, preserving its full `SelectionTarget` identity in serialized snapshots.
+- Added a snapshot JSON round-trip test that asserts target generation, mesh identity, and the rest of the snapshot payload remain equal.
+- Removed trailing whitespace from the new inspector validation and serialization test files (including the sandbox and snapshot validation tests).
+
+### Exact Verification
+
+- `cargo test -p omsi-app --test inspector_command_tests --test inspector_view_model_tests --test inspector_command_sandbox_tests --test inspector_snapshot_validation_tests --test inspector_validation_context_tests --test inspector_serialization_identity_tests` — **passed**, 79 tests across six targets, 0 failed.
+- `cargo check -p omsi-app` — **passed**.
+
+### Files Changed
+
+- `crates/omsi-app/src/inspector/commands.rs`
+- `crates/omsi-app/src/inspector_core.rs`
+- `crates/omsi-app/tests/inspector_serialization_identity_tests.rs`
+- `crates/omsi-app/tests/inspector_validation_context_tests.rs`
+- `crates/omsi-app/tests/inspector_command_sandbox_tests.rs`
+- `crates/omsi-app/tests/inspector_snapshot_validation_tests.rs`
+- `.superpowers/sdd/implementation-plan/task-1-report.md`
