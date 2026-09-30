@@ -15,6 +15,14 @@ fn render_scale_step(fps: f32, slow_frame_wait_share: f32) -> f32 {
     }
 }
 
+#[cfg(not(target_os = "android"))]
+fn effective_imgui_capture(
+    capture: crate::inspector::imgui_inspector::InputCaptureState,
+    active: bool,
+) -> crate::inspector::imgui_inspector::InputCaptureState {
+    capture.effective(active)
+}
+
 use super::*;
 
 impl ApplicationHandler for App {
@@ -36,24 +44,35 @@ impl ApplicationHandler for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         #[cfg(not(target_os = "android"))]
-        let imgui_captures = self.inspector_ui.as_mut().map(|ui| {
-            if let Some(window) = self.window.as_ref() {
-                ui.handle_event(window, &winit::event::Event::<()>::WindowEvent {
-                    window_id: id,
-                    event: event.clone(),
-                });
-            }
-            let inspector_toggle = matches!(
-                &event,
-                WindowEvent::KeyboardInput { event, .. }
-                    if event.physical_key == PhysicalKey::Code(KeyCode::KeyI)
-                        && (self.keys.contains(&KeyCode::ControlLeft)
-                            || self.keys.contains(&KeyCode::ControlRight))
-            );
-            ui.captures_input() && !inspector_toggle
-        }).unwrap_or(false);
+        let (imgui_captures_keyboard, imgui_captures_pointer) = self
+            .inspector_ui
+            .as_mut()
+            .map(|ui| {
+                if let Some(window) = self.window.as_ref() {
+                    ui.handle_event(window, &winit::event::Event::<()>::WindowEvent {
+                        window_id: id,
+                        event: event.clone(),
+                    });
+                }
+                let capture = effective_imgui_capture(ui.input_capture, self.inspector_active);
+                if !self.inspector_active {
+                    ui.clear_input_capture();
+                }
+                let inspector_toggle = matches!(
+                    &event,
+                    WindowEvent::KeyboardInput { event, .. }
+                        if event.physical_key == PhysicalKey::Code(KeyCode::KeyI)
+                            && (self.keys.contains(&KeyCode::ControlLeft)
+                                || self.keys.contains(&KeyCode::ControlRight))
+                );
+                (
+                    capture.blocks_keyboard() && !inspector_toggle,
+                    capture.blocks_pointer(),
+                )
+            })
+            .unwrap_or((false, false));
         #[cfg(target_os = "android")]
-        let imgui_captures = false;
+        let (imgui_captures_keyboard, imgui_captures_pointer) = (false, false);
         match event {
             WindowEvent::CloseRequested => {
                 self.finish_session();
@@ -84,7 +103,7 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                if imgui_captures {
+                if imgui_captures_keyboard {
                     return;
                 }
                 // '/' opens the chat's input box wherever the keyboard has it (the key
@@ -135,7 +154,7 @@ impl ApplicationHandler for App {
                 button: winit::event::MouseButton::Right,
                 ..
             } => {
-                if imgui_captures {
+                if imgui_captures_pointer {
                     return;
                 }
                 if self.navigator.as_ref().map(|n| n.map_open()).unwrap_or(false) {
@@ -172,7 +191,7 @@ impl ApplicationHandler for App {
                 button: winit::event::MouseButton::Middle,
                 ..
             } => {
-                if imgui_captures {
+                if imgui_captures_pointer {
                     return;
                 }
                 if self.navigator.as_ref().map(|n| n.map_open()).unwrap_or(false) {
@@ -182,7 +201,7 @@ impl ApplicationHandler for App {
                 self.update_hover();
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                if imgui_captures {
+                if imgui_captures_pointer {
                     return;
                 }
                 let amount = match delta {
@@ -192,7 +211,7 @@ impl ApplicationHandler for App {
                 self.wheel(amount);
             }
             WindowEvent::CursorMoved { position, .. } => {
-                if imgui_captures {
+                if imgui_captures_pointer {
                     return;
                 }
                 // (the on-screen controls on a computer, `OMSI_TOUCH=1`: the mouse is a
@@ -217,7 +236,7 @@ impl ApplicationHandler for App {
                 button: winit::event::MouseButton::Left,
                 ..
             } => {
-                if imgui_captures {
+                if imgui_captures_pointer {
                     return;
                 }
                 if self.touch.enabled {
@@ -2183,7 +2202,24 @@ impl ApplicationHandler for App {
                 controllers.refresh_devices();
             }
         }
+        #[cfg(not(target_os = "android"))]
+        let imgui_captures_pointer = self
+            .inspector_ui
+            .as_mut()
+            .map(|ui| {
+                let capture = effective_imgui_capture(ui.input_capture, self.inspector_active);
+                if !self.inspector_active {
+                    ui.clear_input_capture();
+                }
+                capture.blocks_pointer()
+            })
+            .unwrap_or(false);
+        #[cfg(target_os = "android")]
+        let imgui_captures_pointer = false;
         if let DeviceEvent::MouseMotion { delta } = event {
+            if imgui_captures_pointer {
+                return;
+            }
             if self.mouse_look {
                 self.look_by(delta.0 as f32 * 0.15, delta.1 as f32 * 0.15);
             } else if self.mouse_drive && self.game_menu.is_none() {
@@ -2409,5 +2445,39 @@ mod governor_tests {
         assert!(render_scale_step(35.0, 0.1) > 0.0);
         assert!(render_scale_step(35.0, 0.6) < 0.0);
         assert!(render_scale_step(60.0, 0.6) > 0.0);
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+#[cfg(test)]
+mod imgui_capture_tests {
+    use super::effective_imgui_capture;
+    use crate::inspector::imgui_inspector::InputCaptureState;
+
+    #[test]
+    fn inactive_inspector_disables_stale_capture_before_game_input() {
+        let stale = InputCaptureState {
+            pointer: true,
+            keyboard: true,
+        };
+        assert_eq!(
+            effective_imgui_capture(stale, false),
+            InputCaptureState::default()
+        );
+    }
+
+    #[test]
+    fn device_mouse_motion_uses_pointer_capture_only() {
+        let keyboard = InputCaptureState {
+            pointer: false,
+            keyboard: true,
+        };
+        assert!(!effective_imgui_capture(keyboard, true).blocks_pointer());
+
+        let pointer = InputCaptureState {
+            pointer: true,
+            keyboard: false,
+        };
+        assert!(effective_imgui_capture(pointer, true).blocks_pointer());
     }
 }

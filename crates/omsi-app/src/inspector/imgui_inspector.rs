@@ -181,6 +181,18 @@ pub struct InputCaptureState {
 }
 
 impl InputCaptureState {
+    /// Disable stale capture once the inspector is inactive.
+    pub const fn effective(self, active: bool) -> Self {
+        if active {
+            self
+        } else {
+            Self {
+                pointer: false,
+                keyboard: false,
+            }
+        }
+    }
+
     /// Whether a game keyboard handler must yield to ImGui.
     pub const fn blocks_keyboard(self) -> bool {
         self.keyboard
@@ -376,6 +388,11 @@ impl InspectorUi {
     /// Drain commands at the application mutation boundary.
     pub fn drain_commands(&mut self) -> Vec<InspectorCommand> {
         self.commands.drain(..).collect()
+    }
+
+    /// Clear capture reported by a frame that is no longer active.
+    pub fn clear_input_capture(&mut self) {
+        self.input_capture = InputCaptureState::default();
     }
 
     /// Whether camera/game input should be suppressed for this frame.
