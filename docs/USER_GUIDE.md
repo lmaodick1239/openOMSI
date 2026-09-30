@@ -348,6 +348,18 @@ clear the selection. **Ctrl+I** again exits inspector mode.
 **Mutual exclusion:** Inspector mode and object editor mode are mutually exclusive. Activating
 one deactivates the other.
 
+### Desktop inspector windows
+
+On desktop builds, Ctrl+I opens the inspector as movable Dear ImGui windows. The layout and
+visibility of the Inspector, Hierarchy, Log, Materials, Render, Humans, Telemetry, Editor, and
+Export windows are restored between runs. Controls dispatch existing validated inspector commands
+for selection navigation, view overlays, material and render debugging, human playback, transform
+sandbox actions, glTF export, and telemetry watches.
+
+The ImGui inspector is desktop-only in this rollout. Android keeps the normal HUD and input path.
+While an inspector window has keyboard or pointer focus, game shortcuts and camera interaction are
+suppressed; Ctrl+I remains available to leave inspector mode.
+
 **Limitations:**
 - Read-only: Inspector cannot modify objects
 - Selection becomes unavailable if the object unloads or is replaced

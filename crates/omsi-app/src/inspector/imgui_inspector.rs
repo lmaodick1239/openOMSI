@@ -291,12 +291,13 @@ impl InspectorUi {
         }
         let layout = self.layout.clone();
         let mut captured_layout = layout.windows;
+        let mut commands = VecDeque::new();
         let ui = self.context.frame();
         captured_layout[InspectorWindow::Inspector.index()] = draw_window(
             ui,
             layout.windows[InspectorWindow::Inspector.index()],
             InspectorWindow::Inspector,
-            |ui| draw_inspector(ui, snapshot.inspector.as_ref()),
+            |ui| draw_inspector(ui, snapshot.inspector.as_ref(), &mut commands),
         );
         captured_layout[InspectorWindow::Hierarchy.index()] = draw_window(
             ui,
@@ -314,37 +315,65 @@ impl InspectorUi {
             ui,
             layout.windows[InspectorWindow::Materials.index()],
             InspectorWindow::Materials,
-            |ui| draw_material(ui, snapshot.material.as_ref()),
+            |ui| {
+                draw_material(
+                    ui,
+                    snapshot.material.as_ref(),
+                    snapshot.inspector.as_ref(),
+                    &mut commands,
+                )
+            },
         );
         captured_layout[InspectorWindow::Render.index()] = draw_window(
             ui,
             layout.windows[InspectorWindow::Render.index()],
             InspectorWindow::Render,
-            |ui| draw_render(ui, snapshot.render.as_ref()),
+            |ui| draw_render(ui, snapshot.render.as_ref(), &mut commands),
         );
         captured_layout[InspectorWindow::Humans.index()] = draw_window(
             ui,
             layout.windows[InspectorWindow::Humans.index()],
             InspectorWindow::Humans,
-            |ui| draw_human(ui, snapshot.human.as_ref()),
+            |ui| {
+                draw_human(
+                    ui,
+                    snapshot.human.as_ref(),
+                    snapshot.inspector.as_ref(),
+                    &mut commands,
+                )
+            },
         );
         captured_layout[InspectorWindow::Telemetry.index()] = draw_window(
             ui,
             layout.windows[InspectorWindow::Telemetry.index()],
             InspectorWindow::Telemetry,
-            |ui| draw_telemetry(ui, snapshot.telemetry.as_ref()),
+            |ui| draw_telemetry(ui, snapshot.telemetry.as_ref(), &mut commands),
         );
         captured_layout[InspectorWindow::Editor.index()] = draw_window(
             ui,
             layout.windows[InspectorWindow::Editor.index()],
             InspectorWindow::Editor,
-            |ui| draw_editor(ui, snapshot.editor.as_ref()),
+            |ui| {
+                draw_editor(
+                    ui,
+                    snapshot.editor.as_ref(),
+                    snapshot.inspector.as_ref(),
+                    &mut commands,
+                )
+            },
         );
         captured_layout[InspectorWindow::Export.index()] = draw_window(
             ui,
             layout.windows[InspectorWindow::Export.index()],
             InspectorWindow::Export,
-            |ui| draw_export(ui, snapshot.export.as_ref()),
+            |ui| {
+                draw_export(
+                    ui,
+                    snapshot.export.as_ref(),
+                    snapshot.inspector.as_ref(),
+                    &mut commands,
+                )
+            },
         );
         self.layout.windows = captured_layout;
         self.input_capture = InputCaptureState {
@@ -352,6 +381,7 @@ impl InspectorUi {
             keyboard: ui.io().want_capture_keyboard,
         };
         self.platform.prepare_render(ui, window);
+        self.commands.extend(commands);
     }
 
     /// Finish a frame and optionally render its draw data into an existing pass.
@@ -457,78 +487,329 @@ pub fn apply_blue_theme(style: &mut imgui::Style) {
     style[StyleColor::Text] = [0.88, 0.91, 0.96, 1.0];
 }
 
-fn draw_inspector(ui: &Ui, view: Option<&InspectorMainView>) {
-    if let Some(view) = view {
-        ui.text(&view.selection_status);
-        if let Some(identity) = &view.entity_identity {
-            ui.text(identity);
-        }
-        if let Some(position) = view.position {
-            ui.text(format!(
-                "Position: {:.2}, {:.2}, {:.2}",
-                position[0], position[1], position[2]
-            ));
-        }
-    } else {
+fn selected_target(view: Option<&InspectorMainView>) -> Option<crate::inspector::SelectionTarget> {
+    view.and_then(|view| view.selection_target.clone())
+}
+
+fn draw_inspector(
+    ui: &Ui,
+    view: Option<&InspectorMainView>,
+    commands: &mut VecDeque<InspectorCommand>,
+) {
+    let Some(view) = view else {
         ui.text("No snapshot");
+        return;
+    };
+    ui.text(&view.selection_status);
+    if let Some(identity) = &view.entity_identity {
+        ui.text(identity);
+    }
+    if let Some(position) = view.position {
+        ui.text(format!(
+            "Position: {:.2}, {:.2}, {:.2}",
+            position[0], position[1], position[2]
+        ));
+    }
+    if ui.button("Clear selection") {
+        commands.push_back(InspectorCommand::ClearSelection);
+    }
+    ui.same_line();
+    if ui.button("Previous hit") {
+        commands.push_back(InspectorCommand::CyclePrevHit);
+    }
+    ui.same_line();
+    if ui.button("Next hit") {
+        commands.push_back(InspectorCommand::CycleNextHit);
+    }
+    for (index, hit) in view.penetration_stack.iter().enumerate() {
+        if ui.small_button(format!(
+            "{}: {:.2}m {}",
+            index, hit.distance, hit.display_name
+        )) {
+            commands.push_back(InspectorCommand::JumpToHit(index));
+        }
+    }
+    if view.selection_target.is_some() {
+        for (label, toggle) in [
+            ("Bounds", crate::inspector::ViewToggle::ShowBounds),
+            ("Local axes", crate::inspector::ViewToggle::ShowLocalAxes),
+            ("Mesh name", crate::inspector::ViewToggle::ShowMeshName),
+        ] {
+            if ui.small_button(label) {
+                commands.push_back(InspectorCommand::ToggleView(toggle));
+            }
+            ui.same_line();
+        }
+        ui.new_line();
     }
 }
+
 fn draw_lines(ui: &Ui, label: &str, lines: &[String]) {
     ui.text(label);
     for line in lines {
         ui.bullet_text(line);
     }
 }
-fn draw_material(ui: &Ui, view: Option<&MaterialView>) {
-    if let Some(view) = view {
-        ui.text(&view.name);
-        ui.text(format!("Shader: {}", view.shader_variant));
-        ui.text(format!(
-            "Metallic {:.2}  Roughness {:.2}",
-            view.metallic, view.roughness
+
+fn draw_material(
+    ui: &Ui,
+    view: Option<&MaterialView>,
+    inspector: Option<&InspectorMainView>,
+    commands: &mut VecDeque<InspectorCommand>,
+) {
+    let Some(view) = view else {
+        ui.text("No material snapshot");
+        return;
+    };
+    ui.text(&view.name);
+    ui.text(format!("Shader: {}", view.shader_variant));
+    ui.text(format!(
+        "Metallic {:.2}  Roughness {:.2}",
+        view.metallic, view.roughness
+    ));
+    let Some(target) = selected_target(inspector) else {
+        return;
+    };
+    if ui.button(format!("Mipmap {}", view.mipmap_level)) {
+        commands.push_back(InspectorCommand::Material(
+            crate::inspector::MaterialCommand::SetMipmapLevel {
+                target: target.clone(),
+                level: view.mipmap_level,
+            },
+        ));
+    }
+    if ui.button(if view.sandbox_active {
+        "Disable sandbox"
+    } else {
+        "Enable sandbox"
+    }) {
+        commands.push_back(InspectorCommand::Material(
+            crate::inspector::MaterialCommand::ToggleSandbox {
+                target: target.clone(),
+            },
+        ));
+    }
+    if ui.button("Apply PBR values") {
+        commands.push_back(InspectorCommand::Material(
+            crate::inspector::MaterialCommand::SetPBROverride {
+                target: target.clone(),
+                metallic: view.metallic,
+                roughness: view.roughness,
+            },
+        ));
+    }
+    if ui.button("Clear PBR overrides") {
+        commands.push_back(InspectorCommand::Material(
+            crate::inspector::MaterialCommand::ClearOverrides { target },
         ));
     }
 }
-fn draw_render(ui: &Ui, view: Option<&RenderView>) {
-    if let Some(view) = view {
-        ui.text(format!(
-            "Frame {:.2} ms  Draws {}",
-            view.total_frame_time_ms, view.total_draw_calls
+
+fn draw_render(ui: &Ui, view: Option<&RenderView>, commands: &mut VecDeque<InspectorCommand>) {
+    let Some(view) = view else {
+        ui.text("No render snapshot");
+        return;
+    };
+    ui.text(format!(
+        "Frame {:.2} ms  Draws {}  Triangles {}",
+        view.total_frame_time_ms, view.total_draw_calls, view.total_triangles
+    ));
+    for pass in &view.passes {
+        ui.bullet_text(format!(
+            "{}: {:.2} ms ({} draws)",
+            pass.name, pass.gpu_time_ms, pass.draw_calls
         ));
-        for pass in &view.passes {
-            ui.bullet_text(format!("{}: {:.2} ms", pass.name, pass.gpu_time_ms));
+        if ui.small_button(format!("Toggle {}", pass.name)) {
+            commands.push_back(InspectorCommand::Render(
+                crate::inspector::RenderCommand::TogglePass(pass.name.clone()),
+            ));
+        }
+    }
+    for (label, command) in [
+        (
+            "Wireframe",
+            crate::inspector::RenderCommand::ToggleWireframe,
+        ),
+        (
+            "Collision hulls",
+            crate::inspector::RenderCommand::ToggleCollisionHulls,
+        ),
+        ("Normals", crate::inspector::RenderCommand::ToggleNormals),
+        ("UV seams", crate::inspector::RenderCommand::ToggleUVSeams),
+    ] {
+        if ui.small_button(label) {
+            commands.push_back(InspectorCommand::Render(command));
+        }
+        ui.same_line();
+    }
+    ui.new_line();
+    if ui.button("Clear isolation") {
+        commands.push_back(InspectorCommand::Render(
+            crate::inspector::RenderCommand::SetIsolation(None),
+        ));
+    }
+}
+
+fn draw_human(
+    ui: &Ui,
+    view: Option<&HumanView>,
+    inspector: Option<&InspectorMainView>,
+    commands: &mut VecDeque<InspectorCommand>,
+) {
+    let Some(view) = view else {
+        ui.text("No human snapshot");
+        return;
+    };
+    ui.text(format!("Human #{}  {}", view.id, view.current_animation));
+    ui.text(format!(
+        "Playback: {}  phase {:.2}  bones {}",
+        view.playback, view.animation_phase, view.bone_count
+    ));
+    let Some(target) = selected_target(inspector) else {
+        return;
+    };
+    for (label, mode) in [
+        ("Play", crate::inspector::PlaybackMode::Playing),
+        ("Pause", crate::inspector::PlaybackMode::Paused),
+        ("Slow motion", crate::inspector::PlaybackMode::SlowMotion),
+    ] {
+        if ui.button(label) {
+            commands.push_back(InspectorCommand::Human(
+                crate::inspector::HumanCommand::SetPlayback {
+                    target: target.clone(),
+                    mode,
+                },
+            ));
+        }
+        ui.same_line();
+    }
+    ui.new_line();
+}
+
+fn draw_telemetry(
+    ui: &Ui,
+    view: Option<&TelemetryView>,
+    commands: &mut VecDeque<InspectorCommand>,
+) {
+    let Some(view) = view else {
+        ui.text("No telemetry snapshot");
+        return;
+    };
+    ui.text(format!(
+        "Frame {:.2} ms  Query {:.2} ms  GPU {:.2} ms",
+        view.frame_time_ms, view.inspector_query_time_ms, view.gpu_staging_time_ms
+    ));
+    if ui.button("Add L.throttle watch") {
+        commands.push_back(InspectorCommand::Telemetry(
+            crate::inspector::TelemetryCommand::AddWatch("L.throttle".into()),
+        ));
+    }
+    for watch in &view.watch_expressions {
+        ui.bullet_text(format!("{} = {}", watch.expression, watch.value));
+        if ui.small_button(format!("Remove##{}", watch.expression)) {
+            commands.push_back(InspectorCommand::Telemetry(
+                crate::inspector::TelemetryCommand::RemoveWatch(watch.expression.clone()),
+            ));
+        }
+    }
+    if ui.button("Clear watches") {
+        commands.push_back(InspectorCommand::Telemetry(
+            crate::inspector::TelemetryCommand::ClearWatches,
+        ));
+    }
+}
+
+fn draw_editor(
+    ui: &Ui,
+    view: Option<&EditorView>,
+    inspector: Option<&InspectorMainView>,
+    commands: &mut VecDeque<InspectorCommand>,
+) {
+    let Some(view) = view else {
+        ui.text("No editor snapshot");
+        return;
+    };
+    ui.text(if view.sandbox_active {
+        "Sandbox active"
+    } else {
+        "Sandbox inactive"
+    });
+    let Some(target) = selected_target(inspector) else {
+        return;
+    };
+    if !view.sandbox_active && ui.button("Start sandbox") {
+        commands.push_back(InspectorCommand::Editor(
+            crate::inspector::EditorCommand::StartSandbox {
+                target: target.clone(),
+            },
+        ));
+    }
+    if let Some(transform) = view.current_transform {
+        if ui.button("Update transform") {
+            commands.push_back(InspectorCommand::Editor(
+                crate::inspector::EditorCommand::UpdateTransform {
+                    target: target.clone(),
+                    position: transform.position,
+                    rotation: transform.rotation,
+                },
+            ));
+        }
+    }
+    for (label, command) in [
+        (
+            "Apply sandbox",
+            crate::inspector::EditorCommand::ApplySandbox {
+                target: target.clone(),
+            },
+        ),
+        (
+            "Revert sandbox",
+            crate::inspector::EditorCommand::RevertSandbox {
+                target: target.clone(),
+            },
+        ),
+        (
+            "Close sandbox",
+            crate::inspector::EditorCommand::CloseSandbox { target },
+        ),
+    ] {
+        if ui.button(label) {
+            commands.push_back(InspectorCommand::Editor(command));
         }
     }
 }
-fn draw_human(ui: &Ui, view: Option<&HumanView>) {
-    if let Some(view) = view {
-        ui.text(format!("Human #{}  {}", view.id, view.current_animation));
-        ui.text(format!("Playback: {}", view.playback));
+
+fn draw_export(
+    ui: &Ui,
+    view: Option<&ExportView>,
+    inspector: Option<&InspectorMainView>,
+    commands: &mut VecDeque<InspectorCommand>,
+) {
+    let Some(view) = view else {
+        ui.text("No export snapshot");
+        return;
+    };
+    ui.text(format!("Status: {:?}", view.status));
+    if let Some(error) = &view.error {
+        ui.text_colored([1.0, 0.39, 0.39, 1.0], error);
     }
-}
-fn draw_telemetry(ui: &Ui, view: Option<&TelemetryView>) {
-    if let Some(view) = view {
-        ui.text(format!(
-            "Frame {:.2} ms  Query {:.2} ms",
-            view.frame_time_ms, view.inspector_query_time_ms
-        ));
-    }
-}
-fn draw_editor(ui: &Ui, view: Option<&EditorView>) {
-    if let Some(view) = view {
-        ui.text(if view.sandbox_active {
-            "Sandbox active"
-        } else {
-            "Sandbox inactive"
-        });
-    }
-}
-fn draw_export(ui: &Ui, view: Option<&ExportView>) {
-    if let Some(view) = view {
-        ui.text(format!("Status: {:?}", view.status));
-        if let Some(error) = &view.error {
-            ui.text_colored([1.0, 0.39, 0.39, 1.0], error);
+    if let Some(target) = selected_target(inspector) {
+        if ui.button("Export selection") {
+            commands.push_back(InspectorCommand::Export(
+                crate::inspector::ExportCommand::ExportSelection {
+                    target,
+                    destination: view
+                        .destination
+                        .clone()
+                        .unwrap_or_else(|| "inspector-export.gltf".into()),
+                },
+            ));
         }
+    }
+    if ui.button("Cancel export") {
+        commands.push_back(InspectorCommand::Export(
+            crate::inspector::ExportCommand::CancelExport,
+        ));
     }
 }
 
@@ -591,10 +872,16 @@ mod tests {
 
     #[test]
     fn input_capture_routes_keyboard_and_pointer_independently() {
-        let keyboard = InputCaptureState { pointer: false, keyboard: true };
+        let keyboard = InputCaptureState {
+            pointer: false,
+            keyboard: true,
+        };
         assert!(keyboard.blocks_keyboard());
         assert!(!keyboard.blocks_pointer());
-        let pointer = InputCaptureState { pointer: true, keyboard: false };
+        let pointer = InputCaptureState {
+            pointer: true,
+            keyboard: false,
+        };
         assert!(pointer.blocks_pointer());
         assert!(!pointer.blocks_keyboard());
         assert!(!InputCaptureState::default().blocks_keyboard());
