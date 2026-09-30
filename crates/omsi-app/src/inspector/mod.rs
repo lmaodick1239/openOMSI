@@ -10,6 +10,9 @@ pub mod editor_bridge;
 pub mod view_models;
 pub mod commands;
 
+#[cfg(not(target_os = "android"))]
+pub mod imgui_inspector;
+
 // Re-export core types
 pub use core::*;
 
