@@ -188,6 +188,12 @@ pub(crate) struct App {
     pub(crate) pending_time: Option<f64>,
     /// The play time (`clock.run_time`) the last situation was saved at.
     pub(crate) autosave_t: f64,
+    /// Visual debug inspector mode is active (Ctrl+I): click-to-select entities for read-only inspection.
+    pub(crate) inspector_active: bool,
+    /// Currently selected entity in inspector mode.
+    pub(crate) inspector_selection: Option<crate::inspector::InspectorSelection>,
+    /// Sandboxed variable override manager for live debugging.
+    pub(crate) inspector_overrides: crate::inspector_overrides::OverrideManager,
     /// OMSI's timetable window (`view_set_schedule`, Insert).
     pub(crate) timetable: bool,
     /// The left button is held on a switch: mouse movement turns it.

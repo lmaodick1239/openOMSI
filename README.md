@@ -129,6 +129,8 @@ pages live in [`docs/`](docs):
 | [Building](docs/BUILDING.md) | building from source on macOS, Windows, Linux and Android |
 | [Content formats](docs/FORMATS.md) | every OMSI 2 file format |
 | [Architecture](docs/ARCHITECTURE.md) | crates, threading, renderer, roadmap |
+| [Rendering audit](docs/RENDERING_AUDIT.md) | pipeline execution, performance opportunities, non-regression validation |
+| [Rendering optimization feasibility](docs/RENDERING_OPTIMIZATION_FEASIBILITY.md) | Grundorf/SL202 VRAM, crash diagnosis, and optimization roadmap |
 | [Routes](docs/ROUTES.md) | how the original runs timetables, chrono, HOF, IBIS |
 | [Plugins](docs/PLUGINS.md) | Lua plugins (API and examples), OMSI plugin DLLs and the 32-bit plugin host |
 | [Dedicated server](docs/SERVER.md) | hosting a session without a window |

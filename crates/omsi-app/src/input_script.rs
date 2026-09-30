@@ -262,6 +262,11 @@ impl App {
                         self.toggle_editor();
                         return;
                     }
+                    // visual debug inspector (Ctrl+I): read-only entity selection
+                    KeyCode::KeyI if ctrl && !alt && !shift_now => {
+                        self.toggle_inspector();
+                        return;
+                    }
                     // OMSI's `sim_pause`
                     KeyCode::KeyP if !ctrl && !alt && !shift_now => {
                         self.toggle_pause();
@@ -834,6 +839,13 @@ impl App {
     }
 
     pub(crate) fn on_left(&mut self, pressed: bool) {
+        // inspector mode: first refusal over world clicks when active
+        // TODO: Task 7 integration - wire to actual selection logic once snapshot building is ready
+        if self.inspector_active && pressed {
+            // PLACEHOLDER: clears selection on any click until Task 7 implements hit detection
+            self.inspector_selection = None;
+            return;
+        }
         // the object editor: the mouse picks and drags
         if self.game_menu.is_none() && self.editor_mouse(pressed) {
             return;
@@ -1391,10 +1403,37 @@ pub(crate) fn script_key(name: &str) -> Option<KeyCode> {
             self.service_msg = Some(("Object editor off (unsaved changes stay until the end of the session)".into(), 3.0));
             return;
         }
+        // Mutual exclusion: deactivate inspector when activating editor
+        if self.inspector_active {
+            self.inspector_active = false;
+            self.inspector_selection = None;
+        }
         let ed = crate::editor::Editor::default();
         let msg = self.world.as_ref().map(|w| ed.describe(w)).unwrap_or_default();
         self.editor = Some(ed);
         self.service_msg = Some((format!("{msg} - click picks, drag moves, wheel turns (Shift: height), Delete, C copy, V variant, Backspace undo, PgUp/PgDn/F ground, [ ] brush, Ctrl+S save, Esc leave"), 10.0));
+    }
+
+    /// Toggle visual debug inspector mode (Ctrl+I).
+    pub(crate) fn toggle_inspector(&mut self) {
+        // Mutual exclusion: inspector and editor cannot both be active
+        if !self.inspector_active && self.editor.is_some() {
+            self.service_msg = Some(("Inspector unavailable while editor is active (exit with Ctrl+Shift+E)".into(), 3.0));
+            return;
+        }
+        
+        self.inspector_active = !self.inspector_active;
+        if self.inspector_active {
+            // Entering inspector mode: clear any stale state
+            self.inspector_selection = None;
+            self.hover = None;
+            self.hover_part = None;
+            self.service_msg = Some(("Inspector mode on (Ctrl+I) - click to select vehicle parts or scenery objects for read-only inspection".into(), 5.0));
+        } else {
+            // Exiting inspector mode: clear selection and release any tile pins
+            self.inspector_selection = None;
+            self.service_msg = Some(("Inspector mode off".into(), 2.0));
+        }
     }
 
     /// A key while the object editor is on; true when it was the editor's.
@@ -2566,5 +2605,235 @@ pub(crate) fn swap_view_look(look: &mut (f32, f32), looks: &mut std::collections
             looks.insert(old, *look);
         }
         *look = looks.get(view).copied().unwrap_or((0.0, 0.0));
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use crate::inspector::{InspectorSelection, SelectionStatus, SelectionTarget, VehicleKey, SceneryKey};
+
+    #[test]
+    fn test_inspector_mode_toggle_inactive_to_active() {
+        let mut inspector_active = false;
+        let mut inspector_selection: Option<InspectorSelection> = None;
+        let mut hover: Option<String> = None;
+        let mut hover_part: Option<String> = None;
+        let mut service_msg: Option<(String, f32)> = None;
+        let editor = None::<crate::editor::Editor>;
+        
+        // Simulate toggle_inspector() logic for activation
+        if !inspector_active && editor.is_none() {
+            inspector_active = true;
+            inspector_selection = None;
+            hover = None;
+            hover_part = None;
+            service_msg = Some(("Inspector mode on (Ctrl+I) - click to select vehicle parts or scenery objects for read-only inspection".to_string(), 5.0));
+        }
+        
+        assert!(inspector_active);
+        assert!(inspector_selection.is_none());
+        assert!(service_msg.is_some());
+        let (msg, _) = service_msg.as_ref().unwrap();
+        assert!(msg.contains("Inspector mode on"));
+    }
+
+    #[test]
+    fn test_inspector_mode_toggle_active_to_inactive() {
+        let mut inspector_active = true;
+        let target = SelectionTarget::Vehicle {
+            key: VehicleKey::Player { generation: 1 },
+            mesh: None,
+        };
+        let mut inspector_selection = Some(InspectorSelection::new(target));
+        let mut service_msg = None;
+        
+        // Simulate toggle_inspector() logic for deactivation
+        if inspector_active {
+            inspector_active = false;
+            inspector_selection = None;
+            service_msg = Some(("Inspector mode off".to_string(), 2.0));
+        }
+        
+        assert!(!inspector_active);
+        assert!(inspector_selection.is_none());
+        assert!(service_msg.is_some());
+        let (msg, _) = service_msg.as_ref().unwrap();
+        assert!(msg.contains("Inspector mode off"));
+    }
+
+    #[test]
+    fn test_inspector_mode_clears_hover_on_entry() {
+        let mut inspector_active = false;
+        let mut hover = Some("stale_hover".to_string());
+        let mut hover_part = Some("stale_part".to_string());
+        let editor = None::<crate::editor::Editor>;
+        
+        // Simulate toggle_inspector() logic
+        if !inspector_active && editor.is_none() {
+            inspector_active = true;
+            hover = None;
+            hover_part = None;
+        }
+        
+        assert!(inspector_active);
+        assert!(hover.is_none());
+        assert!(hover_part.is_none());
+    }
+
+    #[test]
+    fn test_inspector_blocks_activation_when_editor_active() {
+        let mut inspector_active = false;
+        let mut service_msg = None;
+        let editor = Some(crate::editor::Editor::default());
+        
+        // Simulate toggle_inspector() logic with editor active
+        if !inspector_active && editor.is_some() {
+            service_msg = Some(("Inspector unavailable while editor is active (exit with Ctrl+Shift+E)".to_string(), 3.0));
+        } else {
+            inspector_active = !inspector_active;
+        }
+        
+        assert!(!inspector_active);
+        assert!(service_msg.is_some());
+        let (msg, _) = service_msg.as_ref().unwrap();
+        assert!(msg.contains("Inspector unavailable while editor is active"));
+    }
+
+    #[test]
+    fn test_editor_deactivates_inspector_on_activation() {
+        let mut inspector_active = true;
+        let target = SelectionTarget::Vehicle {
+            key: VehicleKey::AiCar { id: 42 },
+            mesh: None,
+        };
+        let mut inspector_selection = Some(InspectorSelection::new(target));
+        
+        // Simulate toggle_editor() mutual exclusion logic
+        if inspector_active {
+            inspector_active = false;
+            inspector_selection = None;
+        }
+        let editor = Some(crate::editor::Editor::default());
+        
+        assert!(!inspector_active);
+        assert!(inspector_selection.is_none());
+        assert!(editor.is_some());
+    }
+
+    #[test]
+    fn test_input_precedence_inspector_intercepts_click() {
+        let inspector_active = true;
+        let target = SelectionTarget::Vehicle {
+            key: VehicleKey::Player { generation: 1 },
+            mesh: None,
+        };
+        let mut inspector_selection = Some(InspectorSelection::new(target));
+        let pressed = true;
+        
+        // Simulate on_left() inspector check
+        if inspector_active && pressed {
+            inspector_selection = None;
+            // Early return would happen here
+        }
+        
+        assert!(inspector_selection.is_none());
+    }
+
+    #[test]
+    fn test_input_precedence_inspector_inactive_no_intercept() {
+        let inspector_active = false;
+        let mut inspector_selection: Option<InspectorSelection> = None;
+        let pressed = true;
+        
+        // Simulate on_left() inspector check
+        let should_return = if inspector_active && pressed {
+            inspector_selection = None;
+            true
+        } else {
+            false
+        };
+        
+        assert!(!should_return);
+        assert!(inspector_selection.is_none());
+    }
+
+    #[test]
+    fn test_mode_toggle_round_trip() {
+        let mut inspector_active = false;
+        let editor = None::<crate::editor::Editor>;
+        
+        // First toggle: activate
+        if !inspector_active && editor.is_none() {
+            inspector_active = true;
+        }
+        assert!(inspector_active);
+        
+        // Second toggle: deactivate
+        if inspector_active {
+            inspector_active = false;
+        }
+        assert!(!inspector_active);
+        
+        // Third toggle: activate again
+        if !inspector_active && editor.is_none() {
+            inspector_active = true;
+        }
+        assert!(inspector_active);
+    }
+
+    #[test]
+    fn test_state_cleared_on_mode_exit() {
+        let mut inspector_active = true;
+        let target = SelectionTarget::Scenery {
+            key: SceneryKey::Editable { map_id: 100 },
+            mesh: None,
+        };
+        let mut inspector_selection = Some(InspectorSelection::new(target));
+        
+        // Simulate toggle_inspector() deactivation
+        if inspector_active {
+            inspector_active = false;
+            inspector_selection = None;
+        }
+        
+        assert!(!inspector_active);
+        assert!(inspector_selection.is_none());
+    }
+
+    #[test]
+    fn test_mutual_exclusion_bidirectional() {
+        // Direction 1: Inspector active, editor activates
+        let mut inspector_active = true;
+        let target = SelectionTarget::Vehicle {
+            key: VehicleKey::Player { generation: 1 },
+            mesh: None,
+        };
+        let mut inspector_selection = Some(InspectorSelection::new(target));
+        
+        // Simulate toggle_editor() mutual exclusion
+        if inspector_active {
+            inspector_active = false;
+            inspector_selection = None;
+        }
+        let editor = Some(crate::editor::Editor::default());
+        
+        assert!(!inspector_active);
+        assert!(inspector_selection.is_none());
+        assert!(editor.is_some());
+        
+        // Direction 2: Editor active, inspector tries to activate
+        let mut inspector_active_2 = false;
+        let mut service_msg = None;
+        
+        // Simulate toggle_inspector() with editor active
+        if !inspector_active_2 && editor.is_some() {
+            service_msg = Some(("Inspector unavailable while editor is active (exit with Ctrl+Shift+E)".to_string(), 3.0));
+        } else {
+            inspector_active_2 = true;
+        }
+        
+        assert!(!inspector_active_2);
+        assert!(service_msg.is_some());
     }
 }

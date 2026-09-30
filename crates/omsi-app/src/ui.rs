@@ -227,6 +227,15 @@ impl ChatWidget {
     }
 }
 
+/// Inspector panel view data (owned, no borrowed refs).
+#[derive(Debug, Clone)]
+pub struct InspectorView {
+    /// Whether inspector mode is active.
+    pub active: bool,
+    /// Current selection snapshot (if any).
+    pub snapshot: Option<crate::inspector::InspectorSnapshot>,
+}
+
 /// Everything the interface draws in a frame.
 pub struct Frame<'a> {
     /// Physical pixels per logical one.
@@ -259,6 +268,22 @@ pub struct Frame<'a> {
     pub tutorial: Option<(&'a str, &'a str, Option<&'a std::path::Path>, usize, usize)>,
     /// Name tags: a screen position (the point above a bus), the name and a second line.
     pub tags: Vec<((f32, f32), String, String, f32)>,
+    /// Inspector panel data.
+    pub inspector: Option<InspectorView>,
+}
+
+/// Inspector panel widget state (for hit-testing).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct InspectorWidget {
+    /// Panel bounds in physical pixels [x0, y0, x1, y1].
+    pub rect: [f32; 4],
+}
+
+impl InspectorWidget {
+    /// Check if a point (in physical pixels) is inside the inspector panel.
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        x >= self.rect[0] && x <= self.rect[2] && y >= self.rect[1] && y <= self.rect[3]
+    }
 }
 
 pub struct Ui {
@@ -280,11 +305,25 @@ pub struct Ui {
     pub menu_row_h: f32,
     /// Pictures shown in the interface (a tutorial page's), by file.
     images: hashbrown::HashMap<std::path::PathBuf, Option<(TextureId, u32, u32)>>,
+    /// Inspector panel widget.
+    pub inspector: InspectorWidget,
 }
 
 impl Ui {
     pub fn new() -> Option<Ui> {
-        Some(Ui { text: TextCache::new()?, chat: ChatWidget::default(), menu_rects: Vec::new(), menu_overlay_range: 0..0, vr_cursor_overlay: None, vr_tooltip_overlay: None, menu_start: 0, menu_rows: 0, menu_row_h: 1.0, images: Default::default() })
+        Some(Ui { 
+            text: TextCache::new()?, 
+            chat: ChatWidget::default(), 
+            menu_rects: Vec::new(), 
+            menu_overlay_range: 0..0, 
+            vr_cursor_overlay: None, 
+            vr_tooltip_overlay: None, 
+            menu_start: 0, 
+            menu_rows: 0, 
+            menu_row_h: 1.0, 
+            images: Default::default(),
+            inspector: InspectorWidget::default(),
+        })
     }
 
     /// Draw the frame's interface: its overlays go after the HUD's in `scene.overlays`.
@@ -579,6 +618,9 @@ impl Ui {
             if f.vr { self.vr_tooltip_overlay = Some(scene.overlays.len()); }
             scene.overlays.push((l.tex, [x, y, x + l.w as f32, y + l.h as f32]));
         }
+        // --- the inspector panel
+        self.draw_inspector(r, scene, f);
+        
         if f.vr {
             let pointer = self.text.vr_pointer(r, scene);
             self.vr_cursor_overlay = Some(scene.overlays.len());
@@ -651,6 +693,121 @@ impl TextCache {
 }
 
 impl Ui {
+    /// Draw the inspector panel showing target details.
+    fn draw_inspector(&mut self, r: &Renderer, scene: &mut Scene, f: &Frame) {
+        let view = match &f.inspector {
+            Some(v) if v.active => v,
+            _ => return,
+        };
+
+        let snapshot = match &view.snapshot {
+            Some(s) => s,
+            None => {
+                self.draw_inspector_empty(r, scene, f);
+                return;
+            }
+        };
+
+        let s = f.scale.max(0.5);
+        let panel_w = (280.0 * s).min(f.width * 0.3);
+        let panel_x = f.width - panel_w - 12.0 * s;
+        let panel_y = 12.0 * s;
+        let pad = 8.0 * s;
+        let line_h = 18.0 * s;
+        let title_px = (16.0 * s) as u32;
+        let body_px = (13.0 * s) as u32;
+
+        let bg = self.text.plate(r, scene, 3);
+        let mut y = panel_y;
+        let overlay_start = scene.overlays.len();
+        
+        let title = self.text.label(r, scene, "inspector.title", title_px, [255, 255, 255, 0]);
+        scene.overlays.push((title.tex, [panel_x + pad, y + pad, panel_x + pad + title.w as f32, y + pad + title.h as f32]));
+        y += title.h as f32 + pad * 2.0;
+
+        let target_label = format_inspector_target(&snapshot.target, snapshot.mesh_name.as_deref());
+        let target = self.text.label(r, scene, &target_label, body_px, [220, 220, 220, 0]);
+        scene.overlays.push((target.tex, [panel_x + pad, y, panel_x + pad + target.w as f32, y + target.h as f32]));
+        y += target.h as f32 + pad;
+
+        if let Some(path) = &snapshot.model_path {
+            let model_label = self.text.label(r, scene, "inspector.model", body_px, [180, 180, 180, 0]);
+            scene.overlays.push((model_label.tex, [panel_x + pad, y, panel_x + pad + model_label.w as f32, y + model_label.h as f32]));
+            y += line_h;
+            let path_text = self.text.label(r, scene, path, body_px, [220, 220, 220, 0]);
+            scene.overlays.push((path_text.tex, [panel_x + pad * 2.0, y, panel_x + pad * 2.0 + path_text.w as f32, y + path_text.h as f32]));
+            y += line_h;
+        }
+
+        if let Some(pos) = snapshot.position {
+            let pos_label = self.text.label(r, scene, "inspector.position", body_px, [180, 180, 180, 0]);
+            scene.overlays.push((pos_label.tex, [panel_x + pad, y, panel_x + pad + pos_label.w as f32, y + pos_label.h as f32]));
+            y += line_h;
+            let pos_val = format!("{:.2}, {:.2}, {:.2}", pos[0], pos[1], pos[2]);
+            let pos_text = self.text.label(r, scene, &pos_val, body_px, [220, 220, 220, 0]);
+            scene.overlays.push((pos_text.tex, [panel_x + pad * 2.0, y, panel_x + pad * 2.0 + pos_text.w as f32, y + pos_text.h as f32]));
+            y += line_h;
+        }
+
+        if let Some(rot) = snapshot.rotation {
+            let rot_label = self.text.label(r, scene, "inspector.rotation", body_px, [180, 180, 180, 0]);
+            scene.overlays.push((rot_label.tex, [panel_x + pad, y, panel_x + pad + rot_label.w as f32, y + rot_label.h as f32]));
+            y += line_h;
+            let rot_val = format!("{:.2}, {:.2}, {:.2}, {:.2}", rot[0], rot[1], rot[2], rot[3]);
+            let rot_text = self.text.label(r, scene, &rot_val, body_px, [220, 220, 220, 0]);
+            scene.overlays.push((rot_text.tex, [panel_x + pad * 2.0, y, panel_x + pad * 2.0 + rot_text.w as f32, y + rot_text.h as f32]));
+            y += line_h;
+        }
+
+        if let Some((min, max)) = snapshot.bounds {
+            let bounds_min_label = self.text.label(r, scene, "inspector.bounds_min", body_px, [180, 180, 180, 0]);
+            scene.overlays.push((bounds_min_label.tex, [panel_x + pad, y, panel_x + pad + bounds_min_label.w as f32, y + bounds_min_label.h as f32]));
+            y += line_h;
+            let min_val = format!("{:.2}, {:.2}, {:.2}", min[0], min[1], min[2]);
+            let min_text = self.text.label(r, scene, &min_val, body_px, [220, 220, 220, 0]);
+            scene.overlays.push((min_text.tex, [panel_x + pad * 2.0, y, panel_x + pad * 2.0 + min_text.w as f32, y + min_text.h as f32]));
+            y += line_h;
+
+            let bounds_max_label = self.text.label(r, scene, "inspector.bounds_max", body_px, [180, 180, 180, 0]);
+            scene.overlays.push((bounds_max_label.tex, [panel_x + pad, y, panel_x + pad + bounds_max_label.w as f32, y + bounds_max_label.h as f32]));
+            y += line_h;
+            let max_val = format!("{:.2}, {:.2}, {:.2}", max[0], max[1], max[2]);
+            let max_text = self.text.label(r, scene, &max_val, body_px, [220, 220, 220, 0]);
+            scene.overlays.push((max_text.tex, [panel_x + pad * 2.0, y, panel_x + pad * 2.0 + max_text.w as f32, y + max_text.h as f32]));
+            y += line_h;
+        }
+
+        let panel_h = y - panel_y + pad;
+        scene.overlays.insert(overlay_start, (bg, [panel_x, panel_y, panel_x + panel_w, panel_y + panel_h]));
+        self.inspector.rect = [panel_x, panel_y, panel_x + panel_w, panel_y + panel_h];
+    }
+
+    fn draw_inspector_empty(&mut self, r: &Renderer, scene: &mut Scene, f: &Frame) {
+        let s = f.scale.max(0.5);
+        let panel_w = (280.0 * s).min(f.width * 0.3);
+        let panel_x = f.width - panel_w - 12.0 * s;
+        let panel_y = 12.0 * s;
+        let pad = 8.0 * s;
+        let title_px = (16.0 * s) as u32;
+        let body_px = (13.0 * s) as u32;
+
+        let bg = self.text.plate(r, scene, 3);
+        let mut y = panel_y;
+        let overlay_start = scene.overlays.len();
+
+        let title = self.text.label(r, scene, "inspector.title", title_px, [255, 255, 255, 0]);
+        scene.overlays.push((title.tex, [panel_x + pad, y + pad, panel_x + pad + title.w as f32, y + pad + title.h as f32]));
+        y += title.h as f32 + pad * 2.0;
+
+        let no_sel = self.text.label(r, scene, "inspector.no_selection", body_px, [180, 180, 180, 0]);
+        scene.overlays.push((no_sel.tex, [panel_x + pad, y, panel_x + pad + no_sel.w as f32, y + no_sel.h as f32]));
+        y += no_sel.h as f32 + pad;
+
+        let panel_h = y - panel_y + pad;
+        scene.overlays.insert(overlay_start, (bg, [panel_x, panel_y, panel_x + panel_w, panel_y + panel_h]));
+        self.inspector.rect = [panel_x, panel_y, panel_x + panel_w, panel_y + panel_h];
+    }
+
     /// The loading screen over a plain dark picture: the map's name in the middle, a thin
     /// bar of how far the start area got under it, and one quiet line (what is being done).
     pub fn loading(&mut self, r: &Renderer, scene: &mut Scene, width: f32, height: f32, scale: f32, title: &str, caption: &str, progress: f32) {
@@ -728,6 +885,55 @@ pub fn filter_chat(text: &str) -> String {
     text.censor()
 }
 
+/// Format a SelectionTarget for display in the inspector panel.
+fn format_inspector_target(target: &crate::inspector::SelectionTarget, mesh_name: Option<&str>) -> String {
+    use crate::inspector::{SelectionTarget, VehicleKey, SceneryKey};
+    match target {
+        SelectionTarget::Vehicle { key, mesh } => {
+            let base = match key {
+                VehicleKey::Player { .. } => "Player Vehicle".to_string(),
+                VehicleKey::AiCar { id } => format!("AI Car #{}", id),
+                VehicleKey::Remote { player_id, .. } => format!("Remote Player {}", player_id),
+                VehicleKey::PlayerTrailer { trailer_index, .. } => format!("Player Trailer {}", trailer_index),
+                VehicleKey::AiTrailer { car_id, trailer_index } => format!("AI Car #{} Trailer {}", car_id, trailer_index),
+                VehicleKey::RemoteTrailer { player_id, trailer_index, .. } => format!("Remote Player {} Trailer {}", player_id, trailer_index),
+            };
+            if let Some(name) = mesh_name {
+                format!("{} ({})", base, name)
+            } else if let Some(m) = mesh {
+                if let Some(dis) = m.disambiguator {
+                    format!("{} ({}#{})", base, m.mesh_name, dis)
+                } else {
+                    format!("{} ({})", base, m.mesh_name)
+                }
+            } else {
+                base
+            }
+        }
+        SelectionTarget::Scenery { key, mesh } => {
+            let base = match key {
+                SceneryKey::Editable { map_id } => format!("Scenery #{}", map_id),
+                SceneryKey::NonEditable { tile_x, tile_y, key } => format!("Scenery ({}, {}) #{}", tile_x, tile_y, key),
+                SceneryKey::Parked { key } => format!("Parked #{}", key),
+            };
+            if let Some(name) = mesh_name {
+                format!("{} ({})", base, name)
+            } else if let Some(m) = mesh {
+                if let Some(dis) = m.disambiguator {
+                    format!("{} ({}#{})", base, m.mesh_name, dis)
+                } else {
+                    format!("{} ({})", base, m.mesh_name)
+                }
+            } else {
+                base
+            }
+        }
+        SelectionTarget::Human { key, .. } => {
+            format!("Human #{}", key.id)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -765,5 +971,45 @@ mod tests {
     fn chat_filter_stars_out_swearing() {
         assert_ne!(filter_chat("you are a fucking idiot"), "you are a fucking idiot");
         assert_eq!(filter_chat("next stop Rathaus Spandau"), "next stop Rathaus Spandau");
+    }
+
+    #[test]
+    fn inspector_widget_hit_test() {
+        let widget = InspectorWidget {
+            rect: [100.0, 50.0, 400.0, 300.0],
+        };
+        
+        // Inside panel
+        assert!(widget.contains(200.0, 150.0));
+        assert!(widget.contains(100.0, 50.0)); // Top-left corner
+        assert!(widget.contains(400.0, 300.0)); // Bottom-right corner
+        
+        // Outside panel
+        assert!(!widget.contains(50.0, 150.0)); // Left
+        assert!(!widget.contains(450.0, 150.0)); // Right
+        assert!(!widget.contains(200.0, 30.0)); // Above
+        assert!(!widget.contains(200.0, 350.0)); // Below
+    }
+
+    #[test]
+    fn inspector_widget_empty_rect() {
+        let widget = InspectorWidget::default();
+        assert_eq!(widget.rect, [0.0, 0.0, 0.0, 0.0]);
+        assert!(widget.contains(0.0, 0.0));
+        assert!(!widget.contains(1.0, 1.0));
+    }
+
+    #[test]
+    fn inspector_panel_responsive_width() {
+        // At 1920x1080 desktop
+        let scale = 1.0_f32;
+        let width = 1920.0_f32;
+        let panel_w = (280.0_f32 * scale).min(width * 0.3);
+        assert_eq!(panel_w, 280.0);
+        
+        // At narrow 480px mobile
+        let width = 480.0_f32;
+        let panel_w = (280.0_f32 * scale).min(width * 0.3);
+        assert_eq!(panel_w, 144.0); // Clamped to 30% of screen width
     }
 }

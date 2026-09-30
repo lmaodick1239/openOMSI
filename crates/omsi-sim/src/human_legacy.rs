@@ -19,6 +19,9 @@
 //! it lands. The same stepping carries standing people through turns and shuffles, and the
 //! arms reach the cash desk or a handrail by IK as well.
 
+// Animation and snapshot modules are now in human/mod.rs
+// This file only contains legacy types
+
 use anyhow::{Context, Result};
 use glam::{Affine3A, DVec2, DVec3, Mat3A, Quat, Vec2, Vec3, Vec3A};
 use omsi_content::Human;
@@ -45,16 +48,16 @@ pub const BONE_HAND_R: i32 = -14;
 /// Bone transform slots: the thirteen engine bones (id -2 … -14 → slot 0 … 12), the two
 /// feet split off the shins and the toes split off the feet.
 pub const SLOTS: usize = 17;
-const THIGH: [usize; 2] = [0, 1];
-const SHIN: [usize; 2] = [2, 3];
-const UPPER: [usize; 2] = [4, 5];
-const FORE: [usize; 2] = [6, 7];
-const HIP: usize = 8;
-const MAIN: usize = 9;
-const HEAD: usize = 10;
-const HAND: [usize; 2] = [11, 12];
-const FOOT: [usize; 2] = [13, 14];
-const TOE: [usize; 2] = [15, 16];
+pub(crate) const THIGH: [usize; 2] = [0, 1];
+pub(crate) const SHIN: [usize; 2] = [2, 3];
+pub(crate) const UPPER: [usize; 2] = [4, 5];
+pub(crate) const FORE: [usize; 2] = [6, 7];
+pub(crate) const HIP: usize = 8;
+pub(crate) const MAIN: usize = 9;
+pub(crate) const HEAD: usize = 10;
+pub(crate) const HAND: [usize; 2] = [11, 12];
+pub(crate) const FOOT: [usize; 2] = [13, 14];
+pub(crate) const TOE: [usize; 2] = [15, 16];
 /// Index 0 is the left side, 1 the right; this is the sign of x on that side.
 const SIDE: [f32; 2] = [-1.0, 1.0];
 
@@ -1103,6 +1106,53 @@ impl Pose {
     /// Quick steps taken so far to catch up with a foot left behind.
     pub fn catch_ups(&self) -> u32 {
         self.catch_ups
+    }
+
+    /// Accessor methods for animation introspection (Phase 2, Task 2.4).
+    
+    /// Get walking weight [0.0..1.0] for upper body blending.
+    pub fn walk_weight(&self) -> f32 {
+        self.walk
+    }
+
+    /// Get gait cycle phase [0.0..1.0] (left heel strike at 0).
+    pub fn gait_phase(&self) -> f32 {
+        self.phase
+    }
+
+    /// Get sitting weight [0.0..1.0].
+    pub fn sit_weight(&self) -> f32 {
+        self.sit
+    }
+
+    /// Get current ground speed (m/s).
+    pub fn ground_speed(&self) -> f32 {
+        self.speed
+    }
+
+    /// Get forward acceleration (m/s²).
+    pub fn forward_accel(&self) -> f32 {
+        self.accel
+    }
+
+    /// Get turning rate (deg/s).
+    pub fn turn_rate(&self) -> f32 {
+        self.turn
+    }
+
+    /// Get breath phase for idle animation.
+    pub fn breath_phase(&self) -> f32 {
+        (self.breath / TAU).fract()
+    }
+
+    /// Get current position and heading in floor frame.
+    pub fn position_heading(&self) -> (DVec3, f64) {
+        (self.origin, self.heading)
+    }
+
+    /// Get current velocity in floor frame (m/s).
+    pub fn velocity(&self) -> DVec2 {
+        self.vel
     }
 
     fn to_local(&self, p: DVec3) -> Vec3 {

@@ -4,6 +4,8 @@
 //! The same vocabulary appears inline in `.sco` files, therefore parsing is exposed as a
 //! keyword handler ([`Model::handle_keyword`]) that other parsers can delegate to.
 
+pub mod gltf_export;
+
 use omsi_cfg::{CfgFile, CfgReader, Entry};
 use std::path::{Path, PathBuf};
 

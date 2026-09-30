@@ -11,3 +11,10 @@ omsi-scenery = { path = "../omsi-scenery" }
 omsi-o3d = { path = "../omsi-o3d" }
 glam.workspace = true
 log.workspace = true
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "bvh_raycast"
+harness = false

@@ -2,6 +2,10 @@
 
 pub mod atmosphere;
 pub mod clouds;
+pub mod graphics_inspector;
+pub mod graphics_inspector_impl;
+pub mod inspector;
+pub mod staging_pool;
 
 use anyhow::{anyhow, Context, Result};
 use glam::{DVec3, Mat4, Vec3, Vec4};
