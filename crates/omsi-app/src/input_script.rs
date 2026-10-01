@@ -1634,6 +1634,17 @@ impl App {
     }
 
     /// A key while the game menu is open.
+    /// Toggle inspector mode on or off.
+    pub(crate) fn toggle_inspector(&mut self) {
+        self.inspector_active = !self.inspector_active;
+        let msg = if self.inspector_active {
+            "Inspector mode active - use pause menu to exit"
+        } else {
+            "Inspector mode deactivated"
+        };
+        self.service_msg = Some((msg.into(), 3.0));
+    }
+
     /// The object editor on or off; on, it starts with the free camera where the view is.
     pub(crate) fn toggle_editor(&mut self) {
         // (in a LAN session the host edits the map for everybody: its edits go to the
@@ -1948,8 +1959,8 @@ impl App {
             }
             Some("resume") => self.close_game_menu(),
             Some("inspector") => {
-                self.inspector_active = true;
                 self.close_game_menu();
+                self.toggle_inspector();
             }
             Some("editor") => {
                 self.close_game_menu();
@@ -2755,7 +2766,7 @@ pub(crate) fn parse_input_script() -> Vec<(f32, String)> {
 
 /// The game menu on a server (`--lan-join https://…`): the world's clock and weather are the
 /// server's, and the way out leaves the server.
-pub(crate) const SERVER_GAME_MENU: [(&str, &str); 21] = [
+pub(crate) const SERVER_GAME_MENU: [(&str, &str); 22] = [
     ("resume", "Resume"),
     ("options", "Options..."),
     ("dest", "Destination display..."),
@@ -2776,6 +2787,7 @@ pub(crate) const SERVER_GAME_MENU: [(&str, &str); 21] = [
     ("wash", "Wash"),
     ("repair", "Repair"),
     ("editor", "Object editor"),
+    ("inspector", "Inspector"),
     ("quit", "Leave the server"),
 ];
 
@@ -2788,13 +2800,18 @@ pub(crate) fn game_menu_for(args: &crate::Args) -> &'static [(&'static str, &'st
     }
 }
 
+/// Check if inspector capability is enabled for this session.
+pub(crate) fn inspector_enabled(args: &crate::Args) -> bool {
+    args.inspector
+}
+
 /// Apply inspector filtering to a menu based on args.
 /// Removes the inspector entry when `args.inspector` is false.
 pub(crate) fn apply_inspector_filter(
     menu: &mut Vec<(&'static str, &'static str)>,
     args: &crate::Args,
 ) {
-    if !args.inspector {
+    if !inspector_enabled(args) {
         menu.retain(|x| x.0 != "inspector");
     }
 }
@@ -2922,10 +2939,17 @@ mod tests {
     }
 
     #[test]
+    fn inspector_in_server_menu() {
+        // SERVER_GAME_MENU constant includes inspector entry
+        assert!(SERVER_GAME_MENU.iter().any(|m| m.0 == "inspector"),
+            "Inspector should be in SERVER_GAME_MENU constant for LAN sessions");
+    }
+
+    #[test]
     fn inspector_filtered_when_disabled() {
         // Test production filtering helper with disabled inspector
         let args = crate::Args::parse_from(&["omsi"]);
-        assert!(!args.inspector, "Default args should have inspector disabled");
+        assert!(!inspector_enabled(&args), "inspector_enabled helper should return false for default args");
 
         let mut menu = game_menu_for(&args).to_vec();
         apply_inspector_filter(&mut menu, &args);
@@ -2938,7 +2962,7 @@ mod tests {
     fn inspector_included_when_enabled() {
         // Test production filtering helper with enabled inspector
         let args = crate::Args::parse_from(&["omsi", "--inspector"]);
-        assert!(args.inspector, "Args should have inspector enabled");
+        assert!(inspector_enabled(&args), "inspector_enabled helper should return true when --inspector flag is set");
 
         let mut menu = game_menu_for(&args).to_vec();
         apply_inspector_filter(&mut menu, &args);
