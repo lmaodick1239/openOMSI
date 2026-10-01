@@ -4,7 +4,7 @@
 //! sandbox, and transactional commit/revert workflow. Original values preserved in
 //! transaction log.
 
-use glam::{Vec3, Quat, Mat4};
+use glam::{Mat4, Quat, Vec3};
 use serde::{Deserialize, Serialize};
 
 /// Editor bridge state and transition manager.
@@ -127,9 +127,9 @@ impl EditorBridge {
         // - Remote vehicles: NotEditable
         // - Non-editable scenery: NotEditable
         // - Parked vehicles: NotEditable
-        
+
         log::info!("Promoting entity '{}' to editor", entity_key);
-        
+
         // For now, assume success
         // TODO: Deactivate inspector mode, activate editor mode, pin gizmo
         EditorTransition::Success
@@ -138,7 +138,7 @@ impl EditorBridge {
     /// Enter transform sandbox mode.
     pub fn enter_sandbox(&mut self, entity_key: String, original: Transform) {
         log::info!("Entering transform sandbox for '{}'", entity_key);
-        
+
         self.sandbox = Some(TransformSandbox {
             entity_key,
             original_transform: original,
@@ -160,9 +160,9 @@ impl EditorBridge {
 
     /// Get current sandbox delta.
     pub fn get_sandbox_delta(&self) -> Option<TransformDelta> {
-        self.sandbox.as_ref().map(|s| {
-            s.current_transform.delta_from(&s.original_transform)
-        })
+        self.sandbox
+            .as_ref()
+            .map(|s| s.current_transform.delta_from(&s.original_transform))
     }
 
     /// Revert sandbox to original transform.
@@ -182,7 +182,7 @@ impl EditorBridge {
         match self.sandbox.take() {
             Some(sandbox) if sandbox.active => {
                 log::info!("Committing sandbox changes for '{}'", sandbox.entity_key);
-                
+
                 // Record transaction for rollback
                 let entry = TransactionEntry {
                     entity_key: sandbox.entity_key.clone(),
@@ -194,10 +194,10 @@ impl EditorBridge {
                         .as_secs(),
                 };
                 self.transaction_log.push(entry);
-                
+
                 // TODO: Push modified coordinates into editor undo/save queue
                 // TODO: Write to tile_x_y.map file
-                
+
                 Ok(())
             }
             _ => Err("No active sandbox".to_string()),
@@ -248,7 +248,7 @@ mod tests {
     fn test_transform_delta() {
         let original = Transform::new([100.0, 50.0, 2.5], [0.0, 0.0, 0.0]);
         let modified = Transform::new([105.0, 50.0, 2.5], [15.0, 0.0, 0.0]);
-        
+
         let delta = modified.delta_from(&original);
         assert_eq!(delta.position_delta[0], 5.0);
         assert_eq!(delta.rotation_delta[0], 15.0);
@@ -257,25 +257,25 @@ mod tests {
     #[test]
     fn test_sandbox_workflow() {
         let mut bridge = EditorBridge::new();
-        
+
         let original = Transform::new([100.0, 50.0, 2.5], [0.0, 0.0, 0.0]);
         bridge.enter_sandbox("test_entity".to_string(), original);
-        
+
         assert!(bridge.is_sandbox_active());
-        
+
         let modified = Transform::new([105.0, 50.0, 2.5], [15.0, 0.0, 0.0]);
         bridge.update_sandbox_transform(modified).unwrap();
-        
+
         let delta = bridge.get_sandbox_delta().unwrap();
         assert_eq!(delta.position_delta[0], 5.0);
-        
+
         bridge.revert_sandbox().unwrap();
         let delta = bridge.get_sandbox_delta().unwrap();
         assert_eq!(delta.position_delta[0], 0.0);
-        
+
         bridge.update_sandbox_transform(modified).unwrap();
         bridge.commit_sandbox().unwrap();
-        
+
         assert!(!bridge.is_sandbox_active());
         assert_eq!(bridge.transaction_count(), 1);
     }
@@ -283,14 +283,14 @@ mod tests {
     #[test]
     fn test_transaction_rollback() {
         let mut bridge = EditorBridge::new();
-        
+
         let original = Transform::new([100.0, 50.0, 2.5], [0.0, 0.0, 0.0]);
         bridge.enter_sandbox("test_entity".to_string(), original);
-        
+
         let modified = Transform::new([105.0, 50.0, 2.5], [15.0, 0.0, 0.0]);
         bridge.update_sandbox_transform(modified).unwrap();
         bridge.commit_sandbox().unwrap();
-        
+
         let restored = bridge.rollback_last().unwrap();
         assert_eq!(restored.position[0], 100.0);
     }

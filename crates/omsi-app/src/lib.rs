@@ -101,7 +101,9 @@ const _LOCALES: &str = include_str!("../locales/app.yml");
 /// Show the interface in `code` (the settings' ENG / DEU / FRA / RUS).
 pub(crate) fn ui_language(code: &str) {
     omsi_ui::i18n::set_lookup(|lang, text| _rust_i18n_try_translate(lang, text).map(|t| t.into_owned()));
-    omsi_ui::i18n::set_language(omsi_launcher_lib::language_iso(code));
+    let iso = omsi_launcher_lib::language_iso(code);
+    omsi_ui::i18n::set_language(iso);
+    omsi_sim::vehicle_api::set_locale(iso);
 }
 
 use anyhow::{anyhow, Context, Result};
@@ -317,7 +319,7 @@ pub(crate) fn make_app(mut args: Args, server_cfg: Option<server::ServerCfg>) ->
                 log::info!("LAN: the official server is at {url}");
                 args.lan_join = Some(url);
             }
-            Err(e) => log::error!("LAN: {e}"),
+            Err(e) => log::warn!("LAN: {e}"),
         }
     }
     // a duty starts at its trip, as in OMSI (not at the map's entry point); a joining
@@ -447,6 +449,7 @@ pub(crate) fn make_app(mut args: Args, server_cfg: Option<server::ServerCfg>) ->
         started: Instant::now(),
         total_frames: 0,
         mirror_budget: 1.0,
+        mirrors_seen: 2,
         mirror_turn: 0,
         hover_key: None,
         view,
@@ -461,14 +464,18 @@ pub(crate) fn make_app(mut args: Args, server_cfg: Option<server::ServerCfg>) ->
         last: Instant::now(),
         speed: 30.0,
         mouse_look: false,
+        buttons_held: (false, false),
+        both_drag: None,
         vr_zoom_active: false,
         hover: None,
         hover_part: None,
+        hover_hand: false,
         input_script: parse_input_script(),
         shot: None,
         paused: false,
         game_menu: None,
         menu_top: None,
+        menu_scroll_drag: false,
         menu_more: false,
         plugin_keys: Vec::new(),
         clock_hold: 0.0,
@@ -511,10 +518,13 @@ pub(crate) fn make_app(mut args: Args, server_cfg: Option<server::ServerCfg>) ->
         autosave_t: 0.0,
         timetable: false,
         dragging: false,
+        html_pressed: None,
+        html_object_pressed: None,
         drag_delta: (0.0, 0.0),
         look: (0.0, 0.0),
         view_looks: Default::default(),
         look_view: String::new(),
+        cam_blend: Default::default(),
         view_zoom: Default::default(),
         orbit: ORBIT_DEFAULT,
         frames: 0,
@@ -531,11 +541,14 @@ pub(crate) fn make_app(mut args: Args, server_cfg: Option<server::ServerCfg>) ->
         inspector_active: false,
         inspector_selection: None,
         inspector_overrides: inspector_overrides::OverrideManager::new(),
+        #[cfg(not(target_os = "android"))]
+        inspector_ui: None,
         lan: None,
         remotes: Default::default(),
         spikes: 0,
         worst_ms: 0.0,
         governor: (0.0, 0, 0.0),
+        governor_low: 0,
         governor_wait_prev: 0.0,
         hidden_frames: 0,
         exiting: false,

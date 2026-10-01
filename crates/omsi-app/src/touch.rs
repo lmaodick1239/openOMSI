@@ -292,7 +292,11 @@ impl App {
             let scripted = |name: &str| p.vehicle.ty.program.trigger(name).is_some();
             // (a manual's scripts answer to the gear keys; the LiAZ's KPP has - and + too, and
             // triggers up to 10 whatever its box has: `antrieb_number_gears` says how many)
-            let manual = scripted("kw_s_1") && scripted("kw_s_2") && !scripted("automatic_D");
+            // (a dashboard script answers to the automatic's keys for its own display on a
+            // manual bus as well - the Sprinter W906 MT showed R N D, #279: a gearbox
+            // script that reads the clutch pedal is a manual one)
+            let program = &p.vehicle.ty.program;
+            let manual = program.manual_gearbox();
             let count = p.vehicle.ty.program.constant("antrieb_number_gears").map(|n| n.round() as usize).filter(|n| (1..=8).contains(n));
             let gears: Vec<(&'static str, &'static str)> = if manual {
                 MANUAL.iter().copied().enumerate().filter(|(k, (a, _))| {
@@ -309,7 +313,7 @@ impl App {
             let gy;
             if manual && gears.len() > 3 {
                 // the gear engaged, as the lever's script has it
-                let engaged = p.vehicle.var("antrieb_getr_aktugang").map(|g| g.round() as i32);
+                let engaged = p.vehicle.var("antrieb_getr_aktugang").or_else(|| p.vehicle.var("antrieb_getr_gang")).map(|g| g.round() as i32);
                 let label_of = |g: i32| match g {
                     -1 => "R",
                     0 => "N",
@@ -623,7 +627,9 @@ impl App {
             match f.role {
                 Role::Throttle => t.throttle = depth(t.throttle_r, f.pos.y),
                 Role::Brake => t.brake = depth(t.brake_r, f.pos.y),
-                Role::Clutch => t.clutch = depth(t.clutch_r, f.pos.y),
+                // (the clutch pushed in most of the way is in: the gearboxes want it at 1
+                // to take a gear, see `pedal_ends`, and a thumb seldom sits at the top edge)
+                Role::Clutch => t.clutch = if depth(t.clutch_r, f.pos.y) >= 0.75 { 1.0 } else { depth(t.clutch_r, f.pos.y) },
                 _ => {}
             }
         }

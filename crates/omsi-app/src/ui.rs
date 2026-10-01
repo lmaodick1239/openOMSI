@@ -292,6 +292,8 @@ pub struct Ui {
     pub chat: ChatWidget,
     /// Where the game menu's lines were drawn this frame (physical pixels), for the mouse.
     pub menu_rects: Vec<[f32; 4]>,
+    pub menu_scroll_thumb: Option<[f32; 4]>,
+    pub menu_scroll_track: Option<[f32; 4]>,
     /// Overlay entries belonging to the game menu.
     pub menu_overlay_range: std::ops::Range<usize>,
     /// The pointer texture, positioned separately for each headset eye.
@@ -315,7 +317,9 @@ impl Ui {
         Some(Ui { 
             text: TextCache::new()?, 
             chat: ChatWidget::default(), 
-            menu_rects: Vec::new(), 
+            menu_rects: Vec::new(),
+            menu_scroll_thumb: None,
+            menu_scroll_track: None,
             menu_overlay_range: 0..0, 
             vr_cursor_overlay: None, 
             vr_tooltip_overlay: None, 

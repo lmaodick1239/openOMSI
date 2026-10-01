@@ -87,3 +87,41 @@ impl HumanPanel {
         }
     }
 
+
+/// Generate UI text description for a human snapshot (fallback for non-egui builds).
+pub fn describe_human(snapshot: &HumanSnapshot) -> String {
+    let mut lines = Vec::new();
+
+    lines.push(format!("Human #{} (gen {})", snapshot.id, snapshot.generation));
+    lines.push(format!("State: {:?}", snapshot.behavior_state));
+    lines.push(format!(
+        "Position: ({:.2}, {:.2}, {:.2})",
+        snapshot.position.x, snapshot.position.y, snapshot.position.z
+    ));
+    lines.push(format!("Velocity: {:.2} m/s", snapshot.velocity.length()));
+    lines.push(format!("Animation: {} @ {:.1}%", snapshot.active_animation, snapshot.animation_phase * 100.0));
+
+    if !snapshot.skeleton_bones.is_empty() {
+        lines.push(format!("Bones: {}", snapshot.skeleton_bones.len()));
+    }
+
+    if let Some(target) = snapshot.navigation_target {
+        lines.push(format!(
+            "Nav Target: ({:.2}, {:.2}, {:.2})",
+            target.x, target.y, target.z
+        ));
+    }
+
+    if let Some(economy) = &snapshot.passenger_economy {
+        lines.push(format!(
+            "Ticket: {} | Comfort: {:.0}% | Dest: {}",
+            economy.ticket_type, economy.comfort_index, economy.destination_stop
+        ));
+    }
+
+    if !snapshot.artifacts.is_empty() {
+        lines.push(format!("⚠ {} artifact(s) detected", snapshot.artifacts.len()));
+    }
+
+    lines.join("\n")
+}
