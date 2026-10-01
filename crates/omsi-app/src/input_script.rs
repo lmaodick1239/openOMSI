@@ -2788,6 +2788,12 @@ pub(crate) fn game_menu_for(args: &crate::Args) -> &'static [(&'static str, &'st
     }
 }
 
+/// Apply inspector filtering to a menu based on args.
+/// Returns true if inspector should be included, false if it should be filtered out.
+pub(crate) fn should_include_inspector(args: &crate::Args) -> bool {
+    args.inspector
+}
+
 impl crate::App {
     /// The game menu's lines for this session: back to the own bus while walking about,
     /// the administration for a host and a server's admin.
@@ -2905,6 +2911,18 @@ pub(crate) fn swap_view_look(look: &mut (f32, f32), looks: &mut std::collections
 mod tests {
     use super::*;
 
+    /// Pure helper that applies inspector filtering to a menu based on args.
+    fn filter_inspector_from_menu(
+        menu: Vec<(&'static str, &'static str)>,
+        args: &crate::Args,
+    ) -> Vec<(&'static str, &'static str)> {
+        let mut v = menu;
+        if !should_include_inspector(args) {
+            v.retain(|x| x.0 != "inspector");
+        }
+        v
+    }
+
     #[test]
     fn inspector_in_base_menu() {
         // GAME_MENU constant includes inspector entry
@@ -2913,46 +2931,44 @@ mod tests {
     }
 
     #[test]
-    fn inspector_menu_filtered_by_args() {
-        // Test that game_menu_for includes inspector when args.inspector is true
-        let mut args = crate::Args::parse_from(&["omsi", "--inspector"]);
-        let menu = game_menu_for(&args);
-        assert!(menu.iter().any(|m| m.0 == "inspector"),
-            "Inspector should be in menu when --inspector flag is set");
-
-        // Test that filtering logic would remove it when inspector is false
-        args.inspector = false;
-        let menu = game_menu_for(&args);
-        // Note: game_menu_for returns the base menu; filtering happens in game_menu_items
-        // This test verifies the base menu contains inspector for the filter to work
-        assert!(menu.iter().any(|m| m.0 == "inspector"),
-            "Inspector in base menu allows game_menu_items to filter it");
+    fn inspector_filtered_when_disabled() {
+        // Test filtering with disabled inspector
+        let args = crate::Args::parse_from(&["omsi"]);
+        assert!(!args.inspector, "Default args should have inspector disabled");
+        
+        let menu = game_menu_for(&args).to_vec();
+        let filtered = filter_inspector_from_menu(menu, &args);
+        
+        assert!(!filtered.iter().any(|m| m.0 == "inspector"),
+            "Inspector should be filtered out when args.inspector is false");
     }
 
     #[test]
-    fn inspector_menu_contains_entry_when_enabled() {
-        // Verify inspector appears in game menu constant
-        let has_inspector = GAME_MENU.iter().any(|m| m.0 == "inspector");
-        assert!(has_inspector, "GAME_MENU must contain inspector entry");
+    fn inspector_included_when_enabled() {
+        // Test filtering with enabled inspector
+        let args = crate::Args::parse_from(&["omsi", "--inspector"]);
+        assert!(args.inspector, "Args should have inspector enabled");
         
-        // Verify the label is correct
-        let inspector_entry = GAME_MENU.iter().find(|m| m.0 == "inspector");
+        let menu = game_menu_for(&args).to_vec();
+        let filtered = filter_inspector_from_menu(menu, &args);
+        
+        assert!(filtered.iter().any(|m| m.0 == "inspector"),
+            "Inspector should be included when args.inspector is true");
+        
+        let inspector_entry = filtered.iter().find(|m| m.0 == "inspector");
         assert_eq!(inspector_entry.map(|e| e.1), Some("Inspector"),
             "Inspector entry should have label 'Inspector'");
     }
 
     #[test]
-    fn inspector_menu_omits_entry_when_disabled() {
-        // Test the filtering logic that removes inspector when args.inspector is false
-        // This documents the behavior implemented in game_menu_items()
-        let args = crate::Args::parse_from(&["omsi"]);
-        assert!(!args.inspector, "Default args should have inspector disabled");
+    fn should_include_inspector_helper() {
+        // Test the pure helper function
+        let args_disabled = crate::Args::parse_from(&["omsi"]);
+        assert!(!should_include_inspector(&args_disabled),
+            "should_include_inspector returns false when disabled");
         
-        // The actual filtering happens in App::game_menu_items() which calls:
-        // if !self.args.inspector { v.retain(|x| x.0 != "inspector"); }
-        // We verify the base menu has the entry for the filter to remove
-        let menu = game_menu_for(&args);
-        assert!(menu.iter().any(|m| m.0 == "inspector"),
-            "Base GAME_MENU contains inspector for conditional filtering");
+        let args_enabled = crate::Args::parse_from(&["omsi", "--inspector"]);
+        assert!(should_include_inspector(&args_enabled),
+            "should_include_inspector returns true when enabled");
     }
 }
