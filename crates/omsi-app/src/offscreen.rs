@@ -98,6 +98,14 @@ pub(crate) fn run_offscreen(
                     d.start_at(k, args.duty_first_stop);
                 }
                 d.update(&mut p.vehicle, parse_time(&args.time));
+                let mut fonts = world.fonts.lock();
+                if let Err(e) = crate::schedule_paper::update_vehicle(
+                    &mut p.vehicle,
+                    &d,
+                    &mut fonts,
+                ) {
+                    log::warn!("driver timetable paper: {e:#}");
+                }
                 log::info!(
                     "duty: line {} tour {} trip {} next stop {} ({}) delay {:.0} s, stops {:?}",
                     d.line,
@@ -131,6 +139,11 @@ pub(crate) fn run_offscreen(
             }
         }
     }
+    if let Some(p) = player.as_mut() {
+        let active = if duty.is_some() { 1.0 } else { 0.0 };
+        p.vehicle.host.schedule_active = active;
+        p.vehicle.set_var("schedule_active", active);
+    }
     let mut career = args
         .driver
         .as_deref()
@@ -152,9 +165,11 @@ pub(crate) fn run_offscreen(
                 h.money = Some(money::Money::new(&args.root, &world.global.money_system));
             }
         }
+        // (with the passengers setting, as in the window)
         h.density = world
             .global
-            .passenger_density((parse_time(&args.time) / 3600.0) as f32);
+            .passenger_density((parse_time(&args.time) / 3600.0) as f32)
+            * settings.pax_density;
         h.time_of_day = parse_time(&args.time);
         h.stop_targets = schedule.as_ref().map(|s| s.stop_targets());
         h.populate(&world, &renderer, &mut scene, center);
@@ -514,6 +529,14 @@ pub(crate) fn run_offscreen(
                     let (trip, stop) = d.trip_for_ibis();
                     player.set_duty_destination(trip, stop);
                 }
+                let mut fonts = world.fonts.lock();
+                if let Err(e) = crate::schedule_paper::update_vehicle(
+                    &mut player.vehicle,
+                    d,
+                    &mut fonts,
+                ) {
+                    log::warn!("driver timetable paper: {e:#}");
+                }
             }
             career.tick(
                 dt,
@@ -728,7 +751,7 @@ pub(crate) fn run_offscreen(
                 // what the window's HUD would say about a bus that does not move
                 // (once per reason: the numbers in a line change all the time)
                 if i % 30 == 0 {
-                    let why = standing_reasons(&player.vehicle);
+                    let why = standing_reasons(&player.vehicle, &|a| crate::diagnostics::rebound_key(&player.bindings, a));
                     let key = |l: &String| l.split('(').next().unwrap_or_default().to_string();
                     for line in why
                         .iter()
@@ -2389,7 +2412,7 @@ pub(crate) fn run_offscreen(
         hud.update(&renderer, &mut scene, &lines);
         // the navigator, as the window shows it (its camera settled first)
         if settings.navigator {
-            let mut nav = navigator::Navigator::new(true, settings.navigator_opacity, &settings.navigator_corner);
+            let mut nav = navigator::Navigator::new(true, settings.ui_opacity, &settings.navigator_corner);
             nav.schedule = omsi_cfg::env::var_os("OMSI_NAV_SCHEDULE").is_some();
             if omsi_cfg::env::var_os("OMSI_NAV_MAP").is_some() {
                 nav.toggle_map();
@@ -2418,6 +2441,8 @@ pub(crate) fn run_offscreen(
                 weekday: clock.weekday(),
                 language: &settings.language,
                 screen: (w as f32, h as f32),
+                ui_scale: settings.ui_scale,
+                follow_window: settings.ui_scale_window,
                 dt: 0.1,
             };
             for _ in 0..30 {
