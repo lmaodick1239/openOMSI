@@ -2394,6 +2394,35 @@ mod tests {
         assert!(a.windows(2).any(|w| w[0] == "--number" && w[1] == "4711"), "{a:?}");
     }
 
+    /// Inspector capability is passed to the game when enabled.
+    #[test]
+    fn a_duty_passes_inspector_when_enabled() {
+        let enabled: Duty = serde_json::from_str(r#"{"map":"maps/x/global.cfg","bus":"Vehicles/x.bus","time":"09:00","inspector":true}"#).unwrap();
+        let a = duty_args(&enabled).unwrap();
+        assert!(a.contains(&"--inspector".to_string()), "enabled duty should include --inspector: {a:?}");
+    }
+
+    #[test]
+    fn a_duty_omits_inspector_when_disabled() {
+        let disabled: Duty = serde_json::from_str(r#"{"map":"maps/x/global.cfg","bus":"Vehicles/x.bus","time":"09:00","inspector":false}"#).unwrap();
+        let a = duty_args(&disabled).unwrap();
+        assert!(!a.contains(&"--inspector".to_string()), "disabled duty should not include --inspector: {a:?}");
+    }
+
+    #[test]
+    fn a_duty_omits_inspector_when_absent() {
+        let absent: Duty = serde_json::from_str(r#"{"map":"maps/x/global.cfg","bus":"Vehicles/x.bus","time":"09:00"}"#).unwrap();
+        let a = duty_args(&absent).unwrap();
+        assert!(!a.contains(&"--inspector".to_string()), "duty without inspector field should not include --inspector: {a:?}");
+    }
+
+    #[test]
+    fn a_duty_passes_inspector_in_situation_path() {
+        let sit: Duty = serde_json::from_str(r#"{"map":"maps/x/global.cfg","bus":"Vehicles/x.bus","time":"09:00","situation":"test.osn","inspector":true}"#).unwrap();
+        let a = duty_args(&sit).unwrap();
+        assert!(a.contains(&"--inspector".to_string()), "situation duty with inspector should include --inspector: {a:?}");
+    }
+
     #[test]
     fn portuguese_variants_are_distinct() {
         assert_eq!(language_code("pt-BR"), "PTB");

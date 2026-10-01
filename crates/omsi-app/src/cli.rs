@@ -198,6 +198,9 @@ pub(crate) struct Args {
     /// OMSI's tutorial 1..4 (its situation, and its pages beside the picture).
     #[arg(long)]
     pub(crate) tutorial: Option<usize>,
+    /// Load the in-game Inspector and expose it from the pause menu.
+    #[arg(long)]
+    pub(crate) inspector: bool,
     /// Player's line and tour from the timetable (needs --schedule), e.g. --line 76 --tour 1.
     #[arg(long)]
     pub(crate) line: Option<String>,
