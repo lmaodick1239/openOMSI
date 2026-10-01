@@ -359,11 +359,17 @@ timetable are not part of it.
 ## Inspector mode
 
 The visual debug inspector lets you examine vehicles and scenery objects without changing them.
-**Ctrl+I** toggles inspector mode on and off.
+
+**Enabling the Inspector:** The Inspector is disabled by default. To use it, enable "Inspector" 
+in the launcher settings before starting a session. When disabled, the Inspector is not loaded 
+at all, reducing memory usage and startup time.
+
+**Opening the Inspector:** With the Inspector enabled, open the pause menu during gameplay and 
+select "Inspector" to enter inspector mode. The global Ctrl+I keybind has been removed.
 
 **Selection:** Left-click a vehicle or scenery object to select it. A cyan marker appears above
 the selection, distinguishing it from the object editor's magenta. Left-click empty space to
-clear the selection. **Ctrl+I** again exits inspector mode.
+clear the selection. Open the pause menu and select "Inspector" again to exit inspector mode.
 
 **What you can select:**
 - **Vehicles**: Player bus, AI traffic, remote players (LAN), trailers
@@ -382,7 +388,7 @@ one deactivates the other.
 
 ### Desktop inspector windows
 
-On desktop builds, Ctrl+I opens the inspector as movable Dear ImGui windows. The layout and
+On desktop builds, the inspector opens as movable Dear ImGui windows. The layout and
 visibility of the Inspector, Hierarchy, Log, Materials, Render, Humans, Telemetry, Editor, and
 Export windows are restored between runs. The Inspector window supports selection navigation,
 hit cycling, and view overlays. The other panels are read-only snapshots and explicitly identify
@@ -391,7 +397,8 @@ The production vehicle exporter remains available through `--export-glb`.
 
 The ImGui inspector is desktop-only in this rollout. Android keeps the normal HUD and input path.
 While an inspector window has keyboard or pointer focus, game shortcuts and camera interaction are
-suppressed; Ctrl+I remains available to leave inspector mode.
+suppressed. Inspector-specific controls (selection navigation, window manipulation) remain 
+available within the Inspector windows once inspector mode is active.
 
 **Limitations:**
 - Read-only: Inspector cannot modify objects
