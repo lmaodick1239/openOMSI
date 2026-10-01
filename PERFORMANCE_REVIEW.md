@@ -141,7 +141,7 @@ Log once per second or on demand. Since GPU utilization is not full, distinguish
 
 ### Reproducible scenarios
 
-Use the existing recipe in [`docs/INSPECTOR_PERFORMANCE.md`](docs/INSPECTOR_PERFORMANCE.md) as a starting point, with inspector disabled for this review. Capture at a fixed camera/time in:
+Capture at a fixed camera/time in:
 
 1. a dense Grundorf scene with traffic and passengers;
 2. a mirror-heavy cockpit view;
