@@ -212,6 +212,11 @@ impl App {
                     && !own
                     && (fallback_action(code, &self.args.drive_keys).is_some()
                         || matches!(code, KeyCode::KeyZ | KeyCode::KeyX | KeyCode::KeyC | KeyCode::KeyI | KeyCode::KeyL));
+                // plain Left/Right are OMSI's view_interiorcam_minus/plus, except when a wheel
+                // steers: then the arrows glance (held, the head turns) and only Ctrl+Left/Right
+                // switch the interior camera, below. (Where the arrows drive, `ours` skips this.)
+                let plain_arrow = matches!(code, KeyCode::ArrowLeft | KeyCode::ArrowRight) && !ctrl
+                    && self.controllers.as_ref().is_some_and(|c| c.wheel_steering());
                 if let Some(scan) = keys::dik_code(code).filter(|_| !ours) {
                     let action = self.game_keys.iter().find(|b| b.scan_code == scan && b.matches(m)
                         && !b.action.starts_with("vr_")).map(|b| b.action.clone());
@@ -1134,6 +1139,10 @@ pub(crate) fn script_key(name: &str) -> Option<KeyCode> {
                 "click" => {
                     if self.placing.is_some() && self.game_menu.is_none() {
                         self.placing_click();
+                    } else if self.game_menu.is_some() {
+                        // (on the menu as the window's button: its lines, its arrows)
+                        self.left_button(event_loop, true);
+                        self.left_button(event_loop, false);
                     } else {
                         self.on_left(true);
                         self.on_left(false);
@@ -1271,7 +1280,38 @@ pub(crate) fn script_key(name: &str) -> Option<KeyCode> {
     pub(crate) fn open_list(&mut self, kind: crate::game_lists::ListKind) {
         self.admin_list = Some(crate::game_lists::items(self, &kind));
         self.list_kind = Some(kind);
-        self.chooser = Some(0);
+        // (on its first line, not on a heading)
+        self.chooser = Some(if self.is_heading(0) { self.chooser_next(0, 1) } else { 0 });
+    }
+
+    /// Line `k` of the list shown heads the lines under it (`game_lists::HEADING`).
+    fn is_heading(&self, k: usize) -> bool {
+        self.admin_list.as_ref().and_then(|l| l.get(k)).is_some_and(|l| l.1 == crate::game_lists::HEADING)
+    }
+
+    /// The line `step` lines on from `sel` (round the list; `n - 1` is one back), over the
+    /// headings.
+    fn chooser_next(&self, sel: usize, step: usize) -> usize {
+        let n = self.admin_list.as_ref().unwrap_or(&self.vehicle_list).len().max(1);
+        let mut k = sel;
+        for _ in 0..n {
+            k = (k + step) % n;
+            if !self.is_heading(k) {
+                break;
+            }
+        }
+        k
+    }
+
+    /// Left or Right on line `k` of a list, or a click on the arrows round its value: its
+    /// setting one step down (`-`) or up (`+`), see `game_lists::ADJUST`; other lines stay.
+    pub(crate) fn chooser_adjust(&mut self, k: usize, dir: &str) {
+        let Some(action) = self.admin_list.as_ref().and_then(|l| l.get(k)).and_then(|l| l.1.strip_suffix(crate::game_lists::ADJUST)).map(|a| format!("{a} {dir}")) else { return };
+        // (run as a pick of the line, with the step in place of the mark)
+        if let Some(l) = self.admin_list.as_mut().and_then(|l| l.get_mut(k)) {
+            l.1 = action;
+        }
+        self.chooser_pick(k);
     }
 
     /// A key while the vehicle chooser is open.
@@ -1285,10 +1325,13 @@ pub(crate) fn script_key(name: &str) -> Option<KeyCode> {
                 self.admin_list = None;
                 self.list_kind = None;
             }
-            KeyCode::ArrowUp | KeyCode::KeyW => self.chooser = Some((sel + n - 1) % n),
-            KeyCode::ArrowDown | KeyCode::KeyS => self.chooser = Some((sel + 1) % n),
-            KeyCode::PageUp => self.chooser = Some(sel.saturating_sub(15)),
-            KeyCode::PageDown => self.chooser = Some((sel + 15).min(n - 1)),
+            KeyCode::ArrowUp | KeyCode::KeyW => self.chooser = Some(self.chooser_next(sel, n - 1)),
+            KeyCode::ArrowDown | KeyCode::KeyS => self.chooser = Some(self.chooser_next(sel, 1)),
+            KeyCode::ArrowLeft | KeyCode::KeyA => self.chooser_adjust(sel, "-"),
+            KeyCode::ArrowRight | KeyCode::KeyD => self.chooser_adjust(sel, "+"),
+            // (off a heading onto the line under it)
+            KeyCode::PageUp => self.chooser = Some(sel.saturating_sub(15)).map(|k| if self.is_heading(k) { self.chooser_next(k, 1) } else { k }),
+            KeyCode::PageDown => self.chooser = Some((sel + 15).min(n - 1)).map(|k| if self.is_heading(k) { self.chooser_next(k, 1) } else { k }),
             KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space => self.chooser_pick(sel),
             _ => {}
         }
@@ -1297,6 +1340,10 @@ pub(crate) fn script_key(name: &str) -> Option<KeyCode> {
     /// Place the chosen vehicle: in front of the camera in a free or map view, else beside
     /// the vehicle driven (OMSI puts a new vehicle where the map view points).
     pub(crate) fn chooser_pick(&mut self, k: usize) {
+        // (a heading is no choice)
+        if self.is_heading(k) {
+            return;
+        }
         self.chooser = None;
         // a list of the menu's (the administration, the options …): done, and the list
         // shown again - or the next one (a line's tours), or back to the menu
@@ -1656,10 +1703,13 @@ pub(crate) fn script_key(name: &str) -> Option<KeyCode> {
         }
         let n = self.game_menu_items().len();
         let sel = self.game_menu.unwrap_or(0);
+        let modified = self.keys.iter().any(|key| {
+            matches!(*key, KeyCode::ControlLeft | KeyCode::ControlRight | KeyCode::AltLeft | KeyCode::AltRight | KeyCode::ShiftLeft | KeyCode::ShiftRight)
+        });
         self.menu_top = None;
         match code {
-            // P: the pause ends, as it began
-            KeyCode::KeyP if (self.paused || self.lan.is_some()) && !self.keys.contains(&KeyCode::ControlLeft) && !self.keys.contains(&KeyCode::AltLeft) => self.toggle_pause(),
+            // P changes only the simulation state, even while a menu is open.
+            KeyCode::KeyP if !modified => self.toggle_pause(),
             // (from the full list back to the short one first)
             KeyCode::Escape if self.menu_more => {
                 self.menu_more = false;
@@ -2241,27 +2291,15 @@ pub(crate) fn script_key(name: &str) -> Option<KeyCode> {
     }
 
     pub(crate) fn toggle_pause(&mut self) {
+        // (a LAN session goes on for the others: it cannot be paused)
         if self.lan.is_some() {
-            // (a LAN session goes on for the others: the menu, without the pause)
-            if self.game_menu.is_some() {
-                self.close_game_menu();
-            } else {
-                self.open_game_menu();
-                self.service_msg = Some(("A LAN session goes on while the menu is open".into(), 3.0));
-            }
+            self.service_msg = Some(("A LAN session cannot be paused".into(), 3.0));
             return;
         }
-        // the pause shows the pause menu (the everyday lines, "More..." for the rest); P
-        // or Resume go on
+        self.paused = !self.paused;
         if self.game_menu.is_some() {
-            self.close_game_menu();
-            self.paused = false;
-        } else if self.paused {
-            self.paused = false;
-        } else {
-            self.open_game_menu();
-            self.menu_prev_pause = false;
-            self.paused = true;
+            // Keep the state a menu close should restore in step with P.
+            self.menu_prev_pause = self.paused;
         }
     }
 

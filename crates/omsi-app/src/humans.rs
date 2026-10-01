@@ -720,9 +720,12 @@ impl Cabin {
     fn nearest_exit(&self, p: Vec3) -> usize {
         (0..self.exits.len())
             .min_by(|a, b| {
-                (self.exits[*a].inside - p)
-                    .length()
-                    .total_cmp(&(self.exits[*b].inside - p).length())
+                // Omsi.exe weights the height difference by 5 (sub_7f3a24)
+                let d = |e: usize| {
+                    let v = self.exits[e].inside - p;
+                    Vec3::new(v.x, v.y, v.z * 5.0).length()
+                };
+                d(*a).total_cmp(&d(*b))
             })
             .unwrap_or(0)
     }
@@ -1530,6 +1533,9 @@ struct StopInfo {
     seeded: bool,
     /// Seconds until the next person arrives on foot.
     next_arrival: f32,
+    /// How many wait here at 100% passengers: the mean of pass_enter_max and _min times
+    /// the stop's random factor (Omsi.exe sub_61bf94).
+    enter_mean: f32,
 }
 
 /// Inside a bus, to where.
@@ -3192,6 +3198,11 @@ impl Humans {
             log::info!("stop {id} '{name}' at ({:.1}, {:.1}) heading {heading:.0}: {} waiting places ({from_map} from the map), pavement {:?}", pos.x, pos.y, spots.len(), lane);
         }
         let next_arrival = 5.0 + (self.rand_f() * 30.0) as f32;
+        // Omsi.exe draws the stop's factor 1 + (2r - 1) * k, k = (max - min) / (2 * mean)
+        let (max, min) = world.stop_enter(id);
+        let mean = (max + min) * 0.5;
+        let k = if mean != 0.0 { (max - min) / (2.0 * mean) } else { 0.0 };
+        let f38 = 1.0 + (2.0 * self.rand_f() as f32 - 1.0) * k;
         StopInfo {
             name: name.to_string(),
             pos,
@@ -3199,7 +3210,15 @@ impl Humans {
             lane,
             seeded: false,
             next_arrival,
+            enter_mean: mean * f38,
         }
+    }
+
+    /// How many people wait at stop `id` (Omsi.exe sub_61bf94): its mean times its factor
+    /// times the passenger density, at most one per waiting place.
+    fn stop_target(&self, id: i64) -> usize {
+        let s = &self.stops[&id];
+        (s.enter_mean * self.density.max(0.0)).round().clamp(0.0, s.spots.len() as f32) as usize
     }
 
     /// Put people at the bus stops near `center`: at the start everywhere, later only at
@@ -3275,8 +3294,7 @@ impl Humans {
             }
             self.stops.get_mut(&id).unwrap().seeded = true;
             let n_spots = self.stops[&id].spots.len();
-            let mut want = ((1 + (self.rand() % 5) as usize) as f32 * self.density.clamp(0.0, 3.0))
-                .round() as usize;
+            let mut want = self.stop_target(id);
             // OMSI_PAX_WAITING=n: exactly n people at every stop, all taking the next bus (a crowd test)
             let forced = omsi_cfg::env::var("OMSI_PAX_WAITING")
                 .ok()
@@ -3504,7 +3522,7 @@ impl Humans {
             st.next_arrival = (25.0 + 50.0 * (1.0 / dens)) * 0.5;
             let st_rand = self.rand_f() as f32;
             self.stops.get_mut(&id).unwrap().next_arrival *= 0.6 + st_rand;
-            if free_spots <= 1 || waiting >= 7 {
+            if free_spots <= 1 || waiting >= self.stop_target(id) {
                 continue;
             }
             // somewhere 40-90 m away along the pavement, out of sight
@@ -3583,31 +3601,36 @@ impl Humans {
     }
 
     /// `PAX_Entry<i>_Open` / `PAX_Exit<i>_Open` as the bus script reports them. A bus whose
-    /// script never sets them (they are not in every mod) falls back to its `door_<i>`.
+    /// script never sets them (they are not in every mod, or only the front door uses them)
+    /// falls back to its `door_<i>`.
     fn doors_open(v: &VehicleInstance, n_entry: usize, n_exit: usize) -> (Vec<bool>, Vec<bool>) {
-        let mut entry: Vec<bool> = (0..n_entry)
-            .map(|i| v.var(&format!("PAX_Entry{i}_Open")).unwrap_or(0.0) > 0.5)
+        let doors: Vec<bool> = (0..8)
+            .map(|i| v.var(&format!("door_{i}")).unwrap_or(0.0) > 0.9)
             .collect();
-        let mut exit: Vec<bool> = (0..n_exit)
-            .map(|i| v.var(&format!("PAX_Exit{i}_Open")).unwrap_or(0.0) > 0.5)
+        let entry: Vec<bool> = (0..n_entry)
+            .map(|i| {
+                let name = format!("PAX_Entry{i}_Open");
+                if v.has_script_var(&name) {
+                    v.var(&name).unwrap_or(0.0) > 0.5
+                } else {
+                    doors[i.min(7)]
+                }
+            })
             .collect();
-        if v.var("PAX_Entry0_Open").is_none() && v.var("PAX_Exit0_Open").is_none() {
-            let doors: Vec<bool> = (0..8)
-                .map(|i| v.var(&format!("door_{i}")).unwrap_or(0.0) > 0.9)
-                .collect();
-            if doors.iter().any(|o| *o) {
-                for (i, e) in entry.iter_mut().enumerate() {
-                    *e = doors[i.min(7)];
+        let exit: Vec<bool> = (0..n_exit)
+            .map(|i| {
+                let name = format!("PAX_Exit{i}_Open");
+                if v.has_script_var(&name) {
+                    v.var(&name).unwrap_or(0.0) > 0.5
+                } else {
+                    // the exits follow the entries in the door_<i> numbering (door_0/1 the
+                    // front leaves, door_2.. the others): a bus with three or more doors and
+                    // no PAX_Exit vars of its own must still report its middle and rear doors
+                    // separately, not the front leaf's state for every one of them
+                    doors[(n_entry + i).min(7)]
                 }
-                // the exits follow the entries in the door_<i> numbering (door_0/1 the
-                // front leaves, door_2.. the others): a bus with three or more doors and
-                // no PAX_Exit vars of its own must still report its middle and rear doors
-                // separately, not the front leaf's state for every one of them
-                for (i, e) in exit.iter_mut().enumerate() {
-                    *e = doors[(n_entry + i).min(7)];
-                }
-            }
-        }
+            })
+            .collect();
         (entry, exit)
     }
 
@@ -3778,7 +3801,7 @@ impl Humans {
                     vec![false; cabin.exits.len()],
                 );
                 if open {
-                    if c.vehicle.var("PAX_Entry0_Open").is_some() {
+                    if c.vehicle.has_script_var("PAX_Entry0_Open") || c.vehicle.has_script_var("door_0") {
                         let (e, x) =
                             Self::doors_open(&c.vehicle, cabin.entries.len(), cabin.exits.len());
                         entry_open = e;
@@ -5853,18 +5876,26 @@ impl Humans {
                     self.people[i].why = "the door is shut";
                     return w;
                 }
-                if d > 0.6 {
+                // `spot_pos` for slot 0 is `door.outside`, which lies on the bus body.
+                // The crowd sim keeps people ~0.5–0.8 m away from it, so `d` (distance to
+                // `door.outside`) is never below ~0.5 m. Use the direct distance to
+                // `door.outside` with a threshold that accounts for body radius + the
+                // physical standoff (≈ 1.0 m), so a person who has reached the front of
+                // the queue boards without the stuck fallback. Beyond that the stuck
+                // fallback still handles genuine obstruction (a shelter wall, a bollard).
+                let door_dist = (base - pos2).length();
+                if door_dist > 1.0 {
                     // held off the door by something of the map in the way (a railing, a
                     // pole, a shelter's wall: people are kept out of its collision boxes)
                     // - as close as they get is close enough. They stood a metre from the
                     // open door until the bus left without them.
-                    let held = d < 2.0 && self.people[i].stuck > 1.0;
+                    let held = door_dist < 2.0 && self.people[i].stuck > 1.0;
                     if !held {
                         self.people[i].why = "";
                         return w;
                     }
                     if debug_pax() {
-                        log::info!("t={:.1} pax {} cannot get closer to entry {entry} than {d:.1} m: boards from there", self.time, self.people[i].label());
+                        log::info!("t={:.1} pax {} cannot get closer to entry {entry} than {door_dist:.1} m: boards from there", self.time, self.people[i].label());
                     }
                 }
                 if self.door_busy.contains_key(&(bus, false, entry)) {
@@ -6380,27 +6411,8 @@ impl Humans {
                     return w;
                 }
                 if !bn.exit_open.get(exit).copied().unwrap_or(false) {
-                    // another exit is open: go there
-                    if let Some(other) = (0..bn.cabin.exits.len()).find(|&x| bn.exit_open[x]) {
-                        let o = &bn.cabin.exits[other];
-                        let mut route = bn.cabin.route(door.wait, o.wait);
-                        route.retain(|p| (p.truncate() - door.wait.truncate()).length() > 0.05);
-                        if route.is_empty() {
-                            route.push(o.wait);
-                        }
-                        let start = self.people[i].local().unwrap_or(door.wait);
-                        self.set_state(
-                            i,
-                            State::Aboard {
-                                bus,
-                                route,
-                                idx: 0,
-                                seg: start,
-                                goal: Goal::ExitWait(other),
-                            },
-                        );
-                        return w;
-                    }
+                    // Omsi.exe keeps the exit picked at the stop request and waits for
+                    // that door (it does not switch to whichever door opens first)
                     self.people[i].why = "the exit door is shut";
                     let t = self.people[i].t_state;
                     if bus == BusId::Player
@@ -9372,6 +9384,49 @@ mod tests {
         assert!((p.y - 7.0).abs() < 1e-6);
         assert!((h - 180.0).abs() < 1e-6);
         assert!((back.project(&net, DVec3::new(0.3, 5.0, 0.0), 2.5) - 3.0).abs() < 0.11);
+    }
+
+    #[test]
+    fn doors_open_falls_back_when_exit_vars_are_undeclared() {
+        let dir = std::env::temp_dir().join(format!("omsi-doors-open-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("test.bus"),
+            "[model]\nmodel.cfg\n[varnamelist]\n1\nvars.txt\n[script]\n1\nmain.osc\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("model.cfg"), "").unwrap();
+        // Front door leaf 0 uses PAX_Entry0_Open. Rear door (door_2) has no PAX_Exit0_Open in varlist.
+        std::fs::write(dir.join("vars.txt"), "door_0\ndoor_1\ndoor_2\nPAX_Entry0_Open\n").unwrap();
+        std::fs::write(dir.join("main.osc"), "{init}\n{end}\n").unwrap();
+
+        let ty = std::sync::Arc::new(omsi_sim::VehicleType::load(&dir, &dir.join("test.bus")).unwrap());
+        let mut v = VehicleInstance::new(ty, omsi_sim::VehicleHost::new(Default::default()));
+
+        // Initially both entries and exit closed
+        let (e, x) = Humans::doors_open(&v, 2, 1);
+        assert_eq!(e, vec![false, false]);
+        assert_eq!(x, vec![false]);
+
+        // Front door leaf 0 opens via PAX_Entry0_Open
+        v.set_var("PAX_Entry0_Open", 1.0);
+        let (e, x) = Humans::doors_open(&v, 2, 1);
+        assert_eq!(e, vec![true, false]);
+        assert_eq!(x, vec![false]);
+
+        // Rear door leaf 2 opens (falls back to door_2 since PAX_Exit0_Open is not in varlist)
+        v.set_var("door_2", 1.0);
+        let (e, x) = Humans::doors_open(&v, 2, 1);
+        assert_eq!(e, vec![true, false]);
+        assert_eq!(x, vec![true]);
+
+        // Front door leaf 1 opens via door_1 fallback
+        v.set_var("door_1", 1.0);
+        let (e, x) = Humans::doors_open(&v, 2, 1);
+        assert_eq!(e, vec![true, true]);
+        assert_eq!(x, vec![true]);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
 

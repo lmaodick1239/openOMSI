@@ -488,24 +488,54 @@ fn scenery_render_phase(kind: omsi_scenery::sco::RenderType) -> RenderPhase {
 /// Whether a `[surface]` map placement uses a terrain-relative map Y value. OMSI defaults
 /// these objects to their authored height and promotes them only when nearby spline height
 /// evidence clearly supports `map_y + terrain_height`.
+///
+/// The evidence is looked for under the middle of the object's meshes, not at its origin:
+/// a model whose vertices sit far from its own origin (Probacher Land's B466 road bridge,
+/// `PRIPYAT\Nuclear Power Plant\mesh05A.sco`, lies 41-58 m beside it) has no spline near
+/// the origin, kept its authored height and stood 6 m above the road it carries.
 fn surface_object_terrain_relative(
     src: &HashMap<(i32, i32), Arc<StagedTile>>,
+    ot: &ObjectType,
     world_x: f64,
     world_y: f64,
+    rot: [f64; 3],
     map_y: f64,
     terrain_height: f64,
 ) -> bool {
-    let tile_x = (world_x / tile_size()).floor() as i32;
-    let tile_y = (world_y / tile_size()).floor() as i32;
+    let (probe_x, probe_y) = surface_probe_point(ot, world_x, world_y, rot);
+    let tile_x = (probe_x / tile_size()).floor() as i32;
+    let tile_y = (probe_y / tile_size()).floor() as i32;
     infer_surface_object_terrain_relative(
-        world_x,
-        world_y,
+        probe_x,
+        probe_y,
         map_y,
         terrain_height,
         src.values()
             .filter(|tile| (tile.tx - tile_x).abs() <= 1 && (tile.ty - tile_y).abs() <= 1)
             .flat_map(|tile| tile.splines.iter()),
     )
+}
+
+/// The middle of an object's LOD 0 footprint, turned with the object, in world x/y (the
+/// origin itself for an object without vertices).
+fn surface_probe_point(ot: &ObjectType, world_x: f64, world_y: f64, rot: [f64; 3]) -> (f64, f64) {
+    let Some(middle) = footprint_middle(ot.meshes.iter().map(|(mesh, _, _)| mesh)) else {
+        return (world_x, world_y);
+    };
+    let turned = object_rotation(rot).transform_vector3(middle.extend(0.0));
+    (world_x + turned.x as f64, world_y + turned.y as f64)
+}
+
+/// The middle of the box the meshes' vertices span across x and y (`None` without vertices).
+fn footprint_middle<'a>(meshes: impl IntoIterator<Item = &'a MeshData>) -> Option<glam::Vec2> {
+    let (mut lo, mut hi) = (glam::Vec2::splat(f32::MAX), glam::Vec2::splat(f32::MIN));
+    for mesh in meshes {
+        for p in &mesh.positions {
+            lo = lo.min(p.truncate());
+            hi = hi.max(p.truncate());
+        }
+    }
+    (lo.x <= hi.x).then(|| (lo + hi) * 0.5)
 }
 
 fn infer_surface_object_terrain_relative<'a>(
@@ -772,10 +802,10 @@ struct Placing {
     objects: usize,
     /// Seconds per phase (OMSI_PROFILE).
     secs: [f64; 4],
-    /// The tile's ground materials for `[terrainmapping]` slots: the base layer (without
-    /// the roads' cut, which would punch holes into a traffic island) and every painted
-    /// layer (`true`), as the ground itself is drawn.
-    ground_mats: Vec<(MaterialId, bool)>,
+    /// `[terrainmapping]` uses the first [groundtex], without the roads' cut (which
+    /// would punch holes into a traffic island). Painted terrain layers belong to the
+    /// ground itself and must not be projected onto a spline verge or object.
+    terrain_mapping_mat: Option<MaterialId>,
 }
 
 impl PendingUpload {
@@ -1620,11 +1650,11 @@ fn bilinear_alpha(img: &Image, u: f32, v: f32) -> f32 {
 /// Split the material slots of an object mesh whose texture carries `[terrainmapping]`
 /// off into a mesh of their own. OMSI does not draw such a slot with its texture (the
 /// stock ones are a 1x1 placeholder, TH_Wald's Gras01.dds a single green pixel): the slot
-/// takes on the ground of the tile it stands on, so that the grass on top of a rock, a
+/// takes on the map's first ground texture, so that the grass on top of a rock, a
 /// traffic island or a roundabout runs on seamlessly from the meadow around it. The split
 /// mesh therefore gets the terrain's own uv (tile space, see `build_terrain_mesh`) for
 /// the object placed at `pos`/`xf` on the tile at `origin`, and is drawn with the tile's
-/// ground materials. Returns the mesh without those slots and the split-off one.
+/// uncut base material. Returns the mesh without those slots and the split-off one.
 #[cfg(test)]
 fn split_terrain_mapped(
     src: &MeshData,
@@ -2842,7 +2872,16 @@ impl World {
             let animated = mesh_def_index.iter().any(|d| {
                 !model.meshes[*d].animations.is_empty() || model.meshes[*d].visible.is_some()
             });
-            let program = if !sco.scripts.scripts.is_empty() || animated || sco.sound.is_some() {
+            let has_freetex = mesh_def_index.iter().any(|d| {
+                model.meshes[*d].materials.iter().any(|o| !o.item && o.freetex.is_some())
+            });
+            let program = if !sco.scripts.scripts.is_empty()
+                || !sco.scripts.stringvarlists.is_empty()
+                || !sco.scripts.varlists.is_empty()
+                || has_freetex
+                || animated
+                || sco.sound.is_some()
+            {
                 Some(Arc::new(omsi_sim::scenery::compile_scenery(
                     &self.root,
                     &sco.scripts,
@@ -3248,6 +3287,12 @@ impl World {
     /// stop without strings: the defaults' mean, 0.5).
     pub fn stop_exit_weight(&self, id: i64) -> f32 {
         self.index().stop_weights.get(&id).copied().unwrap_or(0.5)
+    }
+
+    /// Stop object `id`'s (pass_enter_max, pass_enter_min) (see `tiles::stop_enter`; a
+    /// stop without strings: the defaults, 1 and 0).
+    pub fn stop_enter(&self, id: i64) -> (f32, f32) {
+        self.index().stop_enter.get(&id).copied().unwrap_or((1.0, 0.0))
     }
 
     pub fn index(&self) -> Arc<MapIndex> {
@@ -3925,7 +3970,7 @@ impl World {
                 let base_height = Self::base_ground(src, *x, *y)
                     .unwrap_or_else(|| st.base_terrain.sample(lx, ly) as f64);
                 let terrain_relative = !o.ot.sco.surface
-                    || surface_object_terrain_relative(src, *x, *y, *z, base_height);
+                    || surface_object_terrain_relative(src, &o.ot, *x, *y, *rot, *z, base_height);
                 Some(Pose {
                     pos: DVec3::new(
                         *x,
@@ -3999,7 +4044,7 @@ impl World {
                     let base_height =
                         Self::base_ground(src, *x, *y).unwrap_or_else(|| ground_at(*x, *y));
                     let terrain_relative = !o.ot.sco.surface
-                        || surface_object_terrain_relative(src, *x, *y, *z, base_height);
+                        || surface_object_terrain_relative(src, &o.ot, *x, *y, *rot, *z, base_height);
                     Some(Pose {
                         pos: DVec3::new(
                             *x,
@@ -6138,8 +6183,7 @@ impl World {
                                 m
                             }
                         };
-                        pl.ground_mats.clear();
-                        pl.ground_mats.push((uncut, false));
+                        pl.terrain_mapping_mat = Some(uncut);
                         // The painted ground: every further [groundtex] the editor's brush put on this
                         // tile is the same tile mesh once more, blended in through its own mask - which
                         // is how OMSI's car parks get their asphalt, its side streets their cobbles and
@@ -6178,7 +6222,6 @@ impl World {
                             );
                             let m = gpu.material(renderer, scene, m);
                             tg.materials.push(m);
-                            pl.ground_mats.push((m, true));
                             let li = instance!(renderer.add_surface_instance(
                                 scene,
                                 id,
@@ -6237,7 +6280,7 @@ impl World {
                         let id = gpu.add_mesh(renderer, scene, mesh);
                         scene.meshes[id].source = Some("terrain-mapped spline cells".to_string());
                         tg.meshes.push(id);
-                        for &(mat, _) in &pl.ground_mats {
+                        if let Some(mat) = pl.terrain_mapping_mat {
                             let si = instance!(renderer.add_surface_instance(scene, id, p.origin, Mat4::from_translation(glam::Vec3::Z * OMSI_SURFACE_LIFT), vec![mat]));
                             if let Some(inst) = scene.instances.get_mut(si) {
                                 inst.render_phase = RenderPhase::Spline;
@@ -6331,9 +6374,9 @@ impl World {
                             / mesh.normals.len().max(1) as f32;
                         log::info!("upload spline {} origin={:?} ranges={:?} mats={:?} mean normal z={mean_nz:+.2} verts={} first positions {:?}", st.def.path.display(), p.origin, &mesh.ranges[..mesh.ranges.len().min(3)], mats, mesh.positions.len(), &mesh.positions[..mesh.positions.len().min(3)]);
                     }
-                    // [terrainmapping] slots take the ground of the tile: the spline's mesh
-                    // is in tile space already, so the ground's uv is its own position
-                    let terrain: Vec<usize> = if pl.ground_mats.is_empty() {
+                    // [terrainmapping] slots take only the first ground texture. The
+                    // spline mesh is already in tile space, which supplies the ground UVs.
+                    let terrain: Vec<usize> = if pl.terrain_mapping_mat.is_none() {
                         Vec::new()
                     } else {
                         sg.terrain.iter().copied().filter(|t| mesh.ranges.iter().any(|r| r.2 as usize == *t)).collect()
@@ -6345,7 +6388,7 @@ impl World {
                         let gid = gpu.add_mesh(renderer, scene, &ground);
                         scene.meshes[gid].source = Some(st.def.path.display().to_string());
                         tg.meshes.push(gid);
-                        for &(mat, _) in &pl.ground_mats {
+                        if let Some(mat) = pl.terrain_mapping_mat {
                             let terrain_instance = instance!(renderer.add_surface_instance(
                                 scene,
                                 gid,
@@ -6490,11 +6533,16 @@ impl World {
                         || ot.meshes.iter().any(|(_, _, overrides)| {
                             overrides.iter().any(|o| !o.item && o.freetex.is_some())
                         });
-                    // (a model with `[htmltexture]` pages needs a script instance to feed them,
+                    // (a model with `[htmltexture]` pages or `[matl_freetex]` needs a script instance to feed them,
                     // also when the object has no script of its own)
                     let has_pages = lamp.is_none() && !ot.model.html_textures.is_empty();
+                    let has_freetex = ot.meshes.iter().any(|(_, _, overrides)| {
+                        overrides.iter().any(|o| !o.item && o.freetex.is_some())
+                    });
                     let mut object_script = if needs_own_script {
-                        let program = ot.program.clone().or_else(|| has_pages.then(|| Arc::new(omsi_script::Program::default())));
+                        let program = ot.program.clone().or_else(|| {
+                            (has_pages || (has_freetex && !strings.is_empty())).then(|| Arc::new(omsi_script::Program::default()))
+                        });
                         program.map(|program| {
                             let mut inst = omsi_sim::scenery::SceneryInstance::new(
                                 program,
@@ -6541,10 +6589,10 @@ impl World {
                     });
                     let mut mesh_list: Vec<(MeshId, Vec<MaterialId>)> =
                         own_meshes.unwrap_or_else(|| type_meshes.clone());
-                    // [terrainmapping] slots: drawn with the ground of this tile, from a mesh
+                    // [terrainmapping] slots: drawn with the uncut base ground, from a mesh
                     // of this placement's own (see split_terrain_mapped); (level, mesh, id)
                     let mut ground_meshes: Vec<(usize, usize, MeshId)> = Vec::new();
-                    if !pl.ground_mats.is_empty() {
+                    if pl.terrain_mapping_mat.is_some() {
                         let mut parts: Vec<(usize, usize)> =
                             terrain_slots.iter().map(|t| (t.0, t.1)).collect();
                         parts.dedup();
@@ -6628,15 +6676,16 @@ impl World {
                             for override_ in overrides.iter().filter(|o| !o.item && o.freetex.is_some()) {
                                 let Some(slot) = omsi_sim::vehicle::override_slot(o3d_mats, override_) else { continue };
                                 let Some((_, var)) = &override_.freetex else { continue };
-                                let Some(started) = object_script.as_ref() else { continue };
-                                let initial = started.str_var(var).trim();
-                                let name = if initial.is_empty() {
-                                    freetex_probe.as_ref().map(|p| p.str_var(var).trim()).unwrap_or("")
-                                } else { initial }.to_string();
-                                if name.is_empty() {
+                                let Some(name) = resolve_scenery_freetex_name(
+                                    var,
+                                    override_,
+                                    overrides,
+                                    object_script.as_ref(),
+                                    freetex_probe.as_ref(),
+                                    &strings,
+                                ) else {
                                     continue;
-                                }
-                                let name = name.as_str();
+                                };
                                 let dirs = texture_dirs(&self.root, &ot.model_dir);
                                 let Some((tex, path)) = gpu.texture(renderer, scene, name, &dirs, images) else { continue };
                                 let Some(base) = mats.get(slot).and_then(|id| scene.materials.get(*id)) else {
@@ -6798,12 +6847,14 @@ impl World {
                                         },
                                         false,
                                     );
+                                    // (lit like the rest of the object: Omsi.exe only swaps
+                                    // the slot's texture, a sign does not shine at night)
                                     let mat = renderer.add_material(
                                         scene,
                                         Some(tex),
                                         alpha,
                                         [1.0; 4],
-                                        true,
+                                        false,
                                     );
                                     let mat = gpu.material(renderer, scene, mat);
                                     gpu.text_textures.insert(key.clone(), (tex, mat, 1));
@@ -6860,18 +6911,16 @@ impl World {
                         } else {
                             continue;
                         };
-                        // the ground as the tile draws it: the base layer, then every painted
-                        // layer blended over it; on a surface object (a crossing) all of them
-                        // pulled towards the eye like the object itself
-                        for &(mat, layer) in &pl.ground_mats {
-                            let inst = if surface || layer {
+                        // Keep the first ground texture on the object even where the map
+                        // author painted asphalt or another layer on the terrain below it.
+                        if let Some(mat) = pl.terrain_mapping_mat {
+                            let inst = if surface {
                                 instance!(renderer.add_surface_instance(scene, ground_id, draw_pos, xf, vec![mat]))
                             } else {
                                 instance!(renderer.add_instance(scene, ground_id, draw_pos, xf, vec![mat]))
                             };
                             if let Some(x) = scene.instances.get_mut(inst) {
                                 x.decal = surface;
-                                x.ground_layer = layer && !surface;
                                 x.render_phase = render_phase;
                                 if surface {
                                     x.surface_bias = false;
@@ -7418,6 +7467,11 @@ impl World {
         let xf = Mat4::from_rotation_z((-heading).to_radians() as f32);
         for (mi, (mesh_id, mats)) in meshes.iter().enumerate() {
             let new = renderer.add_instance(scene, *mesh_id, pos, xf, mats.clone());
+            renderer.set_omsi_caster(scene, new, ot.mesh_casts.get(mi).copied().unwrap_or(false));
+            // a route arrow casts no shadow (only [shadow] meshes do in Omsi.exe)
+            if ot.sco.is_help_arrow {
+                renderer.set_casts_shadow(scene, new, false);
+            }
             let inst = gpu.instance(renderer, scene, new);
             tg.instances.push(inst);
             let Some((_, o3d_mats, overrides)) = ot.meshes.get(mi) else { continue };
@@ -7445,7 +7499,7 @@ impl World {
                     None => vec![0u8; (w * h * 4) as usize],
                 };
                 let tex = gpu.add_image(renderer, scene, &Image { width: w, height: h, rgba, has_alpha: true }, false);
-                let mat = renderer.add_material(scene, Some(tex), alpha, [1.0; 4], true);
+                let mat = renderer.add_material(scene, Some(tex), alpha, [1.0; 4], false);
                 let mat = gpu.material(renderer, scene, mat);
                 gpu.text_textures.insert(key.clone(), (tex, mat, 1));
                 tg.texts.push(key);
@@ -11445,6 +11499,12 @@ impl World {
                     let textured = tex.is_some() || text_slot.is_some() || script_slot.is_some() || freetex || vt.texchange(&m.texture).is_some();
                     let (color, emissive, specular) = d3d_material(m, ov.iter().find_map(|o| o.allcolor), textured);
                     let mut extra = material_extra(&ov, env_mask, bump, specular);
+                    // A vehicle's [matl_nightmap] is added whenever the mesh is drawn, by day
+                    // as well, as OMSI 2 does - with or without a [matl_change] around it.
+                    // Its lamps and displays are switched by the mesh's [visible] variable or
+                    // by what the script draws, not by the time of day: faded in with the
+                    // night, a dashboard's warning lamps stayed dark in the daylight (#497).
+                    extra.night_switched = night.is_some();
                     // a script's screen (matrix displays, the IBIS's picture, LCDs) is the
                     // glow's and FXAA's business (see `MaterialExtra::screen`), and a `\S:n`
                     // mask makes it an LED panel whose lit dots are its own light
@@ -11539,7 +11599,9 @@ impl World {
                         let it_alpha = if repair_body_depth { AlphaMode::Opaque } else { ov_item.iter().find(|o| o.alpha_set).map(|o| alpha_mode(o.alpha)).unwrap_or(alpha) };
                         let (it_color, it_emissive, it_specular) = d3d_material(m, ov_item.iter().find_map(|o| o.allcolor).or(ov.iter().find_map(|o| o.allcolor)), textured);
                         let mut it_extra = material_extra(&ov_item, env_mask, bump, it_specular);
-                        it_extra.night_switched = ov_item.iter().any(|o| o.nightmap.is_some());
+                        // (an item without a night map of its own keeps the plain one, lit
+                        // the same way)
+                        it_extra.night_switched = it_night.is_some();
                         it_extra.screen = script_item.is_some() || it_script_trans.is_some();
                         // (the item's `\S:n`, or the one it inherits from its base, keeps it
                         // an LED panel: see `MaterialExtra::led`)
@@ -11923,6 +11985,41 @@ fn object_lanes(
     out
 }
 
+/// Resolve the texture name for a scenery object's `[matl_freetex]` slot.
+/// Tries the object's script variable first, then freetex probe, and falls back to
+/// tile placement strings (by explicit numeric index or by freetex declaration order).
+pub(crate) fn resolve_scenery_freetex_name<'a>(
+    var: &str,
+    override_: &MaterialDef,
+    overrides: &[MaterialDef],
+    object_script: Option<&'a omsi_sim::scenery::SceneryInstance>,
+    freetex_probe: Option<&'a omsi_sim::scenery::SceneryInstance>,
+    strings: &'a [String],
+) -> Option<&'a str> {
+    let script_name = object_script.map(|s| s.str_var(var).trim()).unwrap_or("");
+    let probe_name = freetex_probe.map(|p| p.str_var(var).trim()).unwrap_or("");
+    let string_by_idx = var.parse::<usize>().ok().and_then(|idx| strings.get(idx)).map(|s| s.trim()).unwrap_or("");
+    let freetex_idx = overrides.iter().filter(|o| !o.item && o.freetex.is_some()).position(|o| std::ptr::eq(o, override_)).unwrap_or(0);
+    let string_by_order = strings.get(freetex_idx).map(|s| s.trim()).unwrap_or("");
+    let name = if !script_name.is_empty() {
+        script_name
+    } else if !probe_name.is_empty() {
+        probe_name
+    } else if !string_by_idx.is_empty() {
+        string_by_idx
+    } else if !string_by_order.is_empty() {
+        string_by_order
+    } else {
+        return None;
+    };
+    let name = name.trim_matches('"');
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -12228,6 +12325,22 @@ mod tests {
         assert!(!infer_surface_object_terrain_relative(20.0, 40.0, 0.0, 10.0, [&spline]));
     }
 
+    /// A model built beside its own origin is judged where its vertices are: the middle of
+    /// a deck 41-58 m to one side, and nothing for an object without vertices.
+    #[test]
+    fn surface_evidence_is_looked_for_under_the_mesh() {
+        let v = glam::Vec3::new;
+        let deck = MeshData {
+            positions: vec![v(-50.0, 41.0, 0.0), v(50.0, 41.0, 0.0), v(50.0, 58.0, 1.5), v(-50.0, 58.0, 1.5)],
+            ..MeshData::default()
+        };
+        assert_eq!(footprint_middle([&deck]), Some(glam::Vec2::new(0.0, 49.5)));
+        assert_eq!(footprint_middle([&MeshData::default()]), None);
+        // turned a quarter clockwise, the deck's middle lies east of the origin
+        let east = object_rotation([90.0, 0.0, 0.0]).transform_vector3(v(0.0, 49.5, 0.0));
+        assert!((east.x - 49.5).abs() < 1e-3 && east.y.abs() < 1e-3);
+    }
+
     /// A film modelled as a copy of the floor's faces with a slot of its own is an overlay;
     /// a panel beside the floor, sharing one edge with it, is not.
     #[test]
@@ -12369,6 +12482,10 @@ mod tests {
     }
 
 }
+
+#[cfg(test)]
+#[path = "scene/terrain_mapping_tests.rs"]
+mod terrain_mapping_tests;
 
 #[cfg(test)]
 mod material_tests {
@@ -12587,6 +12704,47 @@ mod material_tests {
         assert_eq!(tex_addressing([&clamped, &mirror, &plain].into_iter()), R::Mirror);
         assert_eq!(tex_addressing([&mirror, &once].into_iter()), R::MirrorOnce);
         assert_eq!(tex_addressing([&once, &roller].into_iter()), R::Clamp);
+    }
+
+    #[test]
+    fn scenery_freetex_name_resolution() {
+        let ov1 = MaterialDef {
+            freetex: Some(("placeholder.bmp".into(), "Textur".into())),
+            ..Default::default()
+        };
+        let ov2 = MaterialDef {
+            freetex: Some(("placeholder2.bmp".into(), "Textur2".into())),
+            ..Default::default()
+        };
+        let overrides = vec![ov1.clone(), ov2.clone()];
+
+        // 1. Script variable takes precedence when available
+        let mut prog = omsi_script::Program::default();
+        prog.declare_str_var("Textur");
+        let script = omsi_sim::scenery::SceneryInstance::new(
+            Arc::new(prog),
+            &[],
+            omsi_sim::SimClock::default(),
+            &["from_script.bmp".into()],
+        );
+        let from_strings = vec!["from_strings.bmp".to_string()];
+        let name = resolve_scenery_freetex_name("Textur", &ov1, &overrides, Some(&script), None, &from_strings);
+        assert_eq!(name, Some("from_script.bmp"));
+
+        // 2. Fallback to strings by explicit numeric index (e.g. var = "1")
+        let strings = vec!["zero.bmp".to_string(), "\"quoted_one.bmp\"".to_string()];
+        let name = resolve_scenery_freetex_name("1", &ov1, &overrides, None, None, &strings);
+        assert_eq!(name, Some("quoted_one.bmp"));
+
+        // 3. Fallback to strings by freetex declaration order
+        let name_first = resolve_scenery_freetex_name("Textur", &overrides[0], &overrides, None, None, &strings);
+        assert_eq!(name_first, Some("zero.bmp"));
+        let name_second = resolve_scenery_freetex_name("Textur2", &overrides[1], &overrides, None, None, &strings);
+        assert_eq!(name_second, Some("quoted_one.bmp"));
+
+        // 4. Returns None when no matching string exists
+        let name_empty = resolve_scenery_freetex_name("Missing", &ov1, &overrides, None, None, &[]);
+        assert_eq!(name_empty, None);
     }
 }
 

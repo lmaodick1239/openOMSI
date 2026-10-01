@@ -92,8 +92,8 @@ struct EnhancedUniform {
     /// xyz where the sky cube was drawn from, relative to the camera (the dome looks the
     /// clouds up through it with the parallax taken out)
     eye: [f32; 4],
-    /// x how bright an LED panel's dots burn (`Lighting::led_glow`), y whether the LED
-    /// panels' masks keep their mip chain (`Lighting::led_mips`)
+    /// x how bright an LED panel's dots burn (`Lighting::led_glow`), y how much of the
+    /// mip chain an LED panel is held at (`Lighting::led_mips`)
     led: [f32; 4],
 }
 
@@ -544,21 +544,26 @@ pub struct Lighting {
     /// give 0 = off .. 3.75): the enhanced picture draws them this much above their own
     /// colour, bright enough for the glow to bloom a halo around the panel.
     pub led_glow: f32,
-    /// The LED panels' `\S:n` masks keep the mip chain `STFilter` asks for. Off, they are
-    /// sampled at full resolution: the dots stay visible when the panel is small on the
-    /// screen, at the cost of the shimmer the mip chain exists to prevent.
-    pub led_mips: bool,
+    /// How much of the mip chain an LED panel is held at - the `\S:n` mask's (`STFilter`)
+    /// and the panel's own grid picture's: both are sampled at the level their screen
+    /// footprint asks for, never coarser than this. 0 point-samples them (the sharpest
+    /// dots, and the worst shimmer - a regular grid is the worst case for a point sample);
+    /// 1.3 (the default) keeps a matrix's dots a couple of pixels across where the full
+    /// chain has run them together, and what shimmer is left is a fraction of a
+    /// full-resolution sample's; 4 is near the calm of the full chain.
+    pub led_mips: f32,
     /// The player's vehicle's velocity (m/s, world): at speed the airstream drives the drops
     /// on its glass up the windscreen and back along the side windows.
     pub glass_wind: Vec3,
 }
 
 impl Lighting {
-    /// Whether the sun shadow map is drawn with this light (not with the sun this low or
-    /// dim, nor with OMSI_NO_SHADOWS).
+    /// Whether the sun shadow map is drawn with this light (not once the sun is about a
+    /// degree below the horizon - Omsi.exe's cutoff, sun z -0.02 in sub_754c80 - nor with
+    /// the sun dim, nor with OMSI_NO_SHADOWS).
     pub fn casts_sun_shadows(&self) -> bool {
         self.shadows
-            && self.sun_dir.normalize_or_zero().z > 0.08
+            && self.sun_dir.normalize_or_zero().z > -0.02
             && self.sun_intensity > 0.05
             && omsi_cfg::env::var_os("OMSI_NO_SHADOWS").is_none()
     }
@@ -594,7 +599,7 @@ impl Default for Lighting {
             fog_base: None,
             envir_tint: [Vec3::ONE; 3],
             led_glow: 1.5,
-            led_mips: true,
+            led_mips: 1.3,
             glass_wind: Vec3::ZERO,
         }
     }
@@ -750,8 +755,9 @@ pub struct MaterialExtra {
     /// A named transparent window layer. This is separate from envmap/transmap because
     /// stock and add-on buses often use a plain alpha-blended window texture.
     pub glass: bool,
-    /// The night map belongs to a `[matl_item]`: its variable switches it, and it glows by
-    /// day as well (warning lamps, dashboard displays), not only at night.
+    /// The night map is switched by something other than the time of day - a `[matl_item]`'s
+    /// variable, a vehicle mesh's `[visible]`: it glows by day as well (warning lamps,
+    /// dashboard displays), not only at night.
     pub night_switched: bool,
     /// A display's text (`[useTextTexture]`): in the enhanced picture it glows a little
     /// by itself, as a lit matrix does, instead of taking only the light that reaches it
@@ -2176,6 +2182,13 @@ impl Renderer {
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
+                    count: None,
+                },
+                // Tile masks/light maps clamp independently of repeating ground textures.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 11,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
             ],
@@ -5103,6 +5116,10 @@ impl Renderer {
                     binding: 10,
                     resource: wgpu::BindingResource::TextureView(&orm_view),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: wgpu::BindingResource::Sampler(&self.clamp_sampler),
+                },
             ],
         })
     }
@@ -6160,7 +6177,7 @@ impl Renderer {
             // x how bright an LED panel's dots burn (see `MaterialExtra::led`; the settings'
             // 16 levels give 0 = off .. 3.75), y whether the LED panels' `\S:n` masks keep
             // their mip chain (0: at full resolution, the dots stay visible when small)
-            led: [lighting.led_glow, if lighting.led_mips { 1.0 } else { 0.0 }, 0.0, 0.0],
+            led: [lighting.led_glow, lighting.led_mips, 0.0, 0.0],
         };
         self.queue
             .write_buffer(&self.enh_buf, 0, bytemuck::bytes_of(&u));
@@ -7262,6 +7279,7 @@ impl Renderer {
             // anew for every overlay of every frame was a steady stream of GPU allocations
             scene.overlay_res.truncate(overlays.len());
             for (k, (tex, r)) in overlays.iter().copied().enumerate() {
+                let r = snap_rect(r);
                 let ndc = [
                     r[0] / full_w as f32 * 2.0 - 1.0,
                     1.0 - r[1] / full_h as f32 * 2.0,
@@ -10576,9 +10594,229 @@ impl Renderer {
     }
 }
 
+/// An overlay's rectangle (physical pixels) moved onto whole pixels, its size kept. The
+/// overlays are pictures drawn texel for pixel - a text, a plate - and the linear filter
+/// blended every pixel of one placed between pixels with its neighbour: the interface's texts
+/// were soft at every size whose layout fell between them (most but 100 %, and the timetable's
+/// rows at that too). A line thinner than a pixel stays one pixel wide or high.
+fn snap_rect(r: [f32; 4]) -> [f32; 4] {
+    // (half up the same way left of the window as right of it: `round` goes away from zero,
+    // and a rectangle across the left edge came out a pixel wider)
+    let snap = |v: f32| (v + 0.5).floor();
+    let (x0, y0) = (snap(r[0]), snap(r[1]));
+    let x1 = if r[2] > r[0] { snap(r[2]).max(x0 + 1.0) } else { snap(r[2]) };
+    let y1 = if r[3] > r[1] { snap(r[3]).max(y0 + 1.0) } else { snap(r[3]) };
+    [x0, y0, x1, y1]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Overlays drawn texel for pixel: onto whole pixels, their size kept.
+    #[test]
+    fn overlays_land_on_whole_pixels() {
+        // (a 120 x 26 text a quarter and a half pixel off: moved, the same size)
+        assert_eq!(snap_rect([25.25, 40.5, 145.25, 66.5]), [25.0, 41.0, 145.0, 67.0]);
+        assert_eq!(snap_rect([10.0, 20.0, 30.0, 40.0]), [10.0, 20.0, 30.0, 40.0]);
+        // (left of the window as well: the same size)
+        assert_eq!(snap_rect([-0.5, -2.5, 19.5, 7.5]), [0.0, -2.0, 20.0, 8.0]);
+        // (a separator 0.6 px high stays a line)
+        let line = snap_rect([16.0, 100.3, 300.0, 100.9]);
+        assert_eq!(line[3] - line[1], 1.0);
+        // (an empty rectangle stays empty)
+        assert_eq!(snap_rect([5.2, 5.2, 5.2, 5.2]), [5.0, 5.0, 5.0, 5.0]);
+    }
+
+    #[test]
+    #[ignore = "requires a graphics adapter; renders terrain and foliage lighting"]
+    fn enhanced_masked_and_uncut_ground_share_lighting() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let mut renderer = pollster::block_on(Renderer::new_with(
+            &instance,
+            None,
+            Some(wgpu::TextureFormat::Rgba8UnormSrgb),
+            RenderOptions {
+                msaa: 1,
+                ssao: false,
+                shadow_size: 1024,
+                fxaa: false,
+                render_scale: 1.0,
+                ..Default::default()
+            },
+        ))
+        .expect("test renderer");
+        let mut scene = renderer.new_scene();
+        let mut texture = |rgba: [u8; 4]| {
+            renderer.add_texture(
+                &mut scene,
+                &omsi_texture::Image {
+                    width: 1,
+                    height: 1,
+                    rgba: rgba.to_vec(),
+                    has_alpha: true,
+                },
+                false,
+            )
+        };
+        let grey = texture([100, 100, 100, 255]);
+        let opaque = texture([255; 4]);
+        let transparent = texture([100, 100, 100, 0]);
+        let masked = renderer.add_terrain_material(
+            &mut scene,
+            Some(grey),
+            Some(opaque),
+            None,
+            1.0,
+            None,
+            0.0,
+        );
+        let uncut =
+            renderer.add_terrain_material(&mut scene, Some(grey), None, None, 1.0, None, 0.0);
+        let cut = renderer.add_terrain_material(
+            &mut scene,
+            Some(grey),
+            Some(transparent),
+            None,
+            1.0,
+            None,
+            0.0,
+        );
+        let foliage =
+            renderer.add_material(&mut scene, Some(grey), AlphaMode::Test, [1.0; 4], false);
+        let cut_foliage = renderer.add_material(
+            &mut scene,
+            Some(transparent),
+            AlphaMode::Test,
+            [1.0; 4],
+            false,
+        );
+        let backdrop = renderer.add_material(
+            &mut scene,
+            None,
+            AlphaMode::Opaque,
+            [1.0, 0.0, 0.0, 1.0],
+            true,
+        );
+        let mut quad = |left: f32, right: f32, z: f32, material| {
+            let mesh = renderer.add_mesh(
+                &mut scene,
+                &MeshData {
+                    positions: vec![
+                        Vec3::new(left, -5.0, z),
+                        Vec3::new(right, -5.0, z),
+                        Vec3::new(right, 5.0, z),
+                        Vec3::new(left, 5.0, z),
+                    ],
+                    normals: vec![Vec3::Z; 4],
+                    uvs: vec![glam::Vec2::splat(0.5); 4],
+                    indices: vec![0, 1, 2, 0, 2, 3],
+                    ranges: vec![(0, 6, 0)],
+                    one_sided: false,
+                },
+            );
+            renderer.add_instance(
+                &mut scene,
+                mesh,
+                DVec3::ZERO,
+                Mat4::IDENTITY,
+                vec![material],
+            )
+        };
+        // Symmetric samples in the same image share exposure, view and lamp distances.
+        quad(-6.0, 6.0, -1.0, backdrop);
+        let ground = quad(-5.0, -0.5, 0.0, masked);
+        let mapped = quad(0.5, 5.0, 0.0, uncut);
+        scene.instances[ground].render_phase = RenderPhase::Terrain;
+        scene.instances[mapped].render_phase = RenderPhase::Spline;
+        scene.instances[mapped].surface = true;
+        let camera = Camera {
+            position: DVec3::new(0.0, -0.105, 6.0),
+            yaw: 0.0,
+            pitch: -89.0,
+            roll: 0.0,
+            fov_deg: 90.0,
+            near: 0.1,
+            far: 100.0,
+        };
+        let day = Lighting {
+            enhanced: true,
+            sun_dir: Vec3::Z,
+            sun_intensity: 1.0,
+            shadows: false,
+            detail: false,
+            fog_density: 0.0,
+            ..Default::default()
+        };
+        let night = Lighting {
+            sun_dir: -Vec3::Z,
+            sun_intensity: 0.0,
+            night: 1.0,
+            ..day.clone()
+        };
+        let pixel = |rgba: &[u8], x: usize| -> [u8; 3] {
+            rgba[(32 * 64 + x) * 4..(32 * 64 + x) * 4 + 3]
+                .try_into()
+                .unwrap()
+        };
+        for (name, lighting) in [("sun", &day), ("lamp", &night)] {
+            scene.lights = if name == "lamp" {
+                vec![PointLight {
+                    position: DVec3::new(0.0, 0.0, 4.0),
+                    radius: 20.0,
+                    core: 10.0,
+                    intensity: 1.0,
+                    ..Default::default()
+                }]
+            } else {
+                Vec::new()
+            };
+            let rgba = renderer
+                .render_to_image(&mut scene, 64, 64, &camera, lighting)
+                .unwrap();
+            let (a, b) = (pixel(&rgba, 16), pixel(&rgba, 47));
+            assert!(
+                a.iter().all(|v| *v > 10 && *v < 245),
+                "lit, unclipped {name}: {a:?}"
+            );
+            assert!(
+                a.iter().zip(b).all(|(a, b)| a.abs_diff(b) <= 2),
+                "masked terrain and uncut mapped ground differ under {name}: {a:?} / {b:?}"
+            );
+        }
+        // A road cut still reveals the geometry beneath it.
+        renderer.set_material(&mut scene, ground, 0, cut);
+        let rgba = renderer
+            .render_to_image(&mut scene, 64, 64, &camera, &night)
+            .unwrap();
+        let a = pixel(&rgba, 16);
+        assert!(
+            a[0] > a[1] + 30 && a[0] > a[2] + 30,
+            "road cut must reveal red: {a:?}"
+        );
+
+        // Real foliage still scatters light arriving from behind its normal; ground does not.
+        renderer.set_material(&mut scene, ground, 0, masked);
+        renderer.set_material(&mut scene, mapped, 0, foliage);
+        scene.lights[0].position.z = -4.0;
+        let rgba = renderer
+            .render_to_image(&mut scene, 64, 64, &camera, &night)
+            .unwrap();
+        let (a, b) = (pixel(&rgba, 16), pixel(&rgba, 47));
+        assert!(
+            b[1] > a[1] + 8,
+            "foliage retains backlighting: ground {a:?}, foliage {b:?}"
+        );
+        renderer.set_material(&mut scene, mapped, 0, cut_foliage);
+        let rgba = renderer
+            .render_to_image(&mut scene, 64, 64, &camera, &night)
+            .unwrap();
+        let b = pixel(&rgba, 47);
+        assert!(
+            b[0] > b[1] + 30 && b[0] > b[2] + 30,
+            "foliage cutout must reveal red: {b:?}"
+        );
+    }
 
     #[test]
     #[ignore = "requires a graphics adapter; run with --ignored on a GPU host"]

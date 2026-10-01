@@ -455,15 +455,20 @@ fn graphics_tab(ui: &mut Ui, s: &mut Value, dirty: &mut f32, cols: [Rect; 2]) ->
         toggle_setting(ui, s, dirty, c.row(), "Sun shadows", "shadows");
         sel_setting(ui, s, dirty, "s-casters", c.row(), "Shadows cast by", "shadow_casters", &[("all", "Every solid mesh"), ("omsi", "[shadow] meshes, as OMSI")]);
         toggle_setting(ui, s, dirty, c.row(), "Detail texturing up close", "detail_textures");
-        // (an LED panel's dots are its own light: how bright they burn, and whether their
-        // mask keeps the mip chain `STFilter` asks for - off keeps them dots when the panel
-        // is small, at the cost of the shimmer the chain exists to prevent)
+        // (an LED panel's dots are its own light: how bright they burn, and how much of the
+        // mip chain the panel's picture and its mask are held at - 0 point-samples them,
+        // the sharpest dots and the worst shimmer; higher holds them at the level the
+        // screen footprint asks for at most)
         let mut led = get(s, "led_glow").as_i64().unwrap_or(6) as f32;
         if ui.slider("s-led", c.row(), &mut led, 0.0, 15.0, 1.0, "LED glow", &|v| if v < 0.5 { "Off".to_string() } else { format!("{}", v as i64) }) {
             s["led_glow"] = json!(led.round() as i64);
             *dirty = 0.3;
         }
-        toggle_setting(ui, s, dirty, c.row(), "LED masks keep their mipmaps", "led_mips");
+        let mut mip = get(s, "led_mips").as_f64().unwrap_or(1.3) as f32;
+        if ui.slider("s-led-mip", c.row(), &mut mip, 0.0, 4.0, 0.05, "LED mip strength", &|v| if v < 0.005 { "Off".to_string() } else { format!("{v:.2}") }) {
+            s["led_mips"] = json!((mip / 0.05).round() * 0.05);
+            *dirty = 0.3;
+        }
     }
     toggle_setting(ui, s, dirty, c.row(), "Reflection maps (paint, chrome, glass)", "reflections");
     toggle_setting(ui, s, dirty, c.row(), "Clouds", "clouds");
@@ -674,18 +679,30 @@ fn general_tab(ui: &mut Ui, s: &mut Value, dirty: &mut f32, out: &mut Outside, c
         ui.text_in(&st, Rect::new(c.inner.x + 12.0, c.y - 6.0, c.inner.w - 24.0, 16.0), 11.5, omsi_ui::Weight::Regular, TEXT_FAINT, omsi_ui::paint::Align::Left);
         c.y += 14.0;
     }
+    // (the texts over the picture, the menu, the timetable and the navigator: larger for
+    // those who find them hard to read, smaller for more of the picture; on a window taller
+    // than 1080p they grow with it as well, and the launcher grows with its window anyway)
+    let mut size = get(s, "ui_scale").as_f64().unwrap_or(1.0) as f32;
+    if ui.slider("s-uiscale", c.row(), &mut size, 0.5, 2.0, 0.05, "Game interface size", &|v| format!("{:.0}%", v * 100.0)) {
+        s["ui_scale"] = json!((size * 100.0).round() / 100.0);
+        *dirty = 0.3;
+    }
+    toggle_setting(ui, s, dirty, c.row(), "Interface grows with the window", "ui_scale_window");
+    // (the backgrounds of the whole interface - the navigator, the menu, the timetable, the
+    // notes' plates - the texts staying solid; 85 % as designed)
+    let mut op = get(s, "ui_opacity").as_f64().unwrap_or(0.85) as f32;
+    if ui.slider("s-uiop", c.row(), &mut op, 0.2, 1.0, 0.05, "Interface opacity", &|v| format!("{:.0}%", v * 100.0)) {
+        s["ui_opacity"] = json!((op * 100.0).round() / 100.0);
+        *dirty = 0.3;
+    }
     toggle_setting(ui, s, dirty, c.row(), "Name of the button under the mouse", "tooltips");
     toggle_setting(ui, s, dirty, c.row(), "Frame rate in the corner", "show_fps");
+    toggle_setting(ui, s, dirty, c.row(), "Notes in the top-left corner", "notes");
     toggle_setting(ui, s, dirty, c.row(), "Chat in online games", "chat");
     toggle_setting(ui, s, dirty, c.row(), "Other players' names above their buses", "name_tags");
     c.section(ui, "Navigator");
     toggle_setting(ui, s, dirty, c.row(), "Navigator (Shift+N: map, schedule, off)", "navigator");
     toggle_setting(ui, s, dirty, c.row(), "Route arrows (as in OMSI 2)", "nav_arrows");
-    let mut op = get(s, "navigator_opacity").as_f64().unwrap_or(0.85) as f32;
-    if ui.slider("s-navop", c.row(), &mut op, 0.2, 1.0, 0.05, "Opacity", &|v| format!("{:.0}%", v * 100.0)) {
-        s["navigator_opacity"] = json!((op * 100.0).round() / 100.0);
-        *dirty = 0.3;
-    }
     // the corner: a little screen with four corners to click
     let r = Rect::new(c.inner.x, c.y, c.inner.w, 70.0);
     ui.label(Rect::new(r.x, r.y, r.w * 0.45, 24.0), "Corner");
@@ -794,28 +811,6 @@ fn action_label(a: &str) -> String {
     known.iter().find(|k| k.0 == a).map(|k| k.1.to_string()).unwrap_or_else(|| a.trim_start_matches("kw_").trim_start_matches("cp_").trim_start_matches("bus_").replace('_', " "))
 }
 
-fn key_name(scan: i64, modifier: i64) -> String {
-    if scan == 0 {
-        return "(unbound)".into();
-    }
-    let k = crate::keys::scan_name(scan as i32).unwrap_or_else(|| format!("scan {scan}"));
-    let mut mods = Vec::new();
-    if modifier & omsi_content::input::KEY_SHIFT as i64 != 0 {
-        mods.push("Shift");
-    }
-    if modifier & omsi_content::input::KEY_CTRL as i64 != 0 {
-        mods.push("Ctrl");
-    }
-    if modifier & omsi_content::input::KEY_ALT as i64 != 0 {
-        mods.push("Alt");
-    }
-    if mods.is_empty() {
-        k
-    } else {
-        format!("{}+{k}", mods.join("+"))
-    }
-}
-
 pub fn controls(l: &mut Launcher, area: Rect) {
     let body = l.page_title(area, "Controls", if l.pages.controls_tab == 0 { "Click a key and press the new one (hold Shift, Ctrl or Alt for a combination); Escape leaves it as it is." } else { "What each axis and button of a wheel, pedals or joystick does - OMSI 2's gamectrler.cfg, kept in the content folder." });
     let mut tab = l.pages.controls_tab;
@@ -893,10 +888,10 @@ pub fn controls(l: &mut Launcher, area: Rect) {
         let list: Vec<(usize, String, i64, i64)> = l.state.keybindings.get(*key).and_then(|a| a.as_array()).map(|a| a.iter().enumerate().map(|(i, b)| (i, b.get("action").and_then(|x| x.as_str()).unwrap_or("").to_string(), b.get("scan_code").and_then(|x| x.as_i64()).unwrap_or(0), b.get("modifier").and_then(|x| x.as_i64()).unwrap_or(0))).collect()).unwrap_or_default();
         let mut shown: Vec<(usize, String, String, bool)> = list
             .iter()
-            .filter(|(_, a, s, m)| q.is_empty() || action_label(a).to_lowercase().contains(&q) || key_name(*s, *m).to_lowercase().contains(&q))
+            .filter(|(_, a, s, m)| q.is_empty() || action_label(a).to_lowercase().contains(&q) || crate::keys::key_name(*s, *m).to_lowercase().contains(&q))
             .map(|(i, a, s, m)| {
                 let clash = *s != 0 && list.iter().any(|(j, _, s2, m2)| j != i && s2 == s && m2 == m);
-                (*i, action_label(a), key_name(*s, *m), clash)
+                (*i, action_label(a), crate::keys::key_name(*s, *m), clash)
             })
             .collect();
         if sec == 1 {
@@ -1148,8 +1143,10 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
         }
         let lab_w = if w < 520.0 { 84.0 } else { 110.0 };
         let inv_w = 110.0;
-        let sel_w = (w - lab_w - inv_w - 60.0 - 3.0 * GAP).clamp(120.0, 200.0);
-        let bar_w = (w - lab_w - sel_w - inv_w - 3.0 * GAP).max(30.0);
+        let shp_w = 140.0;
+        let sel_w = (w - lab_w - inv_w - shp_w - 60.0 - 4.0 * GAP).clamp(120.0, 200.0);
+        let bar_w = (w - lab_w - sel_w - inv_w - shp_w - 4.0 * GAP).max(30.0);
+        let shapes: Vec<String> = crate::controllers::AXIS_SHAPES.iter().map(|s| s.0.to_string()).collect();
         for a in 0..8 {
             let r = Rect::new(x0, y, w, ROW);
             ui.label(Rect::new(r.x, r.y, lab_w, r.h), AXES[a]);
@@ -1171,6 +1168,15 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
                     x.1 = inv;
                 }
                 dirty = true;
+            }
+            if d.axes[a].is_some() {
+                // the characteristic: the curve bits of the flags, the range extension kept
+                let curve = d.axis_flags[a] & (4 | 8 | 0x10);
+                let mut shp = crate::controllers::AXIS_SHAPES.iter().position(|s| s.1 == curve).unwrap_or(0);
+                if ui.select(&format!("pad-shape-{a}"), Rect::new(bar.right() + GAP + sel_w + GAP + inv_w + GAP, r.y, shp_w, r.h), &mut shp, &shapes) {
+                    d.axis_flags[a] = (d.axis_flags[a] & !(4 | 8 | 0x10)) | crate::controllers::AXIS_SHAPES[shp].1;
+                    dirty = true;
+                }
             }
             y += ROW + 6.0;
         }
@@ -1905,7 +1911,7 @@ mod settings_tests {
     /// `set-<key>`). Taken from the page as it was before the tabs: nothing may go missing.
     fn by_tab() -> Vec<Vec<&'static str>> {
         let mut graphics = vec![
-            "s-preset", "s-graphics", "s-msaa", "s-scale", "s-af", "s-shadow", "set-ssao", "set-shadows", "s-casters", "set-detail_textures", "s-led", "set-led_mips", "set-reflections", "set-clouds",
+            "s-preset", "s-graphics", "s-msaa", "s-scale", "s-af", "s-shadow", "set-ssao", "set-shadows", "s-casters", "set-detail_textures", "s-led", "s-led-mip", "set-reflections", "set-clouds",
             "set-fullscreen", "set-vsync", "s-fps", "s-view", "s-maxobj", "s-minobj", "s-mirror", "s-texmem", "set-texture_compression",
         ];
         if !cfg!(target_os = "macos") {
@@ -1928,8 +1934,8 @@ mod settings_tests {
             "s-maint", "set-collision_vehicles", "set-collision_objects", "set-collision_pedestrians", "set-use_real_time", "set-use_real_date", "s-timespeed",
         ];
         let general = vec![
-            "s-lang", "set-machine_translation", "set-tooltips", "set-show_fps", "set-chat", "set-name_tags",
-            "set-navigator", "set-nav_arrows", "s-navop", "corner-top-left", "corner-top-right", "corner-bottom-left", "corner-bottom-right",
+            "s-lang", "set-machine_translation", "s-uiscale", "set-ui_scale_window", "s-uiop", "set-tooltips", "set-show_fps", "set-notes", "set-chat", "set-name_tags",
+            "set-navigator", "set-nav_arrows", "corner-top-left", "corner-top-right", "corner-bottom-left", "corner-bottom-right",
             "set-update_check", "set-update_auto", "s-upd-check", "s-upd-github", "s-reset",
         ];
         vec![graphics, driving, camera, sound, gameplay, general]
