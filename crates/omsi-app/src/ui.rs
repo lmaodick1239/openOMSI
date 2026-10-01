@@ -281,6 +281,7 @@ pub struct InspectorWidget {
 
 impl InspectorWidget {
     /// Check if a point (in physical pixels) is inside the inspector panel.
+    #[allow(dead_code)]
     pub fn contains(&self, x: f32, y: f32) -> bool {
         x >= self.rect[0] && x <= self.rect[2] && y >= self.rect[1] && y <= self.rect[3]
     }

@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Panel geometry and position on screen.
 #[derive(Debug, Clone, Serialize, Deserialize)]

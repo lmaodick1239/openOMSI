@@ -1,8 +1,7 @@
 //! Tests for frame graph introspection and pass management.
 
-use omsi_render::inspector::{
-    frame_graph::{EntityKey, FrameGraphInspector, IsolationMode, PassInfo, RenderSnapshot},
-    TimestampQueryPool,
+use omsi_render::inspector::frame_graph::{
+    EntityKey, FrameGraphInspector, IsolationMode, PassInfo, RenderSnapshot,
 };
 
 #[test]

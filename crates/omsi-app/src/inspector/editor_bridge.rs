@@ -6,7 +6,6 @@
 
 use glam::{Vec3, Quat, Mat4};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Editor bridge state and transition manager.
 pub struct EditorBridge {

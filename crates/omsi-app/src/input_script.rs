@@ -2611,14 +2611,14 @@ pub(crate) fn swap_view_look(look: &mut (f32, f32), looks: &mut std::collections
 
 #[cfg(test)]
 mod tests {
-    use crate::inspector::{InspectorSelection, SelectionStatus, SelectionTarget, VehicleKey, SceneryKey};
+    use crate::inspector::{InspectorSelection, SelectionTarget, VehicleKey, SceneryKey};
 
     #[test]
     fn test_inspector_mode_toggle_inactive_to_active() {
         let mut inspector_active = false;
         let mut inspector_selection: Option<InspectorSelection> = None;
-        let mut hover: Option<String> = None;
-        let mut hover_part: Option<String> = None;
+        let mut _hover: Option<String> = None;
+        let mut _hover_part: Option<String> = None;
         let mut service_msg: Option<(String, f32)> = None;
         let editor = None::<crate::editor::Editor>;
         
@@ -2626,8 +2626,8 @@ mod tests {
         if !inspector_active && editor.is_none() {
             inspector_active = true;
             inspector_selection = None;
-            hover = None;
-            hover_part = None;
+            _hover = None;
+            _hover_part = None;
             service_msg = Some(("Inspector mode on (Ctrl+I) - click to select vehicle parts or scenery objects for read-only inspection".to_string(), 5.0));
         }
         

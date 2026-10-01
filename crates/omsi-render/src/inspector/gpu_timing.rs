@@ -52,6 +52,7 @@ struct FrameQueries {
 
 /// A frame submitted for async readback.
 struct PendingFrame {
+    #[allow(dead_code)]
     frame_id: u64,
     query_count: u32,
     ranges: Vec<(u32, u32, String)>,

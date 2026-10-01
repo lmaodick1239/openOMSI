@@ -304,7 +304,7 @@ fn car_display(v: &omsi_sim::VehicleInstance) -> (String, String) {
 impl LanWorld {
     /// Once a frame, after `LanSession::tick`.
     #[allow(clippy::too_many_arguments)]
-    pub fn tick(
+    pub(crate) fn tick(
         &mut self,
         lan: &mut LanSession,
         dt: f32,

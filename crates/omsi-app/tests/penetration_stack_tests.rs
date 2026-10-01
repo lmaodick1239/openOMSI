@@ -7,7 +7,7 @@
 //! - Nested geometry handling (bus interior)
 //! - Performance budget (<0.5ms)
 
-use omsi_app::inspector_core::{
+use openomsi_game::inspector::{
     build_hit_display_name, build_penetration_stack, InspectorHit, InspectorSelection,
     PenetrationHit, SceneryKey, SelectionTarget, VehicleKey, MeshIdentity,
 };

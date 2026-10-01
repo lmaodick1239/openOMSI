@@ -1798,6 +1798,7 @@ pub struct Humans {
     rng: u64,
     next_id: u32,
     /// Generation counter per human ID for inspector invalidation.
+    #[allow(dead_code)]
     generations: HashMap<u32, u64>,
     /// Seconds since the start.
     time: f64,

@@ -162,6 +162,7 @@ pub struct Bvh {
     primitives: Vec<BvhPrimitive>,
     primitive_indices: Vec<usize>,
     metrics: BvhQualityMetrics,
+    #[allow(dead_code)]
     max_leaf_size: usize,
     needs_rebuild: bool,
 }

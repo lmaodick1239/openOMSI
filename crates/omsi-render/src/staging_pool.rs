@@ -26,6 +26,7 @@ struct StagingBuffer {
 
 /// A pending readback request.
 struct ReadbackRequest {
+    #[allow(dead_code)]
     id: ReadbackId,
     handle: TextureHandle,
     mip_level: u8,

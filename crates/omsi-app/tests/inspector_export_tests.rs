@@ -4,8 +4,6 @@ use glam::Mat4;
 
 // Re-export types from inspector modules for testing
 mod test_helpers {
-    use super::*;
-    
     pub fn create_test_mesh() -> openomsi_game::inspector::export::MeshData {
         openomsi_game::inspector::export::MeshData {
             positions: vec![
