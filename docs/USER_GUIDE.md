@@ -360,11 +360,11 @@ timetable are not part of it.
 
 The visual debug inspector lets you examine vehicles and scenery objects without changing them.
 
-**Enabling the Inspector:** The Inspector is disabled by default. To use it, enable "Inspector" 
-in the launcher settings before starting a session. When disabled, the Inspector is not loaded 
-at all, reducing memory usage and startup time.
+**Enabling the Inspector:** The Inspector is disabled by default. To use it, enable "Inspector"
+in the launcher settings before starting a session. When disabled, the Inspector is not loaded
+at all.
 
-**Opening the Inspector:** With the Inspector enabled, open the pause menu during gameplay and 
+**Opening the Inspector:** With the Inspector enabled, open the pause menu during gameplay and
 select "Inspector" to enter inspector mode. The global Ctrl+I keybind has been removed.
 
 **Selection:** Left-click a vehicle or scenery object to select it. A cyan marker appears above
@@ -397,7 +397,7 @@ The production vehicle exporter remains available through `--export-glb`.
 
 The ImGui inspector is desktop-only in this rollout. Android keeps the normal HUD and input path.
 While an inspector window has keyboard or pointer focus, game shortcuts and camera interaction are
-suppressed. Inspector-specific controls (selection navigation, window manipulation) remain 
+suppressed. Inspector-specific controls (selection navigation, window manipulation) remain
 available within the Inspector windows once inspector mode is active.
 
 **Limitations:**

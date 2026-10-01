@@ -2917,7 +2917,7 @@ mod tests {
     #[test]
     fn inspector_in_base_menu() {
         // GAME_MENU constant includes inspector entry
-        assert!(GAME_MENU.iter().any(|m| m.0 == "inspector"), 
+        assert!(GAME_MENU.iter().any(|m| m.0 == "inspector"),
             "Inspector should be in base GAME_MENU constant");
     }
 
@@ -2926,10 +2926,10 @@ mod tests {
         // Test production filtering helper with disabled inspector
         let args = crate::Args::parse_from(&["omsi"]);
         assert!(!args.inspector, "Default args should have inspector disabled");
-        
+
         let mut menu = game_menu_for(&args).to_vec();
         apply_inspector_filter(&mut menu, &args);
-        
+
         assert!(!menu.iter().any(|m| m.0 == "inspector"),
             "Inspector should be filtered out when args.inspector is false");
     }
@@ -2939,13 +2939,13 @@ mod tests {
         // Test production filtering helper with enabled inspector
         let args = crate::Args::parse_from(&["omsi", "--inspector"]);
         assert!(args.inspector, "Args should have inspector enabled");
-        
+
         let mut menu = game_menu_for(&args).to_vec();
         apply_inspector_filter(&mut menu, &args);
-        
+
         assert!(menu.iter().any(|m| m.0 == "inspector"),
             "Inspector should be included when args.inspector is true");
-        
+
         let inspector_entry = menu.iter().find(|m| m.0 == "inspector");
         assert_eq!(inspector_entry.map(|e| e.1), Some("Inspector"),
             "Inspector entry should have label 'Inspector'");

@@ -60,10 +60,10 @@ Author: mizuki <edward2020123@outlook.com>
 Date:   Fri Oct 2 03:31:53 2026 +0800
 
     feat: open inspector from pause menu
-    
+
     Add conditional Inspector entry to game pause menu when --inspector flag is enabled.
     Entry activates inspector mode and closes menu. No keyboard shortcut added.
-    
+
     Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
 
  crates/omsi-app/src/input_script.rs | 30 +++++++++++++++++++++++++++++-
@@ -83,9 +83,9 @@ None. Implementation follows specification precisely:
 - Inspector-local controls preserved (no changes to inspector module)
 
 ## Interface Contract Satisfied
-✅ **Enabled `Args::inspector`** yields menu entry `("inspector", "Inspector")`  
-✅ **Disabled sessions** never yield that entry  
-✅ **Selecting the entry** sets `inspector_active = true` and closes pause menu  
+✅ **Enabled `Args::inspector`** yields menu entry `("inspector", "Inspector")`
+✅ **Disabled sessions** never yield that entry
+✅ **Selecting the entry** sets `inspector_active = true` and closes pause menu
 ✅ **No keyboard shortcut** added for inspector activation
 
 ---
@@ -129,10 +129,10 @@ cargo check
 **Result:** ✅ PASS (17 warnings, all pre-existing)
 
 ### What the Tests Validate
-✅ Inspector entry `("inspector", "Inspector")` exists in `GAME_MENU`  
-✅ `game_menu_for()` returns base menu containing inspector  
-✅ Filtering logic in `game_menu_items()` removes inspector when `args.inspector` is false  
-✅ Default args have inspector disabled  
+✅ Inspector entry `("inspector", "Inspector")` exists in `GAME_MENU`
+✅ `game_menu_for()` returns base menu containing inspector
+✅ Filtering logic in `game_menu_items()` removes inspector when `args.inspector` is false
+✅ Default args have inspector disabled
 
 ### Note on Test Scope
 These tests validate the menu item presence/filtering at the data level using the public `game_menu_for()` function and the `GAME_MENU` constant. Full integration testing of `App::game_menu_items()` (which includes player state, on_foot status, LAN role, etc.) would require complex App setup and is deferred to integration tests or manual verification.
@@ -187,11 +187,11 @@ cargo check
 **Result:** ✅ PASS (16 warnings, all pre-existing)
 
 ### What the Tests Now Validate
-✅ Inspector entry `("inspector", "Inspector")` exists in `GAME_MENU`  
-✅ **Pure helper `should_include_inspector()` returns correct boolean based on args**  
-✅ **Filtered menu omits inspector when `args.inspector` is false**  
-✅ **Filtered menu includes inspector with correct label when `args.inspector` is true**  
-✅ Filtering logic matches `App::game_menu_items()` implementation  
+✅ Inspector entry `("inspector", "Inspector")` exists in `GAME_MENU`
+✅ **Pure helper `should_include_inspector()` returns correct boolean based on args**
+✅ **Filtered menu omits inspector when `args.inspector` is false**
+✅ **Filtered menu includes inspector with correct label when `args.inspector` is true**
+✅ Filtering logic matches `App::game_menu_items()` implementation
 
 ### Review Finding Addressed
 The tests now properly exercise filtered output from a pure extracted filtering helper (`filter_inspector_from_menu` in tests, `should_include_inspector` as public helper). Tests assert that:
@@ -200,3 +200,85 @@ The tests now properly exercise filtered output from a pure extracted filtering 
 - The label is correct when included
 
 Action activation/closure testing is not feasible without full App construction (requires window event loop, surface state, etc.) and is deferred to integration tests or manual verification. The menu action handler was already verified in the initial implementation and commit.
+
+---
+
+## Fix Report 3: Review Finding - Production Helper Refactoring
+
+### Issue
+Tests reimplemented filtering logic instead of testing production code. The test-only `filter_inspector_from_menu` helper duplicated the inline filtering logic in `App::game_menu_items()`, and the `should_include_inspector` helper was unused.
+
+### Changes Made
+
+1. **Replaced `should_include_inspector` with `apply_inspector_filter`**
+   - New production helper: `apply_inspector_filter(menu: &mut Vec<...>, args: &Args)`
+   - Removes inspector entry when `args.inspector` is false
+   - Used by both `App::game_menu_items()` and tests
+
+2. **Updated `App::game_menu_items()` to use production helper**
+   - Replaced inline `if !self.args.inspector { v.retain(...) }` with `apply_inspector_filter(&mut v, &self.args)`
+   - Preserves exact behavior
+
+3. **Removed duplicate test-only helper**
+   - Deleted `filter_inspector_from_menu` test helper
+   - Tests now call `apply_inspector_filter` directly
+   - Removed `should_include_inspector_helper` test (helper no longer exists)
+
+4. **Updated remaining tests to use production helper**
+   - `inspector_filtered_when_disabled`: calls `apply_inspector_filter(&mut menu, &args)`
+   - `inspector_included_when_enabled`: calls `apply_inspector_filter(&mut menu, &args)`
+   - Tests now validate production code behavior, not test-only reimplementation
+
+### Test Results
+```bash
+cargo test -p omsi-app --lib input_script:: -- --nocapture
+```
+**Result:** ✅ PASS (3 tests passed; 0 failed)
+- `inspector_in_base_menu`: ✅ PASS
+- `inspector_filtered_when_disabled`: ✅ PASS
+- `inspector_included_when_enabled`: ✅ PASS
+
+### Build Check
+```bash
+cargo check
+```
+**Result:** ✅ PASS (17 warnings, all pre-existing)
+
+### What the Tests Now Validate
+✅ Inspector entry `("inspector", "Inspector")` exists in `GAME_MENU`
+✅ **Production helper `apply_inspector_filter` correctly removes inspector when disabled**
+✅ **Production helper `apply_inspector_filter` correctly preserves inspector when enabled**
+✅ Filtered menu matches expected behavior used by `App::game_menu_items()`
+
+### Review Finding Addressed
+Tests now exercise the actual production filtering helper (`apply_inspector_filter`) used by `App::game_menu_items()`. No duplicate logic. The production helper is testable, reusable, and implements the exact filtering behavior that production code depends on.
+
+### Commit
+```
+commit 6701fb5a9204132f860b7ec2e91e6650de6d5530
+Author: mizuki <edward2020123@outlook.com>
+Date:   Fri Oct 2 04:18:17 2026 +0800
+
+    refactor: extract inspector filter into production helper
+
+    Move Inspector filtering logic from App::game_menu_items inline code into
+    apply_inspector_filter production helper. Tests now use production helper
+    instead of duplicate test-only filter_inspector_from_menu. Removes
+    unused should_include_inspector helper.
+
+    Addresses review finding: tests reimplemented filtering instead of testing
+    production code.
+
+    Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+
+ crates/omsi-app/src/input_script.rs | 57 ++++++++++++++----------------------
+ 1 file changed, 18 insertions(+), 39 deletions(-)
+```
+
+### Summary
+- ✅ Production helper `apply_inspector_filter` created and used by `App::game_menu_items()`
+- ✅ Tests use production helper, not duplicate test-only implementation
+- ✅ Unused `should_include_inspector` helper removed
+- ✅ All tests pass (3/3)
+- ✅ Build clean (cargo check passes)
+- ✅ Behavior preserved
