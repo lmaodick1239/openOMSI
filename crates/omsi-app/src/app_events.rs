@@ -3123,7 +3123,7 @@ mod imgui_capture_tests {
         let mut args = Args::parse_from(["omsi", "--root", "."]);
         args.inspector = false;
         assert!(!args.inspector, "disabled args should have inspector=false");
-        
+
         let mut enabled_args = args.clone();
         enabled_args.inspector = true;
         assert!(enabled_args.inspector, "enabled args should have inspector=true");

@@ -57,7 +57,7 @@ cargo check -p omsi-app
 **None.** Implementation complete and verified:
 
 1. ✅ CLI Args field added with correct type and attribute
-2. ✅ Duty field already existed from Task 1 
+2. ✅ Duty field already existed from Task 1
 3. ✅ Argument propagation already implemented in both code paths (normal + situation)
 4. ✅ Tutorial path correctly omits inspector (tutorials use OMSI's fixed scenarios)
 5. ✅ All focused tests pass
@@ -152,4 +152,3 @@ test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 - ✅ All 5 inspector tests pass (3 propagation + 2 omission)
 - ✅ No regressions in 36-test suite
 - ✅ Implementation now consistent across all three duty paths (normal, situation, tutorial)
-
