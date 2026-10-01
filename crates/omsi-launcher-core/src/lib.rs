@@ -2028,7 +2028,11 @@ pub fn last_situation(map: &str) -> Option<PathBuf> {
 pub fn duty_args(d: &Duty) -> Result<Vec<String>> {
     let root = root()?;
     if let Some(t) = d.tutorial {
-        return Ok(vec!["--root".into(), root.to_string_lossy().to_string(), "--no-menu".into(), "--tutorial".into(), t.to_string()]);
+        let mut a = vec!["--root".into(), root.to_string_lossy().to_string(), "--no-menu".into(), "--tutorial".into(), t.to_string()];
+        if d.inspector.unwrap_or(false) {
+            a.push("--inspector".into());
+        }
+        return Ok(a);
     }
     if let Some(sit) = d.situation.as_deref().filter(|s| !s.trim().is_empty()) {
         let mut a = vec!["--root".into(), root.to_string_lossy().to_string(), "--no-menu".into(), "--situation".into(), sit.to_string()];
@@ -2421,6 +2425,13 @@ mod tests {
         let sit: Duty = serde_json::from_str(r#"{"map":"maps/x/global.cfg","bus":"Vehicles/x.bus","time":"09:00","situation":"test.osn","inspector":true}"#).unwrap();
         let a = duty_args(&sit).unwrap();
         assert!(a.contains(&"--inspector".to_string()), "situation duty with inspector should include --inspector: {a:?}");
+    }
+
+    #[test]
+    fn a_duty_passes_inspector_in_tutorial_path() {
+        let tut: Duty = serde_json::from_str(r#"{"map":"maps/x/global.cfg","bus":"Vehicles/x.bus","time":"09:00","tutorial":1,"inspector":true}"#).unwrap();
+        let a = duty_args(&tut).unwrap();
+        assert!(a.contains(&"--inspector".to_string()), "tutorial duty with inspector should include --inspector: {a:?}");
     }
 
     #[test]
