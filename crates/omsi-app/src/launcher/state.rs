@@ -97,6 +97,9 @@ pub struct Choice {
     pub passengers: bool,
     pub schedule: bool,
     pub autostart: bool,
+    /// Load the in-game Inspector and expose it from the pause menu.
+    #[serde(default)]
+    pub inspector: bool,
     /// Start on foot (no bus of one's own until one is placed).
     pub on_foot: bool,
     /// off, host, join
@@ -128,6 +131,7 @@ impl Default for Choice {
             passengers: true,
             schedule: true,
             autostart: false,
+            inspector: false,
             on_foot: false,
             lan_mode: "off".into(),
             lan_addr: String::new(),
@@ -516,6 +520,7 @@ impl State {
             passengers: Some(c.passengers),
             schedule: Some(c.schedule),
             autostart: Some(c.autostart),
+            inspector: Some(c.inspector),
             on_foot: Some(c.on_foot),
             profile: Some(self.config.profile.clone()).filter(|p| !p.is_empty()),
             lan: Some(lan),
@@ -1073,6 +1078,14 @@ mod choice_tests {
         c.plate = "B-AB 1234".into();
         let back: super::Choice = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
         assert_eq!(back.plate, "B-AB 1234");
+    }
+
+    /// `inspector` defaults to `false` and is absent from legacy files without the field.
+    #[test]
+    fn inspector_defaults_to_false_and_missing_field_deserializes_as_false() {
+        assert!(!super::Choice::default().inspector);
+        let old: super::Choice = serde_json::from_str(r#"{"bus":"Vehicles/x.bus","map":"maps/x/global.cfg"}"#).unwrap();
+        assert!(!old.inspector);
     }
 }
 

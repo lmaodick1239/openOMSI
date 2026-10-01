@@ -278,6 +278,8 @@ struct Outside {
     check_updates: bool,
     reset: bool,
     controls: Option<usize>,
+    /// Current value of `Choice::inspector`; toggled by the General tab.
+    inspector: bool,
 }
 
 thread_local! {
@@ -298,7 +300,7 @@ pub fn settings(l: &mut Launcher, area: Rect) {
     let body = Rect::new(body.x, bar.bottom() + 18.0, body.w, (body.bottom() - bar.bottom() - 18.0).max(0.0));
     let s = &mut l.state.settings;
     let dirty = &mut l.state.settings_dirty;
-    let mut out = Outside { update: l.update.status(), check_updates: false, reset: false, controls: None };
+    let mut out = Outside { update: l.update.status(), check_updates: false, reset: false, controls: None, inspector: l.state.choice.inspector };
     // (two columns side by side; where they would be too narrow to read - a phone - one
     // under the other, each as high as it was the frame before)
     let stacked = body.w < 900.0;
@@ -330,6 +332,10 @@ pub fn settings(l: &mut Launcher, area: Rect) {
     if let Some(t) = out.controls {
         l.pages.controls_tab = t;
         l.go(Page::Controls);
+    }
+    if out.inspector != l.state.choice.inspector {
+        l.state.choice.inspector = out.inspector;
+        l.state.choice_dirty = 0.4;
     }
 }
 
@@ -700,6 +706,10 @@ fn general_tab(ui: &mut Ui, s: &mut Value, dirty: &mut f32, out: &mut Outside, c
     toggle_setting(ui, s, dirty, c.row(), "Notes in the top-left corner", "notes");
     toggle_setting(ui, s, dirty, c.row(), "Chat in online games", "chat");
     toggle_setting(ui, s, dirty, c.row(), "Other players' names above their buses", "name_tags");
+    // (the Inspector is a choice, not a setting: it is saved with the session, not settings.cfg)
+    if ui.toggle("set-inspector", c.row(), &mut out.inspector, "Inspector (pause-menu button to inspect objects)") {
+        // out.inspector is already updated by ui.toggle; settings() reads it back
+    }
     c.section(ui, "Navigator");
     toggle_setting(ui, s, dirty, c.row(), "Navigator (Shift+N: map, schedule, off)", "navigator");
     toggle_setting(ui, s, dirty, c.row(), "Route arrows (as in OMSI 2)", "nav_arrows");
@@ -1935,6 +1945,7 @@ mod settings_tests {
         ];
         let general = vec![
             "s-lang", "set-machine_translation", "s-uiscale", "set-ui_scale_window", "s-uiop", "set-tooltips", "set-show_fps", "set-notes", "set-chat", "set-name_tags",
+            "set-inspector",
             "set-navigator", "set-nav_arrows", "corner-top-left", "corner-top-right", "corner-bottom-left", "corner-bottom-right",
             "set-update_check", "set-update_auto", "s-upd-check", "s-upd-github", "s-reset",
         ];
@@ -1950,7 +1961,7 @@ mod settings_tests {
     }
 
     fn outside() -> Outside {
-        Outside { update: Status::Idle, check_updates: false, reset: false, controls: None }
+        Outside { update: Status::Idle, check_updates: false, reset: false, controls: None, inspector: false }
     }
 
     /// One frame of tab `tab`, its two columns tall enough that nothing is cut off.

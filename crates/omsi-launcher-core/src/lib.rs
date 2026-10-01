@@ -1991,6 +1991,9 @@ pub struct Duty {
     pub passengers: Option<bool>,
     pub schedule: Option<bool>,
     pub autostart: Option<bool>,
+    /// Load the in-game Inspector and expose it from the pause menu.
+    #[serde(default)]
+    pub inspector: Option<bool>,
     /// Start as a pedestrian beside the bus (which is then left out): a bus is placed or
     /// taken over from the game menu later.
     #[serde(default)]
@@ -2039,6 +2042,9 @@ pub fn duty_args(d: &Duty) -> Result<Vec<String>> {
         a.extend(["--traffic".into(), d.traffic.unwrap_or(30).to_string()]);
         if d.passengers.unwrap_or(true) {
             a.push("--passengers".into());
+        }
+        if d.inspector.unwrap_or(false) {
+            a.push("--inspector".into());
         }
         return Ok(a);
     }
@@ -2111,6 +2117,9 @@ pub fn duty_args(d: &Duty) -> Result<Vec<String>> {
     }
     if d.on_foot.unwrap_or(false) {
         a.push("--on-foot".into());
+    }
+    if d.inspector.unwrap_or(false) {
+        a.push("--inspector".into());
     }
     let profile = d.profile.clone().filter(|p| !p.trim().is_empty()).unwrap_or_else(|| load_config().profile);
     if let Some(season) = d.season.as_deref().map(str::trim).filter(|x| !x.is_empty() && !x.eq_ignore_ascii_case("auto")) {
