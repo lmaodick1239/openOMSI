@@ -4,6 +4,7 @@
 const MIRROR_RATE: f32 = 75.0;
 /// The least a mirror is redrawn a second (see the mirrors in `window_event`).
 const MIRROR_MIN_HZ: f32 = 8.0;
+const MIRROR_MAX_HZ: f32 = 30.0;
 
 fn render_scale_step(fps: f32, slow_frame_wait_share: f32) -> f32 {
     if fps < 45.0 && slow_frame_wait_share >= 0.35 {
@@ -12,6 +13,33 @@ fn render_scale_step(fps: f32, slow_frame_wait_share: f32) -> f32 {
         0.05
     } else {
         0.0
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn effective_imgui_capture(
+    capture: crate::inspector::imgui_inspector::InputCaptureState,
+    active: bool,
+) -> crate::inspector::imgui_inspector::InputCaptureState {
+    capture.effective(active)
+}
+
+#[cfg(not(target_os = "android"))]
+fn imgui_keyboard_blocks_event(
+    capture: crate::inspector::imgui_inspector::InputCaptureState,
+    active: bool,
+    inspector_toggle: bool,
+) -> bool {
+    capture.effective(active).blocks_keyboard() && !inspector_toggle
+}
+
+#[cfg(not(target_os = "android"))]
+fn abort_inspector_frame_if_surface_unavailable(
+    inspector: &mut crate::inspector::imgui_inspector::InspectorUi,
+    surface_available: bool,
+) {
+    if !surface_available {
+        inspector.abort_frame();
     }
 }
 
@@ -34,7 +62,40 @@ impl ApplicationHandler for App {
         self.save_last_situation();
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        #[cfg(not(target_os = "android"))]
+        let (imgui_captures_keyboard, imgui_captures_pointer) = self
+            .inspector_ui
+            .as_mut()
+            .map(|ui| {
+                if let Some(window) = self.window.as_ref() {
+                    ui.handle_event(
+                        window,
+                        &winit::event::Event::<()>::WindowEvent {
+                            window_id: id,
+                            event: event.clone(),
+                        },
+                    );
+                }
+                let capture = effective_imgui_capture(ui.input_capture, self.inspector_active);
+                if !self.inspector_active {
+                    ui.clear_input_capture();
+                }
+                let inspector_toggle = matches!(
+                    &event,
+                    WindowEvent::KeyboardInput { event, .. }
+                        if event.physical_key == PhysicalKey::Code(KeyCode::KeyI)
+                            && (self.keys.contains(&KeyCode::ControlLeft)
+                                || self.keys.contains(&KeyCode::ControlRight))
+                );
+                (
+                    imgui_keyboard_blocks_event(capture, self.inspector_active, inspector_toggle),
+                    capture.blocks_pointer(),
+                )
+            })
+            .unwrap_or((false, false));
+        #[cfg(target_os = "android")]
+        let (imgui_captures_keyboard, imgui_captures_pointer) = (false, false);
         match event {
             WindowEvent::CloseRequested => {
                 self.finish_session();
@@ -65,6 +126,9 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                if imgui_captures_keyboard {
+                    return;
+                }
                 // '/' opens the chat's input box wherever the keyboard has it (the key
                 // itself is then swallowed by the chat)
                 if event.state == ElementState::Pressed
@@ -89,7 +153,8 @@ impl ApplicationHandler for App {
                 // (the Lua plugins' `key` event; a key held down repeats nothing)
                 if let (PhysicalKey::Code(code), false) = (event.physical_key, event.repeat) {
                     if self.plugin_keys.len() < 64 {
-                        self.plugin_keys.push((format!("{code:?}"), event.state == ElementState::Pressed));
+                        self.plugin_keys
+                            .push((format!("{code:?}"), event.state == ElementState::Pressed));
                     }
                 }
                 // a phone's back key is Escape (the game menu, out of the city map ...)
@@ -113,13 +178,23 @@ impl ApplicationHandler for App {
                 button: winit::event::MouseButton::Right,
                 ..
             } => {
-                if self.navigator.as_ref().map(|n| n.map_open()).unwrap_or(false) {
+                if imgui_captures_pointer {
+                    return;
+                }
+                if self
+                    .navigator
+                    .as_ref()
+                    .map(|n| n.map_open())
+                    .unwrap_or(false)
+                {
                     return;
                 }
                 if self.vr_active() {
                     #[cfg(windows)]
-                    if state == ElementState::Pressed && self.game_menu.is_none()
-                        && self.chooser.is_none() {
+                    if state == ElementState::Pressed
+                        && self.game_menu.is_none()
+                        && self.chooser.is_none()
+                    {
                         if self.mouse_drive {
                             self.mouse_drive = false;
                             crate::player::keep_wheel(self.player.as_mut());
@@ -130,15 +205,7 @@ impl ApplicationHandler for App {
                         }
                     }
                 } else {
-                    // a right click lets go of the mouse steering, as in OMSI (#162)
-                    if state == ElementState::Pressed && self.mouse_drive && self.game_menu.is_none() {
-                        self.mouse_drive = false;
-                        crate::player::keep_wheel(self.player.as_mut());
-                        self.service_msg = Some(("Mouse steering off".into(), 3.0));
-                    }
-                    self.mouse_look = state == ElementState::Pressed;
-                    // (the cursor shows it at once, not with the next look at what is under it)
-                    self.update_hover();
+                    self.on_right(state == ElementState::Pressed);
                 }
             }
             // (the middle button - the wheel pressed - turns the view as well: OMSI's pan)
@@ -147,13 +214,24 @@ impl ApplicationHandler for App {
                 button: winit::event::MouseButton::Middle,
                 ..
             } => {
-                if self.navigator.as_ref().map(|n| n.map_open()).unwrap_or(false) {
+                if imgui_captures_pointer {
+                    return;
+                }
+                if self
+                    .navigator
+                    .as_ref()
+                    .map(|n| n.map_open())
+                    .unwrap_or(false)
+                {
                     return;
                 }
                 self.mouse_look = state == ElementState::Pressed;
                 self.update_hover();
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                if imgui_captures_pointer {
+                    return;
+                }
                 let amount = match delta {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => y,
                     winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
@@ -161,13 +239,17 @@ impl ApplicationHandler for App {
                 self.wheel(amount);
             }
             WindowEvent::CursorMoved { position, .. } => {
+                if imgui_captures_pointer {
+                    return;
+                }
                 // (the on-screen controls on a computer, `OMSI_TOUCH=1`: the mouse is a
                 // finger on them - from #202)
                 if self.touch.enabled {
                     self.finger_move(0, glam::Vec2::new(position.x as f32, position.y as f32));
                 }
                 #[cfg(windows)]
-                let vr_cockpit = self.vr.is_some() && self.game_menu.is_none()
+                let vr_cockpit = self.vr.is_some()
+                    && self.game_menu.is_none()
                     && matches!(self.view.as_str(), "driver" | "pax");
                 #[cfg(not(windows))]
                 let vr_cockpit = false;
@@ -183,6 +265,9 @@ impl ApplicationHandler for App {
                 button: winit::event::MouseButton::Left,
                 ..
             } => {
+                if imgui_captures_pointer {
+                    return;
+                }
                 if self.touch.enabled {
                     let p = glam::Vec2::new(self.cursor.0, self.cursor.1);
                     if state == ElementState::Pressed {
@@ -200,7 +285,10 @@ impl ApplicationHandler for App {
                 #[cfg(windows)]
                 self.poll_vr_cursor_position();
                 // OMSI's autosave of the last situation: every five minutes of play
-                if !self.paused && self.player.is_some() && self.clock.run_time - self.autosave_t >= 300.0 {
+                if !self.paused
+                    && self.player.is_some()
+                    && self.clock.run_time - self.autosave_t >= 300.0
+                {
                     self.autosave_t = self.clock.run_time;
                     self.save_last_situation();
                 }
@@ -218,24 +306,30 @@ impl ApplicationHandler for App {
                     return;
                 }
                 let desktop_vsync = self.settings.vsync && !self.vr_active();
-                if let (Some(surface), Some(renderer)) = (self.surface.as_mut(), self.renderer.as_ref()) {
+                if let (Some(surface), Some(renderer)) =
+                    (self.surface.as_mut(), self.renderer.as_ref())
+                {
                     surface.set_vsync(renderer, desktop_vsync);
                 }
                 // in the own bus's cab: at the wheel, a passenger's view, or sitting in a
                 // seat of it after getting up (its inside is drawn and heard from inside)
                 self.in_cab = matches!(self.view.as_str(), "driver" | "pax")
-                    || (self.view == "foot" && self.foot_bus() == Some(crate::humans::BusId::Player));
+                    || (self.view == "foot"
+                        && self.foot_bus() == Some(crate::humans::BusId::Player));
                 // standing or sitting in another player's bus: that bus is drawn and heard
                 // from inside (its interior meshes, not the outside ones over them)
                 self.inside_remote = match self.foot_bus() {
-                    Some(crate::humans::BusId::Ai(x)) if self.view == "foot" => crate::humans::remote_bus_player(x),
+                    Some(crate::humans::BusId::Ai(x)) if self.view == "foot" => {
+                        crate::humans::remote_bus_player(x)
+                    }
                     _ => None,
                 };
                 let now = Instant::now();
                 let raw_dt = (now - self.last).as_secs_f32();
                 self.log_frame(raw_dt);
                 let profiling = omsi_cfg::env::var_os("OMSI_PROFILE").is_some();
-                let waited: f64 = ["acquire", "present", "gpu"].iter()
+                let waited: f64 = ["acquire", "present", "gpu"]
+                    .iter()
                     .map(|&k| self.profile.get(k).copied().unwrap_or(0.0))
                     .sum();
                 let wait_this_frame = (waited - self.governor_wait_prev).max(0.0) as f32;
@@ -454,22 +548,41 @@ impl ApplicationHandler for App {
                     // the AI's lights (and a bus's saloon lamps, which its scripts switch with
                     // them): by the time of day, and by day in fog, rain, snow or under a
                     // closed cloud cover as drivers do
-                    let gloomy = self.weather.as_ref().map(|w| {
-                        let (kind, rate) = precip_of(w);
-                        w.fog.0 < 600.0 || (kind != 0 && rate > 0.05) || w.clouds.0.trim().to_ascii_lowercase().starts_with("overcast")
-                    }).unwrap_or(false);
+                    let gloomy = self
+                        .weather
+                        .as_ref()
+                        .map(|w| {
+                            let (kind, rate) = precip_of(w);
+                            w.fog.0 < 600.0
+                                || (kind != 0 && rate > 0.05)
+                                || w.clouds
+                                    .0
+                                    .trim()
+                                    .to_ascii_lowercase()
+                                    .starts_with("overcast")
+                        })
+                        .unwrap_or(false);
                     t.night = omsi_sim::Daylight::compute(&self.clock, self.envir.as_ref())
                         .lamps_on
                         || gloomy;
                     let __t2 = Instant::now();
                     t.others = lan_outlines(&self.remotes);
-                    t.others.extend(own_outlines(self.player.as_ref(), &self.placed));
+                    t.others
+                        .extend(own_outlines(self.player.as_ref(), &self.placed));
                     if !self.paused {
-                        t.player_priority = self.player.as_ref().and_then(|p| p.vehicle.var("TrafficPriority")).is_some_and(|v| v > 0.5);
+                        t.player_priority = self
+                            .player
+                            .as_ref()
+                            .and_then(|p| p.vehicle.var("TrafficPriority"))
+                            .is_some_and(|v| v > 0.5);
                         t.tick(dt, self.player.as_ref().map(|p| player_outline(p)));
                         if let Some(w) = self.world.as_ref() {
                             w.set_switches(&t.switch_requests());
-                            let rail = self.player.as_ref().and_then(|p| p.rail.as_ref()).map(|r| (r.lane, r.along));
+                            let rail = self
+                                .player
+                                .as_ref()
+                                .and_then(|p| p.rail.as_ref())
+                                .map(|r| (r.lane, r.along));
                             w.set_signals(&t.signal_aspects(&w.signal_routes, rail));
                         }
                     }
@@ -483,7 +596,11 @@ impl ApplicationHandler for App {
                     }
                     if let Some(p) = self.player.as_mut() {
                         // the options' [no_collision_vehToVeh]: the bus drives through the traffic
-                        p.vehicle.dynamic_boxes = if self.settings.collision_vehicles { t.boxes(p.vehicle.position, 80.0) } else { Vec::new() };
+                        p.vehicle.dynamic_boxes = if self.settings.collision_vehicles {
+                            t.boxes(p.vehicle.position, 80.0)
+                        } else {
+                            Vec::new()
+                        };
                     }
                     let __t3 = Instant::now();
                     if let Some(a) = self.audio.as_ref() {
@@ -515,20 +632,40 @@ impl ApplicationHandler for App {
                 // the tutorial's pages, once the world is there
                 if self.world.is_some() {
                     if let Some(n) = self.args.tutorial.take() {
-                        self.tutorial = crate::tutorial::Tutorial::load(&self.args.root, n, &self.settings.language);
+                        self.tutorial = crate::tutorial::Tutorial::load(
+                            &self.args.root,
+                            n,
+                            &self.settings.language,
+                        );
                     }
                 }
                 // the game controllers: their axes this frame, their buttons' key actions
-                let hwnd = self.window.as_deref().and_then(crate::controllers::window_handle);
-                let ctl = self.controllers.get_or_insert_with(|| crate::controllers::Controllers::new(&self.args.root, hwnd));
+                let hwnd = self
+                    .window
+                    .as_deref()
+                    .and_then(crate::controllers::window_handle);
+                let ctl = self.controllers.get_or_insert_with(|| {
+                    crate::controllers::Controllers::new(&self.args.root, hwnd)
+                });
+                ctl.set_focus(self.window_focused);
                 ctl.deadzone = self.settings.ctrl_deadzone;
                 ctl.pedal_throttle = self.settings.pedal_throttle;
                 ctl.pedal_brake = self.settings.pedal_brake;
                 ctl.ff_invert = self.settings.ff_invert;
                 ctl.ff_enabled = self.settings.ff_enabled;
-                ctl.steer_gain = if self.settings.wheel_lock >= 45.0 { (self.settings.wheel_range / self.settings.wheel_lock).clamp(0.1, 20.0) } else { 1.0 };
+                ctl.steer_gain = if self.settings.wheel_lock >= 45.0 {
+                    (self.settings.wheel_range / self.settings.wheel_lock).clamp(0.1, 20.0)
+                } else {
+                    1.0
+                };
                 if ctl.disabled.is_empty() && !self.settings.ctrl_off.is_empty() {
-                    ctl.disabled = self.settings.ctrl_off.split('|').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                    ctl.disabled = self
+                        .settings
+                        .ctrl_off
+                        .split('|')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
                 }
                 let analog = ctl.poll();
                 let actions = std::mem::take(&mut ctl.actions);
@@ -538,12 +675,30 @@ impl ApplicationHandler for App {
                 // the bus's force feedback (OMSI's FF_Vib_Amp, and on a wheel its forces)
                 // (in every view of the bus - the wheel went slack outside and in the
                 // passenger view)
-                let driving = self.player.as_ref().filter(|_| matches!(self.view.as_str(), "driver" | "outside" | "pax") && !self.paused);
+                let driving = self.player.as_ref().filter(|_| {
+                    matches!(self.view.as_str(), "driver" | "outside" | "pax") && !self.paused
+                });
+                let kmh = driving
+                    .map(|p| p.vehicle.physics.velocity_kmh())
+                    .unwrap_or(0.0);
                 ctl.feedback(crate::controllers::FfInput {
                     on: driving.is_some(),
-                    kmh: driving.map(|p| p.vehicle.physics.velocity_kmh() as f32).unwrap_or(0.0),
-                    vib_amp: driving.and_then(|p| p.vehicle.var("FF_Vib_Amp")).unwrap_or(0.0),
-                    vib_period: driving.and_then(|p| p.vehicle.var("FF_Vib_Period")).unwrap_or(0.0),
+                    kmh,
+                    lateral_accel: driving
+                        .and_then(|p| p.vehicle.rigid.as_ref())
+                        .map(|r| r.accel_body.x)
+                        .unwrap_or(0.0),
+                    wheel_bump: driving
+                        .and_then(|p| p.vehicle.rigid.as_ref())
+                        .map(|r| crate::controllers::wheel_contact_bump(r, kmh))
+                        .unwrap_or(0.0),
+                    wheel_bump_age: 0.0,
+                    vib_amp: driving
+                        .and_then(|p| p.vehicle.var("FF_Vib_Amp"))
+                        .unwrap_or(0.0),
+                    vib_period: driving
+                        .and_then(|p| p.vehicle.var("FF_Vib_Period"))
+                        .unwrap_or(0.0),
                     dt,
                 });
                 // OMSI's mouse control: the cursor's place across steers, above the middle
@@ -558,19 +713,29 @@ impl ApplicationHandler for App {
                 // (in every view of the bus - driver, outside, passenger - as in OMSI, where
                 // switching the camera leaves the mouse steering on; not on foot or flying)
                 let bus_view = matches!(self.view.as_str(), "driver" | "outside" | "pax");
-                if let (true, Some(s)) = (self.mouse_drive && bus_view && !self.mouse_look
-                    && self.game_menu.is_none(), self.surface.as_ref()) {
+                if let (true, Some(s)) = (
+                    self.mouse_drive && bus_view && !self.mouse_look && self.game_menu.is_none(),
+                    self.surface.as_ref(),
+                ) {
                     let (w, h) = (s.config.width as f32, s.config.height as f32);
                     // (the speed the divisor takes, smoothed over 0.4 s: the bus's own speed
                     // trembles by fractions of a km/h from frame to frame on its springs and
                     // tyres, and at 30 km/h the wheel twitched with it by itself)
-                    let raw_kmh = self.player.as_ref().map(|p| p.vehicle.physics.velocity_kmh()).unwrap_or(0.0);
+                    let raw_kmh = self
+                        .player
+                        .as_ref()
+                        .map(|p| p.vehicle.physics.velocity_kmh())
+                        .unwrap_or(0.0);
                     let k_v = 1.0 - (-dt / 0.4).exp();
                     self.mouse_kmh += (raw_kmh - self.mouse_kmh) * k_v;
                     let kmh = self.mouse_kmh;
-                    let base = (crate::player::mouse_steering(self.cursor.0, w, kmh) * self.settings.mouse_sens).clamp(-1.0, 1.0);
+                    let base = (crate::player::mouse_steering(self.cursor.0, w, kmh)
+                        * self.settings.mouse_sens)
+                        .clamp(-1.0, 1.0);
                     // (what the mouse added at the edge, up to the full lock)
-                    self.mouse_edge = self.mouse_edge.clamp((-1.0 - base).min(0.0), (1.0 - base).max(0.0));
+                    self.mouse_edge = self
+                        .mouse_edge
+                        .clamp((-1.0 - base).min(0.0), (1.0 - base).max(0.0));
                     let target = (base + self.mouse_edge).clamp(-1.0, 1.0);
                     // the pedals as Omsi.exe has them: from the middle of the window to its
                     // top edge the throttle, to the bottom one the brake, straight on
@@ -579,7 +744,11 @@ impl ApplicationHandler for App {
                     let (steer, fade) = &mut self.mouse_steer;
                     // (after the first second the wheel follows the cursor within ~60 ms: the
                     // cursor comes in bursts, and taken as it came the wheel moved in steps)
-                    let k = if *fade > 0.0 { (-std::f32::consts::LN_2 / *fade * dt).exp() } else { (-dt / 0.06).exp() };
+                    let k = if *fade > 0.0 {
+                        (-std::f32::consts::LN_2 / *fade * dt).exp()
+                    } else {
+                        (-dt / 0.06).exp()
+                    };
                     *steer = target + (*steer - target) * k;
                     let (mt, mb) = &mut self.mouse_pedals;
                     *mt = pedal_t + (*mt - pedal_t) * k;
@@ -589,7 +758,8 @@ impl ApplicationHandler for App {
                     // OMSI_TRACE_STEER=<csv>: the mouse steering frame by frame
                     if let Some(path) = omsi_cfg::env::var_os("OMSI_TRACE_STEER") {
                         use std::io::Write;
-                        static TRACE: std::sync::Mutex<Option<std::fs::File>> = std::sync::Mutex::new(None);
+                        static TRACE: std::sync::Mutex<Option<std::fs::File>> =
+                            std::sync::Mutex::new(None);
                         let mut g = TRACE.lock().unwrap_or_else(|e| e.into_inner());
                         if g.is_none() {
                             *g = std::fs::File::create(&path).ok();
@@ -597,9 +767,23 @@ impl ApplicationHandler for App {
                                 let _ = writeln!(f, "t,dt,cursor_x,kmh,target,steer,steer_deg");
                             }
                         }
-                        let deg = self.player.as_ref().map(|p| p.vehicle.physics.steer_deg).unwrap_or(0.0);
+                        let deg = self
+                            .player
+                            .as_ref()
+                            .map(|p| p.vehicle.physics.steer_deg)
+                            .unwrap_or(0.0);
                         if let Some(f) = g.as_mut() {
-                            let _ = writeln!(f, "{:.3},{:.4},{:.1},{:.2},{:.4},{:.4},{:.3}", self.clock.run_time, dt, self.cursor.0, kmh, target, self.mouse_steer.0, deg);
+                            let _ = writeln!(
+                                f,
+                                "{:.3},{:.4},{:.1},{:.2},{:.4},{:.4},{:.3}",
+                                self.clock.run_time,
+                                dt,
+                                self.cursor.0,
+                                kmh,
+                                target,
+                                self.mouse_steer.0,
+                                deg
+                            );
                         }
                     }
                     // the mouse owns the wheel (OMSI sets the curvature from it every frame):
@@ -610,8 +794,11 @@ impl ApplicationHandler for App {
                     }
                     analog.throttle = Some(self.mouse_pedals.0);
                     analog.brake = Some(self.mouse_pedals.1);
-                } else if self.mouse_drive && bus_view && self.mouse_look
-                    && self.game_menu.is_none() {
+                } else if self.mouse_drive
+                    && bus_view
+                    && self.mouse_look
+                    && self.game_menu.is_none()
+                {
                     // looking round with the right button: the wheel and the pedals stay where
                     // the mouse left them, as in OMSI (they went slack until the button was let
                     // go - no quick look round while driving)
@@ -629,7 +816,15 @@ impl ApplicationHandler for App {
                     let mut game: Vec<String> = Vec::new();
                     actions.retain(|(name, down)| {
                         let n = name.to_ascii_lowercase();
-                        if let Some(k) = ["view_look_left", "view_look_right", "view_look_up", "view_look_down"].iter().position(|x| *x == n) {
+                        if let Some(k) = [
+                            "view_look_left",
+                            "view_look_right",
+                            "view_look_up",
+                            "view_look_down",
+                        ]
+                        .iter()
+                        .position(|x| *x == n)
+                        {
                             self.pad_look[k] = *down;
                             return false;
                         }
@@ -649,9 +844,15 @@ impl ApplicationHandler for App {
                     });
                     for n in game {
                         match n.as_str() {
-                            "gear_up" => { self.shift_gear(true); }
-                            "gear_down" => { self.shift_gear(false); }
-                            _ => { self.game_action(&n); }
+                            "gear_up" => {
+                                self.shift_gear(true);
+                            }
+                            "gear_down" => {
+                                self.shift_gear(false);
+                            }
+                            _ => {
+                                self.game_action(&n);
+                            }
                         }
                     }
                 }
@@ -679,7 +880,10 @@ impl ApplicationHandler for App {
                     // the world and being put back somewhere in the sky)
                     let ground_here = self.world.as_ref().is_none_or(|w| {
                         let at = p.vehicle.position;
-                        let k = ((at.x / omsi_map::tile_size()).floor() as i32, (at.y / omsi_map::tile_size()).floor() as i32);
+                        let k = (
+                            (at.x / omsi_map::tile_size()).floor() as i32,
+                            (at.y / omsi_map::tile_size()).floor() as i32,
+                        );
                         w.terrains.read().contains_key(&k) || w.surfaces.read().contains_key(&k)
                     });
                     if !self.paused && ground_here {
@@ -687,10 +891,24 @@ impl ApplicationHandler for App {
                             dt,
                             self.audio.as_ref(),
                             self.in_cab,
+                            !matches!(self.view.as_str(), "free" | "foot"),
                         );
-                        p.move_head(dt, self.settings.head_movement);
+                        #[cfg(windows)]
+                        let vr_on = self.vr.is_some();
+                        #[cfg(not(windows))]
+                        let vr_on = false;
+                        p.move_head(
+                            dt,
+                            self.settings.head_movement && !vr_on,
+                            self.settings.steer_look && !vr_on,
+                        );
                         if let Some(w) = self.world.as_ref() {
-                            crate::rail_drive::frame(p, self.traffic.as_ref().map(|t| &t.net), w, dt);
+                            crate::rail_drive::frame(
+                                p,
+                                self.traffic.as_ref().map(|t| &t.net),
+                                w,
+                                dt,
+                            );
                         }
                     }
                     // a script that set the time of day (`(S.S.Time)`) moves the game's clock
@@ -705,7 +923,8 @@ impl ApplicationHandler for App {
                             q.vehicle.update(dt);
                         }
                         q.sync_transforms(r, scene, false);
-                        let f = crate::lan::footprint_of(&q.vehicle, [2.5, 11.5, 3.0, 0.0, 0.0, 1.5]);
+                        let f =
+                            crate::lan::footprint_of(&q.vehicle, [2.5, 11.5, 3.0, 0.0, 0.0, 1.5]);
                         placed_boxes.push(omsi_sim::collision::Obb {
                             center: glam::DVec2::new(f.x, f.y),
                             half: glam::DVec2::new(f.width as f64 * 0.5, f.length as f64 * 0.5),
@@ -748,29 +967,52 @@ impl ApplicationHandler for App {
                     // from the driver's seat the figure stays in the mirrors
                     // (from the driver's seat only the mirrors show him)
                     // (out of the seat: nobody at the wheel)
-                    p.sync_driver(r, scene, dt, self.settings.driver && self.on_foot.is_none(), self.view == "driver");
+                    p.sync_driver_hands(
+                        r,
+                        scene,
+                        dt,
+                        self.settings.driver && self.on_foot.is_none(),
+                        self.view == "driver",
+                        self.settings.hands_in_cab,
+                    );
                     if self.view != "free" && self.view != "foot" {
                         let key = crate::input_script::look_key_of(&self.view, Some(p.cam_choice));
-                        crate::input_script::swap_view_look(&mut self.look, &mut self.view_looks, &mut self.look_view, &key);
+                        crate::input_script::swap_view_look(
+                            &mut self.look,
+                            &mut self.view_looks,
+                            &mut self.look_view,
+                            &key,
+                        );
                         if let Some(cam) = self.camera.as_ref() {
                             p.seat = glam::Vec3::from_array(self.settings.seat);
                             // head tracking: the head's turn on top of the look, its movement
                             // on top of the seat (opentrack: x right, y up, z back, in cm)
                             if self.settings.head_tracking && self.headtrack.is_none() {
-                                self.headtrack = crate::headtrack::HeadTracker::start(self.settings.head_tracking_port);
+                                self.headtrack = crate::headtrack::HeadTracker::start(
+                                    self.settings.head_tracking_port,
+                                );
                                 if self.headtrack.is_none() {
                                     self.settings.head_tracking = false;
                                 }
                             }
-                            let tracked = self.headtrack.as_ref().and_then(|h| h.pose()).filter(|_| self.settings.head_tracking && matches!(self.view.as_str(), "driver" | "pax"));
+                            let tracked =
+                                self.headtrack.as_ref().and_then(|h| h.pose()).filter(|_| {
+                                    self.settings.head_tracking
+                                        && matches!(self.view.as_str(), "driver" | "pax")
+                                });
                             if let Some(t) = tracked {
-                                p.seat += glam::Vec3::new(t.pos[0], -t.pos[2], t.pos[1]).clamp(glam::Vec3::splat(-60.0), glam::Vec3::splat(60.0)) / 100.0;
+                                p.seat += glam::Vec3::new(t.pos[0], -t.pos[2], t.pos[1])
+                                    .clamp(glam::Vec3::splat(-60.0), glam::Vec3::splat(60.0))
+                                    / 100.0;
                             }
                             // (the outside view's field of view starts from the plain 60
                             // degrees every frame: taken from the last frame's camera, the
                             // zoom was applied on top of itself and ran off to its narrowest
                             // or widest at once)
-                            let base = omsi_render::Camera { fov_deg: 60.0, ..*cam };
+                            let base = omsi_render::Camera {
+                                fov_deg: 60.0,
+                                ..*cam
+                            };
                             let mut cam = p.camera_look(&self.view, &base, self.look, self.orbit);
                             if let Some(mut t) = tracked {
                                 for (k, axis) in ["yaw", "pitch", "roll"].iter().enumerate() {
@@ -779,7 +1021,8 @@ impl ApplicationHandler for App {
                                     }
                                 }
                                 cam.yaw += t.rot[0].clamp(-170.0, 170.0);
-                                cam.pitch = (cam.pitch + t.rot[1].clamp(-80.0, 80.0)).clamp(-89.0, 89.0);
+                                cam.pitch =
+                                    (cam.pitch + t.rot[1].clamp(-80.0, 80.0)).clamp(-89.0, 89.0);
                                 cam.roll += t.rot[2].clamp(-60.0, 60.0);
                             }
                             // Settings → Field of view (0: the bus's own cameras)
@@ -801,17 +1044,34 @@ impl ApplicationHandler for App {
                     } else if let Some(cam) = self.camera.as_mut() {
                         // the free camera and the view on foot follow the setting too (they
                         // stayed at 60 degrees whatever it said)
-                        let base = if self.settings.fov >= 20.0 { self.settings.fov.min(120.0) } else { 60.0 };
-                        cam.fov_deg = (base * self.view_zoom.get(&self.view).copied().unwrap_or(1.0)).clamp(8.0, 120.0);
+                        let base = if self.settings.fov >= 20.0 {
+                            self.settings.fov.min(120.0)
+                        } else {
+                            60.0
+                        };
+                        cam.fov_deg = (base
+                            * self.view_zoom.get(&self.view).copied().unwrap_or(1.0))
+                        .clamp(8.0, 120.0);
                     }
                     let __th = Instant::now();
                     // (the cursor's aim into the cab: again when the cursor or the view
                     // turned, else every few frames for switches that moved under it - a ray
                     // through every cockpit mesh every frame was a tenth of the frame)
-                    let key = self.camera.as_ref().map(|c| (self.cursor.0.round() as i32, self.cursor.1.round() as i32, (c.yaw * 4.0).round() as i32, (c.pitch * 4.0).round() as i32));
+                    let key = self.camera.as_ref().map(|c| {
+                        (
+                            self.cursor.0.round() as i32,
+                            self.cursor.1.round() as i32,
+                            (c.yaw * 4.0).round() as i32,
+                            (c.pitch * 4.0).round() as i32,
+                        )
+                    });
                     // (the cab sways with the suspension: a view that only turned waits a few frames)
-                    let cursor_moved = key.map(|k| (k.0, k.1)) != self.hover_key.map(|k| (k.0, k.1));
-                    if cursor_moved || (key != self.hover_key && self.total_frames % 3 == 0) || self.total_frames % 6 == 0 {
+                    let cursor_moved =
+                        key.map(|k| (k.0, k.1)) != self.hover_key.map(|k| (k.0, k.1));
+                    if cursor_moved
+                        || (key != self.hover_key && self.total_frames % 6 == 0)
+                        || self.total_frames % 12 == 0
+                    {
                         self.hover_key = key;
                         self.update_hover();
                     }
@@ -821,14 +1081,22 @@ impl ApplicationHandler for App {
                         a.follow_device();
                     }
                     if let (Some(a), Some(cam)) = (self.audio.as_ref(), self.camera.as_ref()) {
-                        let (reverb_time, reverb_mix) = self.world.as_ref().map(|w| w.reverb_at(cam.position)).unwrap_or((0.0, 0.0));
+                        let (reverb_time, reverb_mix) = self
+                            .world
+                            .as_ref()
+                            .map(|w| w.reverb_at(cam.position))
+                            .unwrap_or((0.0, 0.0));
                         a.set_listener(omsi_audio::Listener {
                             position: cam.position.as_vec3(),
                             forward: cam.forward(),
                             right: cam.right(),
                             // (silent while paused: the engine's loops would go on)
                             // (the settings' volume: it had been 0.6 whatever the slider said)
-                            master: if self.paused { 0.0 } else { self.settings.volume.clamp(0.0, 1.0) },
+                            master: if self.paused {
+                                0.0
+                            } else {
+                                self.settings.volume.clamp(0.0, 1.0)
+                            },
                             reverb_time,
                             reverb_mix,
                         });
@@ -836,7 +1104,11 @@ impl ApplicationHandler for App {
                 }
                 // on foot without a bus of one's own: the vehicles one placed still stand, run
                 // their scripts and are drawn where they are (the player's frame did it)
-                if let (None, Some(r), Some(scene)) = (self.player.as_ref(), self.renderer.as_ref(), self.scene.as_mut()) {
+                if let (None, Some(r), Some(scene)) = (
+                    self.player.as_ref(),
+                    self.renderer.as_ref(),
+                    self.scene.as_mut(),
+                ) {
                     for q in self.placed.iter_mut() {
                         if !self.paused {
                             q.vehicle.update(dt);
@@ -894,7 +1166,11 @@ impl ApplicationHandler for App {
                         // (OMSI's `AIPassFactor`, the passengers setting in per cent)
                         * self.settings.pax_density;
                     h.time_of_day = self.clock.time;
-                    h.delay = self.duty.as_ref().map(|d| d.delay(self.clock.time)).unwrap_or(0.0);
+                    h.delay = self
+                        .duty
+                        .as_ref()
+                        .map(|d| d.delay(self.clock.time))
+                        .unwrap_or(0.0);
                     self.humans_populate_t -= dt;
                     if self.humans_populate_t <= 0.0 && !self.paused {
                         self.humans_populate_t = 2.0;
@@ -907,7 +1183,12 @@ impl ApplicationHandler for App {
                         ));
                     }
                     // (the other LAN players' buses, for their riders to sit in)
-                    h.set_remote_buses(self.remotes.remotes.iter().map(|(id, r)| (*id, r.vehicle())));
+                    h.set_remote_buses(
+                        self.remotes
+                            .remotes
+                            .iter()
+                            .map(|(id, r)| (*id, r.vehicle())),
+                    );
                     // (and the vehicles the player placed and left, with their riders)
                     h.set_placed_buses(self.placed.iter().map(|q| (q.uid, &q.vehicle)));
                     let took = h.tick(
@@ -927,7 +1208,11 @@ impl ApplicationHandler for App {
                                 }
                             }
                             Some(id) => {
-                                if let Some(c) = self.traffic.as_mut().and_then(|t| t.cars.iter_mut().find(|c| c.id == id)) {
+                                if let Some(c) = self
+                                    .traffic
+                                    .as_mut()
+                                    .and_then(|t| t.cars.iter_mut().find(|c| c.id == id))
+                                {
                                     c.vehicle.host.fired_triggers.push("ev_Stamper".into());
                                 }
                             }
@@ -960,10 +1245,6 @@ impl ApplicationHandler for App {
                             // rear door opened again whenever it was shut)
                             p.vehicle.trigger("door_haltewunsch_off");
                         }
-                        if std::mem::take(&mut h.door_request) {
-                            p.vehicle.trigger("door_aussenoeffner");
-                            p.vehicle.trigger("door_aussenoeffner_off");
-                        }
                         h.write_pax_vars(&mut p.vehicle);
                         p.vehicle.host.humans_on_path_link = h.path_link_counts();
                         p.vehicle.host.humans_on_seat = h.seat_counts();
@@ -975,7 +1256,15 @@ impl ApplicationHandler for App {
                 }
                 *self.profile.entry("humans").or_default() += __t.elapsed().as_secs_f64();
                 self.foot_after_humans();
-                if let (Some(d), Some(p), false) = (self.duty.as_mut(), self.player.as_mut(), self.paused) {
+                if let (Some(d), Some(p), false) =
+                    (self.duty.as_mut(), self.player.as_mut(), self.paused)
+                {
+                    if let Some(stop) = p.html_next_stop.take() {
+                        if d.skip_to(stop) {
+                            let (trip, k) = d.trip_for_ibis();
+                            p.ibis_to_stop(trip, k);
+                        }
+                    }
                     if let Some((arrival, departure)) = d.update(&mut p.vehicle, self.clock.time) {
                         self.career.stop_served(arrival, departure);
                     }
@@ -995,7 +1284,8 @@ impl ApplicationHandler for App {
                         self.career.tick(dt, &p.vehicle, riders);
                     }
                     if crash > 0.0 {
-                        self.career.crashed(crash, p.vehicle.physics.velocity_kmh() / 3.6);
+                        self.career
+                            .crashed(crash, p.vehicle.physics.velocity_kmh() / 3.6);
                         self.service_msg = Some((format!("Crash: {:.0} kJ", crash / 1000.0), 6.0));
                     }
                 }
@@ -1004,7 +1294,12 @@ impl ApplicationHandler for App {
                 }
                 self.placing_frame();
                 // the host sends every edit of the map again now and then (players join)
-                if self.lan.as_ref().map(|l| l.role == omsi_net::Role::Host).unwrap_or(false) {
+                if self
+                    .lan
+                    .as_ref()
+                    .map(|l| l.role == omsi_net::Role::Host)
+                    .unwrap_or(false)
+                {
                     self.editor_sync_t -= dt;
                     if self.editor_sync_t <= 0.0 {
                         self.editor_sync_t = 10.0;
@@ -1019,7 +1314,11 @@ impl ApplicationHandler for App {
                     } else if let Some(c) = self.camera.as_ref() {
                         // (no bus came: where the camera stands, on the ground)
                         let p = c.position;
-                        let z = self.world.as_ref().and_then(|w| w.walk_height(p.x, p.y)).unwrap_or(p.z - 1.7);
+                        let z = self
+                            .world
+                            .as_ref()
+                            .and_then(|w| w.walk_height(p.x, p.y))
+                            .unwrap_or(p.z - 1.7);
                         let yaw = c.yaw as f64;
                         self.start_on_foot(glam::DVec3::new(p.x, p.y, z), yaw);
                     }
@@ -1029,21 +1328,54 @@ impl ApplicationHandler for App {
                 self.discord_t -= dt;
                 if self.discord_t <= 0.0 {
                     self.discord_t = 5.0;
-                    if self.discord.is_none() && self.settings.discord_status && !self.settings.discord_app_id.is_empty() {
-                        self.discord = crate::discord::Discord::start(&self.settings.discord_app_id);
+                    if self.discord.is_none()
+                        && self.settings.discord_status
+                        && !self.settings.discord_app_id.is_empty()
+                    {
+                        self.discord =
+                            crate::discord::Discord::start(&self.settings.discord_app_id);
                         if self.discord.is_none() {
                             self.settings.discord_status = false;
                         }
                     }
                     if let Some(d) = self.discord.as_ref() {
-                        let map = self.world.as_ref().map(|w| w.global.name.clone()).unwrap_or_default();
-                        let bus = self.player.as_ref().map(|p| format!("{} {}", p.vehicle.ty.def.manufacturer, p.vehicle.ty.def.type_name).trim().to_string());
+                        let map = self
+                            .world
+                            .as_ref()
+                            .map(|w| w.global.name.clone())
+                            .unwrap_or_default();
+                        let bus = self.player.as_ref().map(|p| {
+                            format!(
+                                "{} {}",
+                                p.vehicle.ty.def.manufacturer, p.vehicle.ty.def.type_name
+                            )
+                            .trim()
+                            .to_string()
+                        });
                         let state = match (self.duty.as_ref(), bus.as_ref()) {
-                            (Some(duty), _) => format!("Line {} · tour {}{}", duty.line.trim(), duty.tour.trim(), if self.lan.is_some() { " · multiplayer" } else { "" }),
-                            (None, Some(_)) => if self.lan.is_some() { "Free drive · multiplayer".to_string() } else { "Free drive".to_string() },
+                            (Some(duty), _) => format!(
+                                "Line {} · tour {}{}",
+                                duty.line.trim(),
+                                duty.tour.trim(),
+                                if self.lan.is_some() {
+                                    " · multiplayer"
+                                } else {
+                                    ""
+                                }
+                            ),
+                            (None, Some(_)) => {
+                                if self.lan.is_some() {
+                                    "Free drive · multiplayer".to_string()
+                                } else {
+                                    "Free drive".to_string()
+                                }
+                            }
                             (None, None) => "On foot".to_string(),
                         };
-                        let details = match bus { Some(b) if !b.is_empty() => format!("{b} · {map}"), _ => map };
+                        let details = match bus {
+                            Some(b) if !b.is_empty() => format!("{b} · {map}"),
+                            _ => map,
+                        };
                         d.set(crate::discord::Presence { details, state });
                     }
                 }
@@ -1053,7 +1385,14 @@ impl ApplicationHandler for App {
                     let info = crate::plugins::game_info(self);
                     let keys = std::mem::take(&mut self.plugin_keys);
                     let plugins = self.plugins.as_mut().unwrap();
-                    let mut io = crate::plugins::Io { vehicle: self.player.as_mut().map(|p| &mut p.vehicle), dt, message: None, info, commands: Vec::new(), keys };
+                    let mut io = crate::plugins::Io {
+                        vehicle: self.player.as_mut().map(|p| &mut p.vehicle),
+                        dt,
+                        message: None,
+                        info,
+                        commands: Vec::new(),
+                        keys,
+                    };
                     plugins.frame(&mut io);
                     let commands = std::mem::take(&mut io.commands);
                     if let Some(m) = io.message {
@@ -1075,7 +1414,9 @@ impl ApplicationHandler for App {
                     self.plugin_keys.clear();
                 }
                 // OMSI_WATCH_VARS=a,b: every change of those variables of the player's bus
-                if let (Some(p), Ok(list)) = (self.player.as_ref(), omsi_cfg::env::var("OMSI_WATCH_VARS")) {
+                if let (Some(p), Ok(list)) =
+                    (self.player.as_ref(), omsi_cfg::env::var("OMSI_WATCH_VARS"))
+                {
                     thread_local!(static LAST: std::cell::RefCell<std::collections::HashMap<String, f32>> = Default::default());
                     LAST.with(|last| {
                         let mut last = last.borrow_mut();
@@ -1097,7 +1438,11 @@ impl ApplicationHandler for App {
                     self.career.ticket_requests = h.ticket_requests as i32;
                     self.career.ticket_points = h.ticket_points as i32;
                     // the options' [no_collision_pedastrians]: nobody is knocked down
-                    let hurt = if self.settings.collision_pedestrians { h.run_over(&p.vehicle) } else { 0 };
+                    let hurt = if self.settings.collision_pedestrians {
+                        h.run_over(&p.vehicle)
+                    } else {
+                        0
+                    };
                     if hurt > 0 {
                         self.career.crashes[1] += hurt as i32;
                         self.service_msg = Some(("Pedestrian knocked down!".into(), 6.0));
@@ -1111,13 +1456,34 @@ impl ApplicationHandler for App {
                     let step = 60.0 * dt;
                     // Ctrl+Alt+arrows in the cab: the mirror nearest to where the driver looks
                     // turns (kept per bus in mirrors.cfg when the keys are let go)
-                    let ctrl_alt = (self.keys.contains(&KeyCode::ControlLeft) || self.keys.contains(&KeyCode::ControlRight)) && (self.keys.contains(&KeyCode::AltLeft) || self.keys.contains(&KeyCode::AltRight));
-                    let arrows = [KeyCode::ArrowLeft, KeyCode::ArrowRight, KeyCode::ArrowUp, KeyCode::ArrowDown].map(|k| self.keys.contains(&k));
-                    if let (true, Some(p), Some(cam)) = (ctrl_alt && self.view == "driver" && arrows.iter().any(|a| *a), self.player.as_mut(), self.camera.as_ref()) {
+                    let ctrl_alt = (self.keys.contains(&KeyCode::ControlLeft)
+                        || self.keys.contains(&KeyCode::ControlRight))
+                        && (self.keys.contains(&KeyCode::AltLeft)
+                            || self.keys.contains(&KeyCode::AltRight));
+                    let arrows = [
+                        KeyCode::ArrowLeft,
+                        KeyCode::ArrowRight,
+                        KeyCode::ArrowUp,
+                        KeyCode::ArrowDown,
+                    ]
+                    .map(|k| self.keys.contains(&k));
+                    if let (true, Some(p), Some(cam)) = (
+                        ctrl_alt && self.view == "driver" && arrows.iter().any(|a| *a),
+                        self.player.as_mut(),
+                        self.camera.as_ref(),
+                    ) {
                         let cams = &p.vehicle.ty.def.cameras_reflexion;
                         let f = cam.forward();
                         let best = (0..cams.len())
-                            .map(|i| (i, (p.vehicle.camera_world_full(&cams[i]).0 - cam.position).as_vec3().normalize_or_zero().dot(f)))
+                            .map(|i| {
+                                (
+                                    i,
+                                    (p.vehicle.camera_world_full(&cams[i]).0 - cam.position)
+                                        .as_vec3()
+                                        .normalize_or_zero()
+                                        .dot(f),
+                                )
+                            })
                             .max_by(|a, b| a.1.total_cmp(&b.1))
                             .map(|(i, _)| i);
                         if let Some(i) = best {
@@ -1126,26 +1492,53 @@ impl ApplicationHandler for App {
                             }
                             let o = &mut p.mirror_offsets[i];
                             let rate = 12.0 * dt;
-                            o[0] = (o[0] + rate * (arrows[1] as i32 - arrows[0] as i32) as f32).clamp(-45.0, 45.0);
-                            o[1] = (o[1] + rate * (arrows[2] as i32 - arrows[3] as i32) as f32).clamp(-30.0, 30.0);
+                            o[0] = (o[0] + rate * (arrows[1] as i32 - arrows[0] as i32) as f32)
+                                .clamp(-45.0, 45.0);
+                            o[1] = (o[1] + rate * (arrows[2] as i32 - arrows[3] as i32) as f32)
+                                .clamp(-30.0, 30.0);
                             p.mirrors_dirty = true;
-                            self.service_msg = Some((format!("Mirror {}: {:+.1}° across, {:+.1}° up (Ctrl+Alt+arrows)", i + 1, o[0], o[1]), 2.0));
+                            self.service_msg = Some((
+                                format!(
+                                    "Mirror {}: {:+.1}° across, {:+.1}° up (Ctrl+Alt+arrows)",
+                                    i + 1,
+                                    o[0],
+                                    o[1]
+                                ),
+                                2.0,
+                            ));
                         }
                     } else if let Some(p) = self.player.as_mut().filter(|p| p.mirrors_dirty) {
                         p.mirrors_dirty = false;
-                        crate::settings::save_mirror_offsets(&p.vehicle.ty.def.path, &p.mirror_offsets);
+                        crate::settings::save_mirror_offsets(
+                            &p.vehicle.ty.def.path,
+                            &p.mirror_offsets,
+                        );
                     }
                     // a controller's look buttons (Settings → Controllers: view_look_*)
-                    self.look.0 += step * 1.5 * (self.pad_look[1] as i32 - self.pad_look[0] as i32) as f32;
-                    self.look.1 = (self.look.1 + step * 0.7 * (self.pad_look[2] as i32 - self.pad_look[3] as i32) as f32).clamp(-85.0, 85.0);
+                    self.look.0 +=
+                        step * 1.5 * (self.pad_look[1] as i32 - self.pad_look[0] as i32) as f32;
+                    self.look.1 = (self.look.1
+                        + step * 0.7 * (self.pad_look[2] as i32 - self.pad_look[3] as i32) as f32)
+                        .clamp(-85.0, 85.0);
                     // with a wheel steering, the arrow keys look around as in OMSI
-                    if !ctrl_alt && self.controllers.as_ref().is_some_and(|c| c.wheel_steering()) && !self.keys.contains(&KeyCode::ControlLeft) && !self.keys.contains(&KeyCode::ControlRight) {
+                    if !ctrl_alt
+                        && self
+                            .controllers
+                            .as_ref()
+                            .is_some_and(|c| c.wheel_steering())
+                        && !self.keys.contains(&KeyCode::ControlLeft)
+                        && !self.keys.contains(&KeyCode::ControlRight)
+                    {
                         // a glance: held, the head turns (to 140 degrees at most); let go, it
                         // comes back to the road - held, it went round and round, and the
                         // other key never brought it back straight
-                        let (l, r) = (self.keys.contains(&KeyCode::ArrowLeft), self.keys.contains(&KeyCode::ArrowRight));
+                        let (l, r) = (
+                            self.keys.contains(&KeyCode::ArrowLeft),
+                            self.keys.contains(&KeyCode::ArrowRight),
+                        );
                         if l || r {
-                            self.look.0 = (self.look.0 + step * 1.5 * (r as i32 - l as i32) as f32).clamp(-140.0, 140.0);
+                            self.look.0 = (self.look.0 + step * 1.5 * (r as i32 - l as i32) as f32)
+                                .clamp(-140.0, 140.0);
                             self.arrow_glance = true;
                         } else if self.arrow_glance {
                             self.look.0 *= (-6.0 * dt).exp();
@@ -1182,14 +1575,22 @@ impl ApplicationHandler for App {
                     // a quarter of an hour per second at first, faster the longer it is held
                     // (the menu's whole hours were the only way)
                     {
-                        let ctrl = self.keys.contains(&KeyCode::ControlLeft) || self.keys.contains(&KeyCode::ControlRight);
-                        let shift = self.keys.contains(&KeyCode::ShiftLeft) || self.keys.contains(&KeyCode::ShiftRight);
-                        let dir = match (self.keys.contains(&KeyCode::PageUp), self.keys.contains(&KeyCode::PageDown)) {
+                        let ctrl = self.keys.contains(&KeyCode::ControlLeft)
+                            || self.keys.contains(&KeyCode::ControlRight);
+                        let shift = self.keys.contains(&KeyCode::ShiftLeft)
+                            || self.keys.contains(&KeyCode::ShiftRight);
+                        let dir = match (
+                            self.keys.contains(&KeyCode::PageUp),
+                            self.keys.contains(&KeyCode::PageDown),
+                        ) {
                             (true, false) => 1.0,
                             (false, true) => -1.0,
                             _ => 0.0,
                         };
-                        let client = self.lan.as_ref().is_some_and(|l| l.role == omsi_net::Role::Client);
+                        let client = self
+                            .lan
+                            .as_ref()
+                            .is_some_and(|l| l.role == omsi_net::Role::Client);
                         if ctrl && shift && dir != 0.0 && !client {
                             self.clock_hold += dt;
                             let rate = 900.0 * (1.0 + self.clock_hold * 1.5).min(8.0);
@@ -1264,11 +1665,16 @@ impl ApplicationHandler for App {
                         let flat = Vec3::new(v.x, v.y, 0.0).normalize_or_zero();
                         let pace = if boost > 1.0 { 4.5 } else { 1.4 };
                         cam.position += (flat * pace * dt).as_dvec3();
-                        if let Some(g) = self.world.as_ref().and_then(|w| w.walk_height(cam.position.x, cam.position.y)) {
+                        if let Some(g) = self
+                            .world
+                            .as_ref()
+                            .and_then(|w| w.walk_height(cam.position.x, cam.position.y))
+                        {
                             cam.position.z = g + 1.7;
                         }
                     } else {
-                        cam.position += (v.normalize_or_zero() * self.speed * boost * dt).as_dvec3();
+                        cam.position +=
+                            (v.normalize_or_zero() * self.speed * boost * dt).as_dvec3();
                     }
                     if self.keys.contains(&KeyCode::ArrowLeft) {
                         cam.yaw -= 60.0 * dt;
@@ -1332,7 +1738,11 @@ impl ApplicationHandler for App {
                 }
                 // the tile light maps around the camera, for the roads' night light
                 let __ta = Instant::now();
-                if let (Some(w), Some(r), Some(cam)) = (self.world.as_ref(), self.renderer.as_ref(), self.camera.as_ref()) {
+                if let (Some(w), Some(r), Some(cam)) = (
+                    self.world.as_ref(),
+                    self.renderer.as_ref(),
+                    self.camera.as_ref(),
+                ) {
                     w.update_light_map_atlas(r, cam.position);
                 }
                 *self.profile.entry("lights.atlas").or_default() += __ta.elapsed().as_secs_f64();
@@ -1351,11 +1761,17 @@ impl ApplicationHandler for App {
                     vehicles.extend(self.remotes.remotes.values().map(|r| r.vehicle()));
                     let __tc = Instant::now();
                     lights::collect(w, scene, &daylight, cam.position, &vehicles);
-                    *self.profile.entry("lights.collect").or_default() += __tc.elapsed().as_secs_f64();
+                    *self.profile.entry("lights.collect").or_default() +=
+                        __tc.elapsed().as_secs_f64();
                     // the object editor's pick: a magenta glow over it
                     if let Some(id) = self.editor.as_ref().and_then(|e| e.selected) {
                         let at = w.edit_objects.lock().get(&id).map(|o| o.pos);
-                        let moved = w.object_edits.lock().get(&id).map(|e| e.moved).unwrap_or_default();
+                        let moved = w
+                            .object_edits
+                            .lock()
+                            .get(&id)
+                            .map(|e| e.moved)
+                            .unwrap_or_default();
                         if let Some(p) = at {
                             scene.coronas.push(omsi_render::Corona {
                                 position: p + moved + glam::DVec3::Z * 3.0,
@@ -1386,15 +1802,42 @@ impl ApplicationHandler for App {
                         );
                         // every bus one may ride in keeps the weather out: the own, another
                         // player's, a timetable bus
-                        let boxed = |v: &omsi_sim::VehicleInstance| v.ty.def.bounding_box.map(|bb| (v.position, v.heading, bb));
-                        let mut buses: Vec<(glam::DVec3, f64, [f32; 6])> = self.player.as_ref().and_then(|p| boxed(&p.vehicle)).into_iter().collect();
-                        buses.extend(self.remotes.remotes.values().filter_map(|rv| boxed(rv.vehicle())));
+                        let boxed = |v: &omsi_sim::VehicleInstance| {
+                            v.ty.def.bounding_box.map(|bb| (v.position, v.heading, bb))
+                        };
+                        let mut buses: Vec<(glam::DVec3, f64, [f32; 6])> = self
+                            .player
+                            .as_ref()
+                            .and_then(|p| boxed(&p.vehicle))
+                            .into_iter()
+                            .collect();
+                        buses.extend(
+                            self.remotes
+                                .remotes
+                                .values()
+                                .filter_map(|rv| boxed(rv.vehicle())),
+                        );
                         if let Some(t) = self.traffic.as_ref() {
-                            buses.extend(t.cars.iter().filter(|c| c.is_bus() && (c.vehicle.position - cam.position).length() < 40.0).filter_map(|c| boxed(&c.vehicle)));
+                            buses.extend(
+                                t.cars
+                                    .iter()
+                                    .filter(|c| {
+                                        c.is_bus()
+                                            && (c.vehicle.position - cam.position).length() < 40.0
+                                    })
+                                    .filter_map(|c| boxed(&c.vehicle)),
+                            );
                         }
                         let __tr = Instant::now();
-                        self.rain.tick(if self.paused { 0.0 } else { dt }, cam.position, wind, scene, &buses);
-                        *self.profile.entry("lights.rain").or_default() += __tr.elapsed().as_secs_f64();
+                        self.rain.tick(
+                            if self.paused { 0.0 } else { dt },
+                            cam.position,
+                            wind,
+                            scene,
+                            &buses,
+                        );
+                        *self.profile.entry("lights.rain").or_default() +=
+                            __tr.elapsed().as_secs_f64();
                         // wheel splashes through the puddles enhanced.wgsl paints on wet roads
                         if kind == 1 {
                             if let Some(p) = self.player.as_ref() {
@@ -1420,7 +1863,12 @@ impl ApplicationHandler for App {
                                 .map(|h| h.take_footfalls())
                                 .unwrap_or_default();
                             // what the passengers say, where they stand
-                            for line in self.humans.as_mut().map(|h| h.take_voice_lines()).unwrap_or_default() {
+                            for line in self
+                                .humans
+                                .as_mut()
+                                .map(|h| h.take_voice_lines())
+                                .unwrap_or_default()
+                            {
                                 if let Some(clip) = a.load_clip(&line.path) {
                                     a.play(
                                         clip,
@@ -1429,8 +1877,10 @@ impl ApplicationHandler for App {
                                             pitch: 1.0,
                                             looping: false,
                                             position: Some(line.position.as_vec3()),
+                                            doppler: false,
                                             range: 3.0,
                                             lowpass_hz: 0.0,
+                                            important: false,
                                         },
                                     );
                                 }
@@ -1447,12 +1897,12 @@ impl ApplicationHandler for App {
                                 dt,
                                 (kind, rate),
                                 inside,
-                                engine_running,
                                 street_condition(wt, self.wetness),
                                 cam.position,
                                 &steps,
                             );
-                            *self.profile.entry("lights.ambience").or_default() += __tm.elapsed().as_secs_f64();
+                            *self.profile.entry("lights.ambience").or_default() +=
+                                __tm.elapsed().as_secs_f64();
                             if let Some(every) = debug_sound_every() {
                                 static LAST: std::sync::atomic::AtomicU32 =
                                     std::sync::atomic::AtomicU32::new(u32::MAX);
@@ -1490,7 +1940,8 @@ impl ApplicationHandler for App {
                         ),
                         None => w.timetable_boards.lock().clock = Some(self.clock.clone()),
                     }
-                    *self.profile.entry("scripted.boards").or_default() += __tb.elapsed().as_secs_f64();
+                    *self.profile.entry("scripted.boards").or_default() +=
+                        __tb.elapsed().as_secs_f64();
                     w.update_scripted(
                         r,
                         scene,
@@ -1504,7 +1955,11 @@ impl ApplicationHandler for App {
                 }
                 *self.profile.entry("scripted").or_default() += __t.elapsed().as_secs_f64();
                 // (the game menu's lines, for the interface below)
-                let menu_lines = if self.game_menu.is_some() { self.game_menu_items() } else { Vec::new() };
+                let menu_lines = if self.game_menu.is_some() {
+                    self.game_menu_items()
+                } else {
+                    Vec::new()
+                };
                 // HUD
                 if let (Some(hud), Some(r), Some(scene)) = (
                     self.hud.as_mut(),
@@ -1559,7 +2014,11 @@ impl ApplicationHandler for App {
                     let __t = Instant::now();
                     hud.update(r, scene, &[]);
                     let notes = lines;
-                    if let (Some(nav), Some(p), Some(s)) = (self.navigator.as_mut(), self.player.as_ref(), self.surface.as_ref()) {
+                    if let (Some(nav), Some(p), Some(s)) = (
+                        self.navigator.as_mut(),
+                        self.player.as_ref(),
+                        self.surface.as_ref(),
+                    ) {
                         if let Some(w) = self.world.as_ref() {
                             nav.start_map(w.clone());
                         }
@@ -1570,8 +2029,14 @@ impl ApplicationHandler for App {
                                 d.learn_places(places);
                             }
                         }
-                        let (line, terminus, stops, trip) = navigator::duty_parts(self.duty.as_ref());
-                        match (trip, self.schedule.as_ref(), self.traffic.as_ref(), self.world.as_ref()) {
+                        let (line, terminus, stops, trip) =
+                            navigator::duty_parts(self.duty.as_ref());
+                        match (
+                            trip,
+                            self.schedule.as_ref(),
+                            self.traffic.as_ref(),
+                            self.world.as_ref(),
+                        ) {
                             (Some((key, name)), Some(sch), _, _) if nav.map_net().is_some() => {
                                 if nav.wants_route(&key, 0) {
                                     let lanes = sch.trip_route_in(nav.map_net().unwrap(), &name);
@@ -1607,44 +2072,66 @@ impl ApplicationHandler for App {
                         // OMSI 2's dynamic route arrows over the junctions ahead
                         if nav.arrows {
                             if let Some(w) = self.world.as_ref() {
-                                let spots = nav.arrow_spots(self.traffic.as_ref().map(|t| &t.net), 350.0, &|id| w.object_positions.lock().get(&id).map(|p| (p.0, p.1[0])));
+                                let spots = nav.arrow_spots(
+                                    self.traffic.as_ref().map(|t| &t.net),
+                                    350.0,
+                                    &|id| w.object_positions.lock().get(&id).map(|p| (p.0, p.1[0])),
+                                );
                                 self.route_arrows.tick(dt, w, r, scene, &spots);
                             }
                         }
                     }
                     if let (Some(ui), Some(s)) = (self.ui.as_mut(), self.surface.as_ref()) {
-                        let scale = self.window.as_ref().map(|w| w.scale_factor() as f32).unwrap_or(1.0);
+                        let scale = self
+                            .window
+                            .as_ref()
+                            .map(|w| w.scale_factor() as f32)
+                            .unwrap_or(1.0);
                         let (w, h) = (s.config.width as f32, s.config.height as f32);
                         self.remotes.chat.disabled = !self.settings.chat;
-                        let chat = (self.lan.is_some() && self.settings.chat).then(|| ui::ChatView {
-                            lines: &self.remotes.chat.lines,
-                            typing: self.remotes.chat.typing.as_deref(),
-                            error: self.remotes.chat.error(),
-                        });
+                        let chat =
+                            (self.lan.is_some() && self.settings.chat).then(|| ui::ChatView {
+                                lines: &self.remotes.chat.lines,
+                                typing: self.remotes.chat.typing.as_deref(),
+                                error: self.remotes.chat.error(),
+                            });
                         ui.chat.hidden = self.remotes.chat.hidden;
                         let tags = if self.settings.name_tags {
-                            self.camera.as_ref().map(|c| lan::name_tags(&self.remotes, c, w, h)).unwrap_or_default()
+                            self.camera
+                                .as_ref()
+                                .map(|c| lan::name_tags(&self.remotes, c, w, h))
+                                .unwrap_or_default()
                         } else {
                             Vec::new()
                         };
                         // the vehicle chooser shows its vehicles in the menu's place (the menu
                         // scrolls a long list)
                         let chooser_list = self.admin_list.as_ref().unwrap_or(&self.vehicle_list);
-                        let (chooser_items, chooser_sel): (Vec<(&str, &str)>, Option<usize>) = match self.chooser {
-                            Some(sel) => {
-                                let items = chooser_list.iter().map(|(name, path)| (path.as_str(), name.as_str())).collect();
-                                (items, Some(sel))
-                            }
-                            None => (Vec::new(), None),
-                        };
+                        let (chooser_items, chooser_sel): (Vec<(&str, &str)>, Option<usize>) =
+                            match self.chooser {
+                                Some(sel) => {
+                                    let items = chooser_list
+                                        .iter()
+                                        .map(|(name, path)| (path.as_str(), name.as_str()))
+                                        .collect();
+                                    (items, Some(sel))
+                                }
+                                None => (Vec::new(), None),
+                            };
                         let frame = ui::Frame {
                             scale,
                             width: w,
                             height: h,
                             cursor: self.cursor,
                             vr: {
-                                #[cfg(windows)] { self.vr.is_some() }
-                                #[cfg(not(windows))] { false }
+                                #[cfg(windows)]
+                                {
+                                    self.vr.is_some()
+                                }
+                                #[cfg(not(windows))]
+                                {
+                                    false
+                                }
                             },
                             tooltip: tooltip.filter(|_| self.settings.tooltips && !self.dragging),
                             notes: &notes,
@@ -1655,9 +2142,31 @@ impl ApplicationHandler for App {
                                 None => self.game_menu.map(|k| (k, &menu_lines[..])),
                             },
                             menu_top: self.menu_top,
-                            timetable: self.timetable.then(|| timetable_rows(self.duty.as_ref(), self.player.as_ref().map(|p| p.vehicle.host.tt_delay as f64))).flatten(),
-                            info: self.info_bar.then(|| info_line(&self.clock, self.player.as_ref(), self.duty.as_ref())),
-                            tutorial: self.tutorial.as_ref().filter(|t| !t.hidden).and_then(|t| t.page().map(|p| (p.title.as_str(), p.text.as_str(), p.image.as_deref(), t.at, t.pages.len()))),
+                            timetable: self
+                                .timetable
+                                .then(|| {
+                                    timetable_rows(
+                                        self.duty.as_ref(),
+                                        self.player
+                                            .as_ref()
+                                            .map(|p| p.vehicle.host.tt_delay as f64),
+                                    )
+                                })
+                                .flatten(),
+                            info: self.info_bar.then(|| {
+                                info_line(&self.clock, self.player.as_ref(), self.duty.as_ref())
+                            }),
+                            tutorial: self.tutorial.as_ref().filter(|t| !t.hidden).and_then(|t| {
+                                t.page().map(|p| {
+                                    (
+                                        p.title.as_str(),
+                                        p.text.as_str(),
+                                        p.image.as_deref(),
+                                        t.at,
+                                        t.pages.len(),
+                                    )
+                                })
+                            }),
                             chat,
                             tags,
                             inspector: None,
@@ -1665,6 +2174,18 @@ impl ApplicationHandler for App {
                         ui.draw(r, scene, &frame, dt);
                     }
                     *self.profile.entry("hud").or_default() += __t.elapsed().as_secs_f64();
+                }
+
+                #[cfg(not(target_os = "android"))]
+                if self.inspector_active {
+                    let snapshot = self.inspector_snapshot();
+                    if let (Some(window), Some(inspector)) =
+                        (self.window.as_ref(), self.inspector_ui.as_mut())
+                    {
+                        if inspector.begin_frame(window) {
+                            inspector.draw(window, &snapshot);
+                        }
+                    }
                 }
 
                 let mut lighting = match self.weather.as_ref() {
@@ -1685,9 +2206,17 @@ impl ApplicationHandler for App {
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(self.wetness);
-                lighting.inside = match self.inside_remote.and_then(|id| self.remotes.remotes.get(&id)) {
+                lighting.inside = match self
+                    .inside_remote
+                    .and_then(|id| self.remotes.remotes.get(&id))
+                {
                     // (in another player's bus: its box is the one the camera is in)
-                    Some(rv) => rv.vehicle().ty.def.bounding_box.map(|bb| (rv.vehicle().position, rv.vehicle().heading, bb)),
+                    Some(rv) => rv
+                        .vehicle()
+                        .ty
+                        .def
+                        .bounding_box
+                        .map(|bb| (rv.vehicle().position, rv.vehicle().heading, bb)),
                     None => self.player.as_ref().and_then(|p| {
                         p.vehicle
                             .ty
@@ -1725,16 +2254,19 @@ impl ApplicationHandler for App {
                         ) {
                             Ok(mut px) => match {
                                 // (with the on-screen controls, when there are)
-                                if let Some(over) = self.touch.picture(r, s.config.width, s.config.height) {
+                                if let Some(over) =
+                                    self.touch.picture(r, s.config.width, s.config.height)
+                                {
                                     crate::touch::composite(&mut px, &over);
                                 }
                                 image::save_buffer(
-                                &path,
-                                &px,
-                                s.config.width,
-                                s.config.height,
-                                image::ColorType::Rgba8,
-                            ) } {
+                                    &path,
+                                    &px,
+                                    s.config.width,
+                                    s.config.height,
+                                    image::ColorType::Rgba8,
+                                )
+                            } {
                                 Ok(()) => log::info!(
                                     "input script: window picture written to {}",
                                     path.display()
@@ -1819,6 +2351,10 @@ impl ApplicationHandler for App {
                     *self.profile.entry("acquire").or_default() += __t.elapsed().as_secs_f64();
                     if frame.is_none() {
                         self.hidden_frames += 1;
+                        #[cfg(not(target_os = "android"))]
+                        if let Some(inspector) = self.inspector_ui.as_mut() {
+                            abort_inspector_frame_if_surface_unavailable(inspector, false);
+                        }
                     }
                     let view = frame
                         .as_ref()
@@ -1834,9 +2370,17 @@ impl ApplicationHandler for App {
                         // Procity) at 25 fps each was redrawn three times a second, and the
                         // street jerked past in them - up to two a frame then (each costs a
                         // few milliseconds of the frame).
-                        let mirrors = self.player.as_ref().map(|p| p.vehicle.ty.def.cameras_reflexion.len()).unwrap_or(0) as f32;
-                        let rate = {
-                            #[cfg(windows)]
+                        if self.settings.mirror_size == 0 {
+                            self.mirror_budget = 0.0;
+                            self.mirrors_seen = 0;
+                        } else {
+                            let mirrors = self
+                            .player
+                            .as_ref()
+                            .map(|p| p.vehicle.ty.def.cameras_reflexion.len())
+                            .unwrap_or(0) as f32;
+                            let rate = {
+                                #[cfg(windows)]
                             let vr_active = self.vr.is_some();
                             #[cfg(not(windows))]
                             let vr_active = false;
@@ -1850,20 +2394,34 @@ impl ApplicationHandler for App {
                                     .filter(|rate| rate.is_finite() && *rate >= 0.0)
                                     .unwrap_or(self.settings.vr_mirror_rate)
                             } else {
-                                MIRROR_RATE.max(mirrors * MIRROR_MIN_HZ)
+                                MIRROR_RATE
+                                    .max(mirrors * MIRROR_MIN_HZ)
+                                    .min(MIRROR_MAX_HZ * self.mirrors_seen.max(1) as f32)
                             }
                         };
-                        self.mirror_budget = (self.mirror_budget + raw_dt.min(0.1) * rate).min(2.5);
+                            self.mirror_budget = (self.mirror_budget + raw_dt.min(0.1) * rate).min(2.5);
                         let mut drawn = 0;
                         // (in the cab, and from outside too while the bus is near: its
                         // mirrors are seen from the pavement and stood frozen)
-                        let near = self.player.as_ref().zip(self.camera.as_ref()).is_some_and(|(p, c)| (p.vehicle.position - c.position).length() < 12.0);
-                        while (self.in_cab || near) && self.mirror_budget >= 1.0 && drawn < 2 {
-                            let (Some(w), Some(p)) = (self.world.as_ref(), self.player.as_ref()) else { break };
+                        let near =
+                            self.player
+                                .as_ref()
+                                .zip(self.camera.as_ref())
+                                .is_some_and(|(p, c)| {
+                                    (p.vehicle.position - c.position).length() < 12.0
+                                });
+                        while (self.in_cab || near)
+                            && self.mirror_budget >= 1.0
+                            && drawn < self.mirrors_seen.clamp(1, 2)
+                        {
+                            let (Some(w), Some(p)) = (self.world.as_ref(), self.player.as_ref())
+                            else {
+                                break;
+                            };
                             self.mirror_budget -= 1.0;
                             drawn += 1;
                             self.mirror_turn = self.mirror_turn.wrapping_add(1);
-                            render_mirrors(
+                            self.mirrors_seen = render_mirrors(
                                 r,
                                 scene,
                                 w,
@@ -1873,6 +2431,7 @@ impl ApplicationHandler for App {
                                 Some((*cam, s.config.width as f32 / s.config.height.max(1) as f32)),
                             );
                         }
+                        }
                         *self.profile.entry("mirrors").or_default() += __t.elapsed().as_secs_f64();
                         let __t = Instant::now();
                         #[cfg(windows)]
@@ -1881,9 +2440,14 @@ impl ApplicationHandler for App {
                         let mirrored = false;
                         #[cfg(windows)]
                         if let Some(vr) = self.vr.as_mut() {
-                            let menu_range = self.ui.as_ref().map(|u| u.menu_overlay_range.clone()).unwrap_or(0..0);
+                            let menu_range = self
+                                .ui
+                                .as_ref()
+                                .map(|u| u.menu_overlay_range.clone())
+                                .unwrap_or(0..0);
                             let cursor_overlay = self.ui.as_ref().and_then(|u| u.vr_cursor_overlay);
-                            let tooltip_overlay = self.ui.as_ref().and_then(|u| u.vr_tooltip_overlay);
+                            let tooltip_overlay =
+                                self.ui.as_ref().and_then(|u| u.vr_tooltip_overlay);
                             match vr.render(
                                 r,
                                 scene,
@@ -1895,7 +2459,9 @@ impl ApplicationHandler for App {
                                 cursor_overlay,
                                 tooltip_overlay,
                                 self.cursor,
-                                self.player.as_ref().map(|p| (p.vehicle.position, p.vehicle.body_rotation())),
+                                self.player
+                                    .as_ref()
+                                    .map(|p| (p.vehicle.position, p.vehicle.body_rotation())),
                                 self.settings.vr_head_smoothing_ms,
                                 !self.mouse_drive,
                                 self.vr_zoom_active,
@@ -1919,6 +2485,42 @@ impl ApplicationHandler for App {
                         }
                         // the on-screen controls over the picture (a phone)
                         self.touch.render(r, &view, s.config.width, s.config.height);
+                        #[cfg(not(target_os = "android"))]
+                        if self.inspector_active && frame.is_some() {
+                            if let Some(inspector) = self.inspector_ui.as_mut() {
+                                let mut encoder = r.device.create_command_encoder(
+                                    &wgpu::CommandEncoderDescriptor {
+                                        label: Some("imgui inspector"),
+                                    },
+                                );
+                                let mut pass =
+                                    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                        label: Some("imgui inspector pass"),
+                                        color_attachments: &[Some(
+                                            wgpu::RenderPassColorAttachment {
+                                                view: &view,
+                                                depth_slice: None,
+                                                resolve_target: None,
+                                                ops: wgpu::Operations {
+                                                    load: wgpu::LoadOp::Load,
+                                                    store: wgpu::StoreOp::Store,
+                                                },
+                                            },
+                                        )],
+                                        depth_stencil_attachment: None,
+                                        timestamp_writes: None,
+                                        occlusion_query_set: None,
+                                        multiview_mask: None,
+                                    });
+                                if let Err(error) =
+                                    inspector.render(win, &r.queue, &r.device, &mut pass)
+                                {
+                                    log::warn!("ImGui inspector backend unavailable: {}", error.0);
+                                }
+                                drop(pass);
+                                r.queue.submit(std::iter::once(encoder.finish()));
+                            }
+                        }
                         *self.profile.entry("render").or_default() += __t.elapsed().as_secs_f64();
                         if omsi_cfg::env::var_os("OMSI_PROFILE_GPU").is_some() {
                             // wait for the GPU here, so that its time shows as a stage of its own
@@ -1974,7 +2576,13 @@ impl ApplicationHandler for App {
                     // machine (with V-sync off and no limit an M4 drew 300 frames a second in the
                     // depot and ran hot); 1000 and more = no limit at all
                     let max_fps = if max_fps == 0 {
-                        self.window.as_ref().and_then(|w| w.current_monitor()).and_then(|m| m.refresh_rate_millihertz()).map(|mhz| (mhz as f64 / 1000.0).round() as u32).filter(|r| *r >= 30).unwrap_or(120)
+                        self.window
+                            .as_ref()
+                            .and_then(|w| w.current_monitor())
+                            .and_then(|m| m.refresh_rate_millihertz())
+                            .map(|mhz| (mhz as f64 / 1000.0).round() as u32)
+                            .filter(|r| *r >= 30)
+                            .unwrap_or(120)
                     } else if max_fps >= 1000 {
                         0
                     } else {
@@ -2075,6 +2683,8 @@ impl ApplicationHandler for App {
                     }
                     win.request_redraw();
                 }
+                #[cfg(not(target_os = "android"))]
+                self.process_inspector_commands();
                 if reconfigure {
                     // the drawable went away under us (display change, lost surface)
                     if let (Some(s), Some(r), Some(win)) = (
@@ -2105,7 +2715,24 @@ impl ApplicationHandler for App {
                 controllers.refresh_devices();
             }
         }
+        #[cfg(not(target_os = "android"))]
+        let imgui_captures_pointer = self
+            .inspector_ui
+            .as_mut()
+            .map(|ui| {
+                let capture = effective_imgui_capture(ui.input_capture, self.inspector_active);
+                if !self.inspector_active {
+                    ui.clear_input_capture();
+                }
+                capture.blocks_pointer()
+            })
+            .unwrap_or(false);
+        #[cfg(target_os = "android")]
+        let imgui_captures_pointer = false;
         if let DeviceEvent::MouseMotion { delta } = event {
+            if imgui_captures_pointer {
+                return;
+            }
             if self.mouse_look {
                 self.look_by(delta.0 as f32 * 0.15, delta.1 as f32 * 0.15);
             } else if self.mouse_drive && self.game_menu.is_none() {
@@ -2136,6 +2763,14 @@ impl ApplicationHandler for App {
     /// quit signal): the session is written and the LAN peers hear that we left, before
     /// anything else is torn down (Cmd+Q ends the process without returning from the loop).
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        #[cfg(not(target_os = "android"))]
+        if let Some(inspector) = self.inspector_ui.as_ref() {
+            if let Ok(path) = crate::inspector::persistence::InspectorLayout::config_path() {
+                if let Err(error) = inspector.layout.save(&path) {
+                    log::debug!("could not save ImGui inspector layout: {error}");
+                }
+            }
+        }
         self.finish_session();
         if let Some(lan) = self.lan.take() {
             // dropping the session says goodbye (BYE) to the host or the players
@@ -2186,12 +2821,12 @@ impl App {
         // movement. Knobs, the sun blind and the ignition key are far easier to
         // set that way than by holding the button down and moving the mouse.
         if self.hover.is_some() && self.view != "free" {
-            let ray = self.camera.as_ref().zip(self.surface.as_ref())
+            let ray = self
+                .camera
+                .as_ref()
+                .zip(self.surface.as_ref())
                 .map(|(cam, s)| self.cockpit_cursor_ray(cam, (s.config.width, s.config.height)));
-            if let (Some(p), Some((o, d, spread))) = (
-                self.player.as_mut(),
-                ray,
-            ) {
+            if let (Some(p), Some((o, d, spread))) = (self.player.as_mut(), ray) {
                 if p.pick(o, d, spread).is_some() {
                     // a notch is worth a good push of the mouse: the scripts divide
                     // the movement by 10 (the ignition key), 200 (the parking brake)
@@ -2201,7 +2836,8 @@ impl App {
                 }
             }
         }
-        let ctrl = self.keys.contains(&KeyCode::ControlLeft) || self.keys.contains(&KeyCode::ControlRight);
+        let ctrl =
+            self.keys.contains(&KeyCode::ControlLeft) || self.keys.contains(&KeyCode::ControlRight);
         if self.view == "outside" && self.player.is_some() && ctrl {
             // Ctrl+wheel: the outside camera stays where it is and narrows its field of view
             // (a telephoto; OMSI's own zoom there only moves the camera, as the wheel does)
@@ -2223,7 +2859,11 @@ impl App {
 
     /// The left mouse button (or a finger's tap) where the cursor is.
     pub(crate) fn left_button(&mut self, event_loop: &ActiveEventLoop, pressed: bool) {
-        let state = if pressed { ElementState::Pressed } else { ElementState::Released };
+        let state = if pressed {
+            ElementState::Pressed
+        } else {
+            ElementState::Released
+        };
         // placing a vehicle: a click sets it down
         if self.placing.is_some() && self.game_menu.is_none() {
             if state == ElementState::Pressed {
@@ -2235,7 +2875,12 @@ impl App {
         if self.game_menu.is_some() {
             if state == ElementState::Pressed {
                 let hit = self.ui.as_ref().and_then(|u| {
-                    u.menu_rects.iter().position(|r| self.cursor.0 >= r[0] && self.cursor.0 <= r[2] && self.cursor.1 >= r[1] && self.cursor.1 <= r[3])
+                    u.menu_rects.iter().position(|r| {
+                        self.cursor.0 >= r[0]
+                            && self.cursor.0 <= r[2]
+                            && self.cursor.1 >= r[1]
+                            && self.cursor.1 <= r[3]
+                    })
                 });
                 if let Some(k) = hit {
                     let k = k + self.ui.as_ref().map(|u| u.menu_start).unwrap_or(0);
@@ -2253,14 +2898,27 @@ impl App {
 
 /// OMSI's timetable window: the current trip's stops with their times, the ones served
 /// greyed, the next one marked.
-fn timetable_rows(duty: Option<&crate::schedule::PlayerDuty>, delay: Option<f64>) -> Option<(String, Vec<(String, String, u8)>)> {
+fn timetable_rows(
+    duty: Option<&crate::schedule::PlayerDuty>,
+    delay: Option<f64>,
+) -> Option<(String, Vec<(String, String, u8)>)> {
     let d = duty?;
     let trip = d.trips.get(d.trip_index)?;
-    let hm = |t: f64| format!("{:02}:{:02}", ((t / 3600.0) as i64).rem_euclid(24), ((t % 3600.0) / 60.0) as i64);
+    let hm = |t: f64| {
+        format!(
+            "{:02}:{:02}",
+            ((t / 3600.0) as i64).rem_euclid(24),
+            ((t % 3600.0) / 60.0) as i64
+        )
+    };
     let delay = delay.unwrap_or(0.0);
     let title = format!(
         "{} › {}   {}{}:{:02}   ({}/{})",
-        if trip.line.trim().is_empty() { d.line.trim() } else { trip.line.trim() },
+        if trip.line.trim().is_empty() {
+            d.line.trim()
+        } else {
+            trip.line.trim()
+        },
         trip.terminus.trim(),
         if delay < 0.0 { "−" } else { "+" },
         (delay.abs() / 60.0) as i64,
@@ -2277,37 +2935,82 @@ fn timetable_rows(duty: Option<&crate::schedule::PlayerDuty>, delay: Option<f64>
         .enumerate()
         .filter(|(_, s)| s.stops)
         .map(|(k, s)| {
-            let time = if Some(k) == last { hm(s.arr) } else if s.dep - s.arr >= 60.0 { format!("{}-{}", hm(s.arr), &hm(s.dep)[3..]) } else { hm(s.dep) };
-            (s.name.trim().to_string(), time, if k < d.next_stop { 0 } else if k == d.next_stop { 1 } else { 2 })
+            let time = if Some(k) == last {
+                hm(s.arr)
+            } else if s.dep - s.arr >= 60.0 {
+                format!("{}-{}", hm(s.arr), &hm(s.dep)[3..])
+            } else {
+                hm(s.dep)
+            };
+            (
+                s.name.trim().to_string(),
+                time,
+                if k < d.next_stop {
+                    0
+                } else if k == d.next_stop {
+                    1
+                } else {
+                    2
+                },
+            )
         })
         .collect();
     // the trip after this one
     if let Some(next) = d.trips.get(d.trip_index + 1) {
-        let name = format!("› {} {}", if next.line.trim().is_empty() { d.line.trim() } else { next.line.trim() }, next.terminus.trim());
+        let name = format!(
+            "› {} {}",
+            if next.line.trim().is_empty() {
+                d.line.trim()
+            } else {
+                next.line.trim()
+            },
+            next.terminus.trim()
+        );
         rows.push((name, hm(next.departure), 0));
     }
     Some((title, rows))
 }
 
 /// OMSI's information bar: the time, the speed, and the trip with its next stop and delay.
-fn info_line(clock: &omsi_sim::SimClock, player: Option<&Player>, duty: Option<&crate::schedule::PlayerDuty>) -> String {
+fn info_line(
+    clock: &omsi_sim::SimClock,
+    player: Option<&Player>,
+    duty: Option<&crate::schedule::PlayerDuty>,
+) -> String {
     let t = clock.time;
-    let mut parts = vec![format!("{:02}:{:02}:{:02}", ((t / 3600.0) as i64).rem_euclid(24), ((t % 3600.0) / 60.0) as i64, (t % 60.0) as i64)];
+    let mut parts = vec![format!(
+        "{:02}:{:02}:{:02}",
+        ((t / 3600.0) as i64).rem_euclid(24),
+        ((t % 3600.0) / 60.0) as i64,
+        (t % 60.0) as i64
+    )];
     if let Some(p) = player {
-        parts.push(format!("{:.0} km/h", p.vehicle.physics.velocity_kmh().abs()));
+        parts.push(format!(
+            "{:.0} km/h",
+            p.vehicle.physics.velocity_kmh().abs()
+        ));
         // the tank as the bus's script says it (OMSI's RL_TankContent: tank_percent)
         if let Some(tank) = p.vehicle.var("tank_percent").filter(|v| v.is_finite()) {
             parts.push(format!("tank {:.0} %", (tank * 100.0).round()));
         }
         if let Some(d) = duty {
             if let Some(trip) = d.trips.get(d.trip_index) {
-                let line = if trip.line.trim().is_empty() { d.line.trim() } else { trip.line.trim() };
+                let line = if trip.line.trim().is_empty() {
+                    d.line.trim()
+                } else {
+                    trip.line.trim()
+                };
                 parts.push(format!("{line} › {}", trip.terminus.trim()));
                 if let Some(s) = trip.stops.get(d.next_stop) {
                     parts.push(format!("next: {}", s.name.trim()));
                 }
                 let delay = p.vehicle.host.tt_delay;
-                parts.push(format!("{}{}:{:02}", if delay < 0.0 { "−" } else { "+" }, (delay.abs() / 60.0) as i64, (delay.abs() % 60.0) as i64));
+                parts.push(format!(
+                    "{}{}:{:02}",
+                    if delay < 0.0 { "−" } else { "+" },
+                    (delay.abs() / 60.0) as i64,
+                    (delay.abs() % 60.0) as i64
+                ));
             }
         }
     }
@@ -2323,5 +3026,65 @@ mod governor_tests {
         assert!(render_scale_step(35.0, 0.1) > 0.0);
         assert!(render_scale_step(35.0, 0.6) < 0.0);
         assert!(render_scale_step(60.0, 0.6) > 0.0);
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+#[cfg(test)]
+mod imgui_capture_tests {
+    use super::{
+        abort_inspector_frame_if_surface_unavailable, effective_imgui_capture,
+        imgui_keyboard_blocks_event,
+    };
+    use crate::inspector::imgui_inspector::{InputCaptureState, InspectorUi};
+
+    #[test]
+    fn inactive_inspector_disables_stale_capture_before_game_input() {
+        let stale = InputCaptureState {
+            pointer: true,
+            keyboard: true,
+        };
+        assert_eq!(
+            effective_imgui_capture(stale, false),
+            InputCaptureState::default()
+        );
+    }
+
+    #[test]
+    fn inspector_toggle_remains_available_when_keyboard_is_captured() {
+        let captured = InputCaptureState {
+            pointer: false,
+            keyboard: true,
+        };
+        assert!(!imgui_keyboard_blocks_event(captured, true, true));
+        assert!(imgui_keyboard_blocks_event(captured, true, false));
+        assert!(!imgui_keyboard_blocks_event(captured, false, false));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn no_surface_path_aborts_inspector_and_clears_capture() {
+        let mut inspector = InspectorUi::new();
+        inspector.input_capture = InputCaptureState {
+            pointer: true,
+            keyboard: true,
+        };
+        abort_inspector_frame_if_surface_unavailable(&mut inspector, false);
+        assert_eq!(inspector.input_capture, InputCaptureState::default());
+    }
+
+    #[test]
+    fn device_mouse_motion_uses_pointer_capture_only() {
+        let keyboard = InputCaptureState {
+            pointer: false,
+            keyboard: true,
+        };
+        assert!(!effective_imgui_capture(keyboard, true).blocks_pointer());
+
+        let pointer = InputCaptureState {
+            pointer: true,
+            keyboard: false,
+        };
+        assert!(effective_imgui_capture(pointer, true).blocks_pointer());
     }
 }

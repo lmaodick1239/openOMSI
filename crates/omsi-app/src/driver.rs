@@ -86,7 +86,7 @@ struct Wheel {
     tube: f32,
 }
 
-pub(crate) struct DriverFigure {
+pub struct DriverFigure {
     ty: Arc<HumanType>,
     /// The figure's meshes with the fingers closed round the rim (`curl_hands`).
     curled: Vec<(Vec<Vec3>, Vec<Vec3>)>,
@@ -108,6 +108,9 @@ pub(crate) struct DriverFigure {
     hip: Vec3,
     floor: Vec3,
     heading: f32,
+    /// The seat's four `[interiorlight]`s (see `PassPos::illumination`): the lamps that
+    /// light the figure, as Omsi.exe lights a seated person (0x62f7b8).
+    lamps: [i32; 4],
     wheel: Option<Wheel>,
     /// The sign that turns the wheel variable's angle into the angle seen from the seat
     /// (found by comparing it with the mesh as turned; 0 until then).
@@ -116,6 +119,8 @@ pub(crate) struct DriverFigure {
     /// what it is with the hands at their places.
     lean: f32,
     base_lean: f32,
+    /// Whether hands/arms should remain visible in cab (first-person) view behind settings.
+    pub show_hands_in_cab: bool,
     shown: bool,
     /// Posed at least once (the first pose is settled, not eased in from standing).
     settled: bool,
@@ -216,7 +221,7 @@ impl DriverFigure {
     /// installed.
     /// `pick` chooses among the map's drivers (`drivers.txt`): 0 for the player, a vehicle's
     /// own number for the traffic.
-    pub(crate) fn new(
+    pub fn new(
         world: &crate::scene::World,
         renderer: &Renderer,
         scene: &mut Scene,
@@ -229,7 +234,7 @@ impl DriverFigure {
 
     /// The driver as another game has them (LAN): the figure it names by its `.hum` file
     /// (relative to the installation), else one of the map's as `new` picks.
-    pub(crate) fn new_named(
+    pub fn new_named(
         world: &crate::scene::World,
         renderer: &Renderer,
         scene: &mut Scene,
@@ -309,10 +314,12 @@ impl DriverFigure {
             hip: Vec3::ZERO,
             floor: Vec3::ZERO,
             heading: 0.0,
+            lamps: [-1; 4],
             wheel: None,
             sign: 0.0,
             lean: 0.0,
             base_lean: 0.0,
+            show_hands_in_cab: false,
             shown: true,
             settled: false,
             slide: 0.0,
@@ -334,7 +341,7 @@ impl DriverFigure {
 
     /// Put the figure into (another) vehicle's driver's seat: `false` when it has none.
     /// The traffic keeps a few figures and moves them from bus to bus.
-    pub(crate) fn attach(&mut self, v: &VehicleInstance) -> bool {
+    pub fn attach(&mut self, v: &VehicleInstance) -> bool {
         match seat_of(v) {
             Some(seat) => {
                 self.seat_in(v, seat);
@@ -354,6 +361,7 @@ impl DriverFigure {
             hip.z - seat.height.max(0.3),
         );
         self.heading = seat.rot;
+        self.lamps = seat.illumination;
         self.wheel = find_wheel(v, hip);
         let r = self.wheel.as_ref().map(|w| w.tube + FINGER_HALF).unwrap_or(GRIP_RADIUS);
         if (r - self.grip_radius).abs() > 1e-4 {
@@ -386,7 +394,7 @@ impl DriverFigure {
     }
 
     /// Hide the figure (kept for another bus).
-    pub(crate) fn hide(&mut self, renderer: &Renderer, scene: &mut Scene) {
+    pub fn hide(&mut self, renderer: &Renderer, scene: &mut Scene) {
         for (_, inst) in &self.meshes {
             renderer.set_params(scene, *inst, &[], false, &[]);
         }
@@ -396,16 +404,21 @@ impl DriverFigure {
     /// Turn the hands with the wheel, pose, skin and place the figure; `show` false hides it,
     /// `mirror_only` keeps it out of the window's picture but in the mirrors (the driver's
     /// own view: OMSI shows the driver in the mirrors while one looks from his seat).
-    pub(crate) fn update(&mut self, renderer: &Renderer, scene: &mut Scene, v: &VehicleInstance, dt: f32, show: bool, mirror_only: bool) {
+    pub fn update(&mut self, renderer: &Renderer, scene: &mut Scene, v: &VehicleInstance, render: &crate::scene::VehicleRender, dt: f32, show: bool, mirror_only: bool) {
         if show != self.shown {
             for (_, inst) in &self.meshes {
                 renderer.set_params(scene, *inst, &[], show, &[]);
             }
             self.shown = show;
         }
+
+        // (in the cab with the hands shown: the figure is drawn in the window's picture too,
+        // with everything but the hands folded away, see the skinning below)
+        let force_visible_in_cab = mirror_only && self.show_hands_in_cab;
         for (_, inst) in &self.meshes {
-            renderer.set_mirror_only(scene, *inst, mirror_only);
+            renderer.set_mirror_only(scene, *inst, if force_visible_in_cab { false } else { mirror_only });
         }
+
         if !show {
             return;
         }
@@ -458,7 +471,7 @@ impl DriverFigure {
             self.settled = true;
             self.base_lean = self.lean;
             log::debug!("driver: seat slid {:.2} m forward and {:.0} deg of lean to reach the wheel", self.slide, self.lean);
-            return self.update(renderer, scene, v, dt, show, mirror_only);
+            return self.update(renderer, scene, v, render, dt, show, mirror_only);
         }
         let targets = self.hand_targets(v, dt);
         if let (Some(t), true) = (&targets, omsi_cfg::env::var_os("OMSI_DEBUG_DRIVER").is_some()) {
@@ -535,22 +548,45 @@ impl DriverFigure {
             } else {
                 skin_from(m, &self.curled[k], &posed.bones, pos, nrm);
             }
+
+            // In the cab view only the hands show: every other vertex is folded onto the
+            // nearer wrist (the middle of that hand's vertices), so that the body's triangles
+            // shrink to nothing and those joining a hand close it at the wrist. (Folded onto
+            // the figure's origin, the triangles from the wrists stretched to the seat.)
+            if mirror_only && self.show_hands_in_cab {
+                let mut sum = [Vec3::ZERO; 2];
+                let mut n = [0.0f32; 2];
+                for (i, side) in self.hand_of[k].iter().enumerate() {
+                    if *side >= 0 && i < pos.len() {
+                        sum[*side as usize] += pos[i];
+                        n[*side as usize] += 1.0;
+                    }
+                }
+                let wrist: Vec<Vec3> = (0..2).filter(|h| n[*h] > 0.0).map(|h| sum[h] / n[h]).collect();
+                let fold = wrist.first().copied().or_else(|| pos.first().copied()).unwrap_or(Vec3::ZERO);
+                for (i, side) in self.hand_of[k].iter().enumerate() {
+                    if *side < 0 && i < pos.len() {
+                        pos[i] = wrist.iter().copied().min_by(|a, b| a.distance_squared(pos[i]).total_cmp(&b.distance_squared(pos[i]))).unwrap_or(fold);
+                    }
+                }
+            }
+
             renderer.update_mesh(scene, self.meshes[k].0, pos, nrm, &m.data.uvs);
         }
         let body = v.body_rotation();
         let at = v.position + body.transform_point3(floor).as_dvec3();
         let xf = body * Mat4::from_rotation_z(-h);
-        // lit by the lamps near the seat as they are (the driver's lamp, the saloon lamps
-        // over the front door), not by the brightest lamp anywhere in the bus: taken as the
-        // saloon's strongest light at full strength the driver glowed evenly all night as
-        // soon as any circuit was on, twice as bright as the passengers (who get half)
-        let interior = v.interior_light_at(self.hip + Vec3::new(0.0, 0.0, 0.55)) * 0.5;
+        // lit by the seat's four lamps as Omsi.exe lights a seated person (0x62f7b8 enables
+        // them as Direct3D lights for the figure): the bus meshes' point lights, coloured,
+        // falling off with distance and only on the side facing them. (A flat warm term of
+        // the lamps' sum lit the figure evenly on every side, glowing in the dark cab.)
+        let (first, count) = render.seat_lamps(v.ty.model.interior_lights.len(), &self.lamps).unwrap_or((0, 0));
         for (_, inst) in &self.meshes {
             renderer.set_transform(scene, *inst, at, xf);
-            renderer.set_interior(scene, *inst, interior);
+            renderer.set_interior(scene, *inst, 0.0);
+            renderer.set_interior_lamps(scene, *inst, first, count);
         }
     }
-
 }
 
 impl DriverFigure {
@@ -807,21 +843,25 @@ impl DriverFigure {
     }
 }
 
-/// The vehicle's first `[drivpos]` (its passenger cabin is read once per type).
+/// The vehicle's first `[drivpos]`.
 fn seat_of(v: &VehicleInstance) -> Option<omsi_vehicle::cabin::PassPos> {
-    static SEATS: std::sync::Mutex<Option<std::collections::HashMap<std::path::PathBuf, Option<omsi_vehicle::cabin::PassPos>>>> =
+    cabin_of(&v.ty.def)?.driver_positions.first().cloned()
+}
+
+/// A vehicle type's passenger cabin, read once per type.
+pub fn cabin_of(def: &omsi_vehicle::Vehicle) -> Option<Arc<omsi_vehicle::PassengerCabin>> {
+    static CABINS: std::sync::Mutex<Option<std::collections::HashMap<std::path::PathBuf, Option<Arc<omsi_vehicle::PassengerCabin>>>>> =
         std::sync::Mutex::new(None);
-    let key = v.ty.def.path.clone();
-    let mut seats = SEATS.lock().unwrap_or_else(|e| e.into_inner());
-    seats
+    let mut cabins = CABINS.lock().unwrap_or_else(|e| e.into_inner());
+    cabins
         .get_or_insert_with(Default::default)
-        .entry(key)
+        .entry(def.path.clone())
         .or_insert_with(|| {
-            let rel = v.ty.def.passenger_cabin.as_ref()?;
-            let cabin = omsi_vehicle::PassengerCabin::load(&omsi_cfg::resolve_path(v.ty.def.dir(), rel))
+            let rel = def.passenger_cabin.as_ref()?;
+            omsi_vehicle::PassengerCabin::load(&omsi_cfg::resolve_path(def.dir(), rel))
                 .map_err(|e| log::warn!("driver: {e}"))
-                .ok()?;
-            cabin.driver_positions.first().cloned()
+                .ok()
+                .map(Arc::new)
         })
         .clone()
 }
@@ -887,7 +927,7 @@ fn driver_type(world: &crate::scene::World, pick: u64) -> Option<Arc<HumanType>>
 }
 
 /// A driver figure's type, read once per file.
-pub(crate) fn cached_type(path: &std::path::Path) -> Option<Arc<HumanType>> {
+pub fn cached_type(path: &std::path::Path) -> Option<Arc<HumanType>> {
     static TYPES: std::sync::Mutex<Option<std::collections::HashMap<std::path::PathBuf, Option<Arc<HumanType>>>>> =
         std::sync::Mutex::new(None);
     let path = path.to_path_buf();

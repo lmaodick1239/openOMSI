@@ -210,6 +210,7 @@ pub(crate) fn spawn_player(
         None => log::info!("paint: the model's own textures"),
     }
     vehicle.apply_paint_vars(scheme);
+    log::info!("gearbox: {}", if vehicle.ty.program.manual_gearbox() { "manual (gates)" } else { "automatic or none" });
     if let Some(sp) = &args.spawn {
         let v: Vec<f64> = sp
             .split(',')
@@ -273,7 +274,7 @@ pub(crate) fn spawn_player(
                 // (a free plate is the player's to choose: from registrations.txt below)
                 if vt.def.registration_mode != 1 {
                     if let Some(i) = vt.program.str_var("ident") {
-                        vehicle.state.str_vars[i as usize] = vt.def.plate_of_number(n);
+                        vehicle.state.str_vars[i as usize] = vt.def.chosen_plate_of_number(n);
                     }
                 }
             }
@@ -288,6 +289,18 @@ pub(crate) fn spawn_player(
                     vehicle.state.str_vars[i as usize] = reg;
                 }
             }
+        }
+    }
+    // a plate given by hand (the launcher's field, `--plate`) is the player's own: it wins
+    // over every plate the content gave the bus
+    if let Some(plate) = args.plate.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        match vt.program.str_var("ident") {
+            Some(i) => {
+                vehicle.state.str_vars[i as usize] = plate.to_string();
+                log::info!("number plate set by hand: {plate}");
+            }
+            // a bus whose scripts know no `ident` draws its plate from the model's texture
+            None => log::warn!("--plate {plate}: this bus has no `ident` string variable"),
         }
     }
     // ground following through the loaded tiles (road surfaces first, then terrain)
@@ -395,6 +408,7 @@ pub(crate) fn spawn_player(
         head: Vec3::ZERO,
         head_vel: Vec3::ZERO,
         head_omega: Vec3::ZERO,
+        steer_look: 0.0,
         seat: Vec3::ZERO,
         mirror_offsets: crate::settings::mirror_offsets(&vt.def.path),
         mirrors_dirty: false,
@@ -405,6 +419,7 @@ pub(crate) fn spawn_player(
         ibis_duty: None,
         ibis_typist: None,
         duty_typed: false,
+        html_next_stop: None,
         ibis_background: false,
         arm: Default::default(),
         blinker_key_state: 0,
@@ -491,9 +506,9 @@ pub(crate) fn spawn_player(
                 .map(|f| {
                     !f.is_empty()
                         && def
-                            .file
-                            .to_ascii_lowercase()
-                            .contains(&f.to_ascii_lowercase())
+                        .file
+                        .to_ascii_lowercase()
+                        .contains(&f.to_ascii_lowercase())
                 })
                 .unwrap_or(false)
             {

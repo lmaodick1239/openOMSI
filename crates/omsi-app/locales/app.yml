@@ -16880,6 +16880,7 @@ _version: 2
   ja: "★ NEW · "
   zh: "★ 新 · "
   hi: "★ नया · "
+  zh-tw: "★ 新增 · "
 "inspector.title":
   ru: "Инспектор"
   de: "Inspektor"

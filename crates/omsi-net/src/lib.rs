@@ -99,7 +99,9 @@ pub use wire::{
 /// 5: the tour a player drives in `INFO` (the host's timetable leaves it out), riders of
 /// the players' buses in the world frames (`world::PLAYER_BUS`), and the players' people
 /// passed on to the other players.
-pub const PROTOCOL: u32 = 5;
+/// 6: up to 63 sound and moving-part values in a state (a 6-bit count: the AA-FR Agora's
+/// sound variables alone filled the 31 there was room for).
+pub const PROTOCOL: u32 = 6;
 pub const DEFAULT_PORT: u16 = 27015;
 /// Ports a host tries after the default one when that is taken (a second session on the
 /// same machine).
@@ -122,6 +124,9 @@ pub const LOAD_TIMEOUT: Duration = Duration::from_secs(120);
 pub const HEARTBEAT: f32 = 1.0;
 /// Seconds between two INFO messages of a player whose info has not changed.
 pub const INFO_EVERY: f32 = 2.0;
+/// The shortest time (s) between two `INFO`s: well inside what a host takes from a player
+/// (`MESSAGE_RATE`), with room for its other messages.
+pub const INFO_MIN_GAP: f32 = 0.25;
 /// Seconds between two CLOCK messages of the host.
 pub const CLOCK_EVERY: f32 = 5.0;
 /// At most this many other players: a host turns away the next one, a client ignores more.
@@ -838,6 +843,10 @@ pub struct Pose {
     /// model's order), so another player's bus shows the same destination and line signs
     /// rather than what its depot file makes of the line and terminus names.
     pub texts: Vec<String>,
+    /// What the vehicle's `[matl_freetex]` string variables hold (in the order of their
+    /// names, see the game's `lan.rs`): the picture a roller blind or a sign shows, which the
+    /// others' copy of the bus cannot work out, its scripts not running there.
+    pub freetex: Vec<String>,
     /// The player's own figure (`.hum` relative to its content root), for the driver at the
     /// wheel and the walker the others draw (empty: they pick one of the map's drivers).
     pub figure: String,
@@ -943,7 +952,11 @@ impl Pose {
         // paths and a destination in another alphabet made an INFO too long to be taken in:
         // the others never learnt which bus the player drove)
         let room = MAX_DATAGRAM.saturating_sub(head.len() + figure.len() + 1);
-        format!("{head}{}|{figure}", encode_texts(&self.texts, room))
+        let info = format!("{head}{}|{figure}", encode_texts(&self.texts, MAX_TEXTS, MAX_TEXT_LEN, room));
+        // the `[matl_freetex]` pictures last, in what room is left (an older game reads the
+        // fields it knows and passes this one by)
+        let room = MAX_DATAGRAM.saturating_sub(info.len() + 1);
+        format!("{info}|{}", encode_texts(&self.freetex, MAX_FREETEX, MAX_FREETEX_LEN, room))
     }
 
     /// The info fields of an `INFO` message (checked and cleaned), or None.
@@ -970,8 +983,9 @@ impl Pose {
             box_offset: num(9, -40.0, 40.0)?,
             table: u32::from_str_radix(parts[10].trim(), 16).ok()?,
             tour: parts.get(11).map(|t| clean_text(t, MAX_FIELD)).unwrap_or_default(),
-            texts: parts.get(12).map(|t| decode_texts(t)).unwrap_or_default(),
+            texts: parts.get(12).map(|t| decode_texts(t, MAX_TEXTS, MAX_TEXT_LEN)).unwrap_or_default(),
             figure: parts.get(13).and_then(|f| human_path(f)).unwrap_or_default(),
+            freetex: parts.get(14).map(|t| decode_texts(t, MAX_FREETEX, MAX_FREETEX_LEN)).unwrap_or_default(),
             ..Default::default()
         })
     }
@@ -985,6 +999,7 @@ impl Pose {
         self.destination = info.destination.clone();
         self.tour = info.tour.clone();
         self.texts = info.texts.clone();
+        self.freetex = info.freetex.clone();
         self.figure = info.figure.clone();
         self.length = info.length;
         self.width = info.width;
@@ -1004,6 +1019,7 @@ impl Pose {
             destination: keep.destination,
             tour: keep.tour,
             texts: keep.texts,
+            freetex: keep.freetex,
             figure: keep.figure,
             length: keep.length,
             width: keep.width,
@@ -1050,15 +1066,19 @@ fn finite_or(v: f32, or: f32) -> f32 {
 /// Display texts at most (and characters each) an `INFO` carries.
 pub const MAX_TEXTS: usize = 12;
 const MAX_TEXT_LEN: usize = 32;
+/// `[matl_freetex]` strings at most (and characters each): paths to a picture, longer than
+/// a display's text (`..\..\Anzeigen\Rollband_FC\<depot>\17.tga`).
+pub const MAX_FREETEX: usize = 8;
+const MAX_FREETEX_LEN: usize = 128;
 
 /// Display texts as one `INFO` field: each as hex of its UTF-8, comma separated (a text may
 /// hold anything, the field no `|`).
-fn encode_texts(texts: &[String], room: usize) -> String {
+fn encode_texts(texts: &[String], max: usize, max_len: usize, room: usize) -> String {
     texts
         .iter()
-        .take(MAX_TEXTS)
+        .take(max)
         .map(|t| {
-            let t: String = t.chars().filter(|c| !c.is_control()).take(MAX_TEXT_LEN).collect();
+            let t: String = t.chars().filter(|c| !c.is_control()).take(max_len).collect();
             t.bytes().map(|b| format!("{b:02x}")).collect::<String>()
         })
         .scan(0usize, |used, h| {
@@ -1070,16 +1090,16 @@ fn encode_texts(texts: &[String], room: usize) -> String {
         .join(",")
 }
 
-fn decode_texts(field: &str) -> Vec<String> {
+fn decode_texts(field: &str, max: usize, max_len: usize) -> Vec<String> {
     if field.trim().is_empty() {
         return Vec::new();
     }
     field
         .split(',')
-        .take(MAX_TEXTS)
+        .take(max)
         .map(|h| {
             let bytes: Vec<u8> = (0..h.len() / 2).filter_map(|i| u8::from_str_radix(h.get(2 * i..2 * i + 2)?, 16).ok()).collect();
-            String::from_utf8_lossy(&bytes).chars().filter(|c| !c.is_control()).take(MAX_TEXT_LEN).collect()
+            String::from_utf8_lossy(&bytes).chars().filter(|c| !c.is_control()).take(max_len).collect()
         })
         .collect()
 }
@@ -2325,7 +2345,10 @@ impl LanSession {
             }
         }
         let info = p.encode_info();
-        if info != self.last_info || self.info_acc >= INFO_EVERY {
+        // Sent when it changes, but no more often than INFO_MIN_GAP: a roller blind turning
+        // through its numbers or a pilot screen changes the `[matl_freetex]` pictures many
+        // times a second, and the host took ten messages a second and dropped the rest.
+        if (info != self.last_info && self.info_acc >= INFO_MIN_GAP) || self.info_acc >= INFO_EVERY {
             self.info_acc = 0.0;
             match self.role {
                 Role::Host => self.broadcast(info.as_bytes(), None),

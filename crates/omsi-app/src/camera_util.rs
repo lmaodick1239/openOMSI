@@ -327,7 +327,7 @@ pub(crate) fn render_mirrors(
     lighting: &omsi_render::Lighting,
     only: Option<usize>,
     view: Option<(Camera, f32)>,
-) {
+) -> usize {
     // (aimed from the eye of the view being drawn, as Omsi.exe aims them - from the
     // driver's without one)
     let eye = view.as_ref().map(|v| v.0.position).unwrap_or_else(|| driver_eye(p));
@@ -341,7 +341,7 @@ pub(crate) fn render_mirrors(
         .map(|(i, c)| mirror_view(&p.vehicle, c, eye, p.mirror_offsets.get(i).copied().unwrap_or([0.0; 2])))
         .collect();
     if cams.is_empty() {
-        return;
+        return 0;
     }
     let textures = world.mirror_textures.lock().clone();
     // small images: skip objects that would be tiny anyway (the original's
@@ -356,8 +356,13 @@ pub(crate) fn render_mirrors(
     // whose light is OMSI's: a night that stays a blue dusk. The window's enhanced night is
     // far darker, and the mirrors showed the street by daylight beside it. The plain light
     // is taken down with the night (the lamps keep theirs) to the enhanced picture's level.
+    // (By the sun's darkness, Envir_Brightness's ramp from +6 to -6 degrees: `night` is
+    // whole at sunset already, from +10 degrees on, and rain raises it by day, and the
+    // mirrors were a fifth of the window's light through the whole dusk, #432.)
     if lighting.enhanced && omsi_cfg::env::var_os("OMSI_MIRROR_ENHANCED").is_none() {
-        let k = 1.0 - MIRROR_NIGHT_DIM * lighting.night.clamp(0.0, 1.0);
+        let alt = lighting.sun_dir.z.clamp(-1.0, 1.0).asin().to_degrees();
+        let dark = 1.0 - ((alt + 6.0) / 12.0).clamp(0.0, 1.0);
+        let k = 1.0 - MIRROR_NIGHT_DIM * dark;
         lighting.ambient *= k;
         lighting.secondary *= k;
         lighting.sun_color *= k;
@@ -374,7 +379,7 @@ pub(crate) fn render_mirrors(
         .filter(|&i| view.as_ref().map(|v| mirror_in_view(p.vehicle.camera_world_full(&cams[i]).0, cams[i].extra.unwrap_or(0.0).max(MIRROR_MIN_RADIUS), v)).unwrap_or(true))
         .collect();
     if seen.is_empty() {
-        return;
+        return 0;
     }
     let pick = only.map(|k| seen[k % seen.len()]);
     for (i, c) in cams.iter().enumerate() {
@@ -404,4 +409,5 @@ pub(crate) fn render_mirrors(
         };
         renderer.render_to_texture(scene, *tex, &cam, &lighting, MIRROR_ASPECT);
     }
+    seen.len()
 }

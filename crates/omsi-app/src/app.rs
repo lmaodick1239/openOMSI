@@ -1,6 +1,26 @@
 //! The window's game: `App`, its state and its per-frame work.
 
 use super::*;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+fn unix_epoch_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod inspector_contract_tests {
+    use super::unix_epoch_millis;
+
+    #[test]
+    fn inspector_timestamp_is_epoch_milliseconds() {
+        assert!(unix_epoch_millis() > 1_000_000_000_000);
+    }
+}
+
+const SLOW_UPLOAD_MB_S: f64 = 300.0;
 
 pub(crate) struct App {
     pub(crate) args: Args,
@@ -62,6 +82,7 @@ pub(crate) struct App {
     pub(crate) total_frames: u32,
     /// Mirror pictures due (see `MIRROR_RATE`), and which mirror is next.
     pub(crate) mirror_budget: f32,
+    pub(crate) mirrors_seen: usize,
     pub(crate) mirror_turn: usize,
     /// Cursor and view the hover was last worked out for (see the redraw).
     pub(crate) hover_key: Option<(i32, i32, i32, i32)>,
@@ -83,6 +104,12 @@ pub(crate) struct App {
     pub(crate) last: Instant,
     pub(crate) speed: f32,
     pub(crate) mouse_look: bool,
+    /// The left and right mouse buttons held.
+    pub(crate) buttons_held: (bool, bool),
+    /// The right button (or both) held: OMSI's mouse zoom (0x82c5f8) - moving the mouse up
+    /// widens the view in the bus or takes the outside camera further away, by the value at
+    /// the press over 500 pixels: (the cursor's height then, the zoom or distance then).
+    pub(crate) both_drag: Option<(f32, f32)>,
     /// Right mouse button toggles the headset picture zoom.
     #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) vr_zoom_active: bool,
@@ -90,6 +117,8 @@ pub(crate) struct App {
     pub(crate) hover: Option<String>,
     /// The part under the cursor when it is not a switch, so the HUD can say so.
     pub(crate) hover_part: Option<String>,
+    /// A `[mouseevent]` mesh is under the cursor (named in `hover` or not): the hand cursor.
+    pub(crate) hover_hand: bool,
     /// `OMSI_INPUT` script: (seconds after start, command), in order.
     pub(crate) input_script: Vec<(f32, String)>,
     /// `shot <file>` of the input script: the next frame is also rendered into this PNG.
@@ -102,6 +131,7 @@ pub(crate) struct App {
     /// The first line of the game menu (or chooser) shown, when a finger has scrolled it
     /// (in lines, fractional while dragged); `None`: the chosen line is kept in view.
     pub(crate) menu_top: Option<f32>,
+    pub(crate) menu_scroll_drag: bool,
     /// The game menu shows all its lines ("More..."), not only the everyday ones.
     pub(crate) menu_more: bool,
     /// Keys pressed (true) and let go since the Lua plugins' last frame.
@@ -195,10 +225,17 @@ pub(crate) struct App {
     /// Sandboxed variable override manager for live debugging.
     #[allow(dead_code)]
     pub(crate) inspector_overrides: crate::inspector_overrides::OverrideManager,
+    #[cfg(not(target_os = "android"))]
+    pub(crate) inspector_ui: Option<crate::inspector::imgui_inspector::InspectorUi>,
     /// OMSI's timetable window (`view_set_schedule`, Insert).
     pub(crate) timetable: bool,
     /// The left button is held on a switch: mouse movement turns it.
     pub(crate) dragging: bool,
+    /// The left button is held on a page of the bus (an `[htmltexture]`): its script texture
+    /// index and the place on it the pointer was last seen.
+    pub(crate) html_pressed: Option<(usize, f32, f32)>,
+    /// The same for a page of a scenery object: its map id, script texture index and place.
+    pub(crate) html_object_pressed: Option<(i64, usize, f32, f32)>,
     /// Cursor movement (logical pixels) while dragging a switch, not yet handed to the
     /// script: `<event>_drag` fires once a frame with it (see `Player::drag`).
     pub(crate) drag_delta: (f32, f32),
@@ -210,6 +247,8 @@ pub(crate) struct App {
     /// belongs to now; see `App::sync_view_look`.
     pub(crate) view_looks: std::collections::HashMap<String, (f32, f32)>,
     pub(crate) look_view: String,
+    /// Smooth switch between two cockpit cameras (arrow keys), see `CamBlend`.
+    pub(crate) cam_blend: CamBlend,
     /// The zoom of the views inside the bus (driver, passenger): their field of view is
     /// the camera's times this (the mouse wheel, + and -, a pinch), per view.
     pub(crate) view_zoom: std::collections::HashMap<String, f32>,
@@ -241,6 +280,8 @@ pub(crate) struct App {
     /// The frame-rate governor's two-second window.
     /// Window seconds, frames, and time waiting on presentation/GPU in that window.
     pub(crate) governor: (f32, u32, f32),
+    /// Readings in a row at the smallest render scale still waiting for the card.
+    pub(crate) governor_low: u32,
     /// Cumulative presentation wait at the previous frame, independent of OMSI_PROFILE.
     pub(crate) governor_wait_prev: f64,
     /// Frames the window was hidden for (they are not drawn) and whether the exit is under way.
@@ -258,11 +299,248 @@ pub(crate) struct App {
 }
 
 impl App {
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn inspector_snapshot(
+        &mut self,
+    ) -> crate::inspector::imgui_inspector::InspectorUiSnapshot {
+        use crate::inspector::{EditorView, HumanView, MaterialView, RenderView, TelemetryView};
+
+        let inspector = self
+            .inspector_selection
+            .as_ref()
+            .map(crate::inspector::InspectorMainView::from);
+        let target = inspector
+            .as_ref()
+            .and_then(|view| view.selection_target.clone());
+        let material = self.scene.as_ref().and_then(|scene| {
+            let crate::inspector::SelectionTarget::Vehicle {
+                key: crate::inspector::VehicleKey::Player { .. },
+                mesh: Some(mesh),
+            } = target.as_ref()?
+            else {
+                return None;
+            };
+            let player = self.player.as_ref()?;
+            let instance_index = *player.render.instances.get(mesh.definition_index)?;
+            let material_id = *scene.instances.get(instance_index)?.materials.first()?;
+            let snapshot = scene.query_material_snapshot(material_id)?;
+            Some(MaterialView {
+                name: format!("{} material {material_id:?}", mesh.mesh_name),
+                shader_variant: snapshot.shader_variant,
+                alpha_mode: format!("{:?}", snapshot.alpha_mode),
+                blend_mode: format!("{:?}", snapshot.blend_mode),
+                base_color: snapshot.color,
+                metallic: snapshot.pbr_params.metalness,
+                roughness: snapshot.pbr_params.roughness,
+                base_texture: snapshot
+                    .diffuse_tex
+                    .map(|texture| format!("{:?}", texture.id)),
+                mipmap_level: 0,
+                sandbox_active: false,
+            })
+        });
+        let render = self.renderer.as_ref().map(|renderer| {
+            let counts = renderer.counts.borrow();
+            RenderView {
+                snapshot_available: false,
+                unavailable_reason: Some(
+                    "Frame-graph and render debug state are not exposed by the active renderer."
+                        .into(),
+                ),
+                passes: Vec::new(),
+                total_frame_time_ms: self
+                    .profile
+                    .get("render")
+                    .copied()
+                    .map(|seconds| seconds as f32 * 1000.0)
+                    .unwrap_or(0.0),
+                total_draw_calls: counts.get("main draws").copied().unwrap_or(0.0) as usize,
+                total_triangles: counts.get("ktris main").copied().unwrap_or(0.0) as usize * 1000,
+                isolation_mode: None,
+                wireframe_enabled: false,
+                collision_hulls_enabled: false,
+                show_normals: false,
+                show_uv_seams: false,
+            }
+        });
+        let human = match target {
+            Some(crate::inspector::SelectionTarget::Human { key, .. }) => self
+                .humans
+                .as_mut()
+                .and_then(|humans| humans.inspector_snapshot(key.id, key.generation, key.is_driver))
+                .map(|snapshot| HumanView {
+                    id: snapshot.id,
+                    generation: snapshot.generation,
+                    is_driver: snapshot.is_driver,
+                    position: snapshot.position.into(),
+                    velocity: snapshot.velocity.length(),
+                    current_animation: snapshot.active_animation,
+                    animation_phase: snapshot.animation_phase,
+                    bone_names: snapshot
+                        .skeleton_bones
+                        .into_iter()
+                        .map(|bone| bone.name)
+                        .collect(),
+                    playback: "Playing".into(),
+                }),
+            _ => None,
+        };
+        let editor = Some(EditorView {
+            sandbox_active: false,
+            original_transform: None,
+            current_transform: None,
+            entity_key: self
+                .editor
+                .as_ref()
+                .and_then(|editor| editor.selected.map(|id| id.to_string())),
+            transaction_count: self
+                .editor
+                .as_ref()
+                .map(|editor| editor.added.len())
+                .unwrap_or_default(),
+        });
+        let telemetry = self.renderer.as_ref().map(|renderer| {
+            let stats = renderer.stats.borrow();
+            TelemetryView {
+                timestamp_ms: unix_epoch_millis(),
+                frame_time_ms: self
+                    .profile
+                    .get("frame")
+                    .copied()
+                    .map(|seconds| seconds as f32 * 1000.0)
+                    .unwrap_or(0.0),
+                inspector_query_time_ms: self
+                    .profile
+                    .get("inspector")
+                    .copied()
+                    .map(|seconds| seconds as f32 * 1000.0)
+                    .unwrap_or(0.0),
+                gpu_staging_time_ms: stats.get("gpu").copied().unwrap_or(0.0) as f32 * 1000.0,
+                watch_expressions: Vec::new(),
+            }
+        });
+        let mut hierarchy = Vec::new();
+        if let Some(view) = inspector.as_ref() {
+            if let Some(identity) = view.entity_identity.as_ref() {
+                hierarchy.push(identity.clone());
+            }
+        }
+        hierarchy.extend(
+            self.placed
+                .iter()
+                .enumerate()
+                .map(|(index, _)| format!("Placed vehicle {index}")),
+        );
+        let mut log_lines = Vec::new();
+        if let Some((message, _)) = &self.service_msg {
+            log_lines.push(message.clone());
+        }
+        log_lines.push(format!("View: {}", self.view));
+        crate::inspector::imgui_inspector::InspectorUiSnapshot {
+            inspector,
+            material,
+            render,
+            human,
+            telemetry,
+            editor,
+            export: Some(crate::inspector::ExportView {
+                status: crate::inspector::ExportStatus::Unavailable,
+                destination: None,
+                error: Some(
+                    "Selection export is unavailable in the interactive application; use --export-glb."
+                        .into(),
+                ),
+            }),
+            hierarchy,
+            log_lines,
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn dispatch_inspector_command(
+        &mut self,
+        command: &crate::inspector::InspectorCommand,
+    ) -> crate::inspector::CommandResult {
+        let selection = self.inspector_selection.clone().unwrap_or_default();
+        if let Some(message) = crate::inspector::unsupported_command_message(command) {
+            return Err(crate::inspector::CommandError::NotSupported(message.into()));
+        }
+        crate::inspector::validate_command(command, &selection)?;
+        match command {
+            crate::inspector::InspectorCommand::Select(target) => {
+                self.inspector_selection =
+                    Some(crate::inspector::InspectorSelection::new(target.clone()));
+                Ok(())
+            }
+            crate::inspector::InspectorCommand::ClearSelection => {
+                self.inspector_selection = None;
+                Ok(())
+            }
+            crate::inspector::InspectorCommand::CycleNextHit => self
+                .inspector_selection
+                .as_mut()
+                .map(|selection| {
+                    selection.cycle_next_hit();
+                    Ok(())
+                })
+                .unwrap_or_else(|| {
+                    Err(crate::inspector::CommandError::StaleSelection(
+                        "No active selection".into(),
+                    ))
+                }),
+            crate::inspector::InspectorCommand::CyclePrevHit => self
+                .inspector_selection
+                .as_mut()
+                .map(|selection| {
+                    selection.cycle_prev_hit();
+                    Ok(())
+                })
+                .unwrap_or_else(|| {
+                    Err(crate::inspector::CommandError::StaleSelection(
+                        "No active selection".into(),
+                    ))
+                }),
+            crate::inspector::InspectorCommand::JumpToHit(index) => self
+                .inspector_selection
+                .as_mut()
+                .map(|selection| {
+                    selection.jump_to_hit(*index);
+                    Ok(())
+                })
+                .unwrap_or_else(|| {
+                    Err(crate::inspector::CommandError::StaleSelection(
+                        "No active selection".into(),
+                    ))
+                }),
+            _ => Err(crate::inspector::CommandError::NotSupported(
+                "Inspector command has no application boundary yet".into(),
+            )),
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn process_inspector_commands(&mut self) {
+        let commands = self
+            .inspector_ui
+            .as_mut()
+            .map(|ui| ui.drain_commands())
+            .unwrap_or_default();
+        for command in commands {
+            if let Err(error) = self.dispatch_inspector_command(&command) {
+                log::error!("inspector command failed: {error}");
+            }
+        }
+    }
+
     #[cfg(windows)]
-    pub(crate) fn vr_active(&self) -> bool { self.vr.is_some() }
+    pub(crate) fn vr_active(&self) -> bool {
+        self.vr.is_some()
+    }
 
     #[cfg(not(windows))]
-    pub(crate) fn vr_active(&self) -> bool { false }
+    pub(crate) fn vr_active(&self) -> bool {
+        false
+    }
 
     pub(crate) fn resumed_impl(&mut self, event_loop: &ActiveEventLoop) {
         if let Some(window) = self.window.clone() {
@@ -271,7 +549,15 @@ impl App {
                 if let Some(r) = self.renderer.as_ref() {
                     let size = window.inner_size();
                     let vsync = self.settings.vsync && !self.vr_active();
-                    self.surface = SurfaceState::new_with(&self.instance, window.clone(), r, size.width.max(1), size.height.max(1), vsync).ok();
+                    self.surface = SurfaceState::new_with(
+                        &self.instance,
+                        window.clone(),
+                        r,
+                        size.width.max(1),
+                        size.height.max(1),
+                        vsync,
+                    )
+                    .ok();
                     self.last = Instant::now();
                 }
             }
@@ -282,7 +568,11 @@ impl App {
 
     /// The game's window (or the launcher's, handed over on a phone), its surface and the
     /// renderer; then the menu or, when the session is given, the world.
-    pub(crate) fn create_window(&mut self, event_loop: &ActiveEventLoop, given: Option<Arc<Window>>) {
+    pub(crate) fn create_window(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        given: Option<Arc<Window>>,
+    ) {
         // --size sets the window's size in points as well (1600x900 unless given)
         let (lw, lh) = self
             .args
@@ -311,20 +601,31 @@ impl App {
             Some(w) => w,
             None => Arc::new(event_loop.create_window(attrs).expect("window")),
         };
-        let mut renderer = match window_renderer(&mut self.instance, &window, self.settings.render_options()) {
-            Ok(r) => r,
-            Err(e) => {
-                fatal_message(&format!("The game cannot draw on this computer: {e:#}"));
-                crate::platform::exit(event_loop);
-                return;
-            }
-        };
+        let mut renderer =
+            match window_renderer(&mut self.instance, &window, self.settings.render_options()) {
+                Ok(r) => r,
+                Err(e) => {
+                    fatal_message(&format!("The game cannot draw on this computer: {e:#}"));
+                    crate::platform::exit(event_loop);
+                    return;
+                }
+            };
         #[cfg(windows)]
         if self.settings.vr_requested() {
-            match crate::openxr::Vr::new(&renderer, self.settings.vr_scale, self.settings.vr_desktop_mirror) {
+            match crate::openxr::Vr::new(
+                &renderer,
+                self.settings.vr_scale,
+                self.settings.vr_desktop_mirror,
+            ) {
                 Ok(vr) => self.vr = Some(vr),
                 Err(e) => log::error!("OpenXR could not start: {e:#}"),
             }
+        }
+        let upload = renderer.upload_speed_mb_s();
+        log::info!("graphics: {upload:.0} MB/s copied towards the card");
+        if upload < SLOW_UPLOAD_MB_S {
+            log::error!("graphics: the driver copies only {upload:.0} MB/s towards the card (thousands are usual); every texture and buffer the game sends waits on it, down to a few frames a second - restarting the computer usually brings it back");
+            self.service_msg = Some((format!("Graphics driver is slow ({upload:.0} MB/s): the game will stutter. Restarting the computer usually fixes it."), 30.0));
         }
         crate::lights::load_smoke_texture(&mut renderer, &self.args.root);
         crate::lights::set_corona_root(&self.args.root);
@@ -353,6 +654,17 @@ impl App {
             surface.config.present_mode
         );
         let scene = renderer.new_scene();
+        #[cfg(not(target_os = "android"))]
+        {
+            let layout = crate::inspector::persistence::InspectorLayout::config_path()
+                .ok()
+                .map(|path| crate::inspector::imgui_inspector::ImGuiLayout::load(&path))
+                .unwrap_or_default();
+            let mut inspector =
+                crate::inspector::imgui_inspector::InspectorUi::new().with_layout(layout);
+            inspector.attach_renderer(&renderer.device, &renderer.queue, surface.config.format);
+            self.inspector_ui = Some(inspector);
+        }
         self.window = Some(window);
         self.surface = Some(surface);
         self.renderer = Some(renderer);
@@ -378,11 +690,17 @@ impl App {
         self.envir = omsi_content::Envir::load(&self.args.root.join("envir.cfg")).ok();
         // the weather cycle: a first weather that suits the month, the others after it
         if crate::weather_cycle::is_cycle(self.args.weather.as_deref()) {
-            let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(7);
+            let seed = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(7);
             let mut c = crate::weather_cycle::Cycle::new(seed);
             let month = start_clock(&self.args).day_month().1;
             let all = crate::weather_cycle::installed();
-            let clear = omsi_content::weather::Weather { fog: (50000.0, 1.0), ..Default::default() };
+            let clear = omsi_content::weather::Weather {
+                fog: (50000.0, 1.0),
+                ..Default::default()
+            };
             let r = c.rand();
             self.args.weather = crate::weather_cycle::pick(&all, &clear, "", month, r);
             log::info!("weather cycle: starting with {:?}", self.args.weather);
@@ -393,7 +711,13 @@ impl App {
         // offscreen: a session begun in the rain used to open on a bone-dry street
         self.wetness = self.weather.as_ref().map(initial_wetness).unwrap_or(0.0);
         self.clock = start_clock(&self.args);
-        setup_sky(&self.args, &renderer, &mut scene, self.envir.as_ref(), self.weather.as_ref());
+        setup_sky(
+            &self.args,
+            &renderer,
+            &mut scene,
+            self.envir.as_ref(),
+            self.weather.as_ref(),
+        );
         // the window streams the tiles around the camera unless a fixed area was asked for
         if !self.args.all && self.args.radius.is_none() {
             match open_world(&self.args) {
@@ -463,7 +787,13 @@ impl App {
                     Err(e) if self.args.bus.is_some() => {
                         log::warn!("the bus could not be put down ({e:#}); trying again");
                         spawn_player(&self.args, &w, &renderer, &mut scene).map_err(|e2| {
-                            self.service_msg = Some((format!("The bus could not be loaded: {}", format!("{e2:#}").lines().next().unwrap_or_default()), 15.0));
+                            self.service_msg = Some((
+                                format!(
+                                    "The bus could not be loaded: {}",
+                                    format!("{e2:#}").lines().next().unwrap_or_default()
+                                ),
+                                15.0,
+                            ));
                             e2
                         })
                     }
@@ -473,7 +803,8 @@ impl App {
                     Ok(mut p) => {
                         let audio = omsi_audio::AudioEngine::new();
                         if let Some(p) = p.as_mut() {
-                            p.vehicle.host.auto_clutch = if self.settings.auto_clutch { 1.0 } else { 0.0 };
+                            p.vehicle.host.auto_clutch =
+                                if self.settings.auto_clutch { 1.0 } else { 0.0 };
                             p.load_sounds(&audio);
                             p.ibis_background = true;
                             // --autostart applies in the window too, not only offscreen
@@ -484,7 +815,13 @@ impl App {
                             // a pack this bus borrows parts from is not installed: say so
                             // once, it explains dark displays and missing devices
                             if !p.vehicle.ty.missing_packs.is_empty() {
-                                let packs: Vec<String> = p.vehicle.ty.missing_packs.iter().map(|(n, _)| n.clone()).collect();
+                                let packs: Vec<String> = p
+                                    .vehicle
+                                    .ty
+                                    .missing_packs
+                                    .iter()
+                                    .map(|(n, _)| n.clone())
+                                    .collect();
                                 let msg = format!(
                                     "This bus takes parts from vehicle pack(s) that are not installed: {} (install them for its displays and devices)",
                                     packs.join(", ")
@@ -512,6 +849,7 @@ impl App {
                         bus: Some(o.bus.clone()),
                         spawn: Some(o.spawn.clone()),
                         hof: o.hof.clone(),
+                        paint: o.paint.clone(),
                         situation_vars: o.vars.clone(),
                         situation_strvars: o.strvars.clone(),
                         situation_others: Vec::new(),
@@ -553,7 +891,11 @@ impl App {
                     }
                     h.exact_fare = self.settings.exact_fare;
                     h.boarding = self.settings.boarding.clone();
-                    h.voices = match self.settings.pax_voices.as_str() { "off" => 2, "tickets" => 1, _ => 0 };
+                    h.voices = match self.settings.pax_voices.as_str() {
+                        "off" => 2,
+                        "tickets" => 1,
+                        _ => 0,
+                    };
                     if let Some(p) = self.player.as_mut() {
                         h.set_cabin(&mut p.vehicle);
                         h.ticket_key = ticket_key_name(&self.args.root, &p.bindings);
@@ -574,7 +916,11 @@ impl App {
                 }
                 // (a player who joins draws the host's traffic in it, whatever their own count
                 // says: the host's cars had nowhere to go without it)
-                if self.args.traffic > 0 || self.args.schedule || crate::rail_drive::args_rail(&self.args) || self.args.lan_join.is_some() {
+                if self.args.traffic > 0
+                    || self.args.schedule
+                    || crate::rail_drive::args_rail(&self.args)
+                    || self.args.lan_join.is_some()
+                {
                     match traffic::Traffic::new(&self.args.root, &w, self.args.traffic) {
                         Ok(mut t) => {
                             if let Some(lan) = self.lan.as_ref() {
@@ -773,7 +1119,12 @@ impl App {
         let mut centers: Vec<DVec3> = self.camera.iter().map(|c| c.position).collect();
         centers.extend(self.player.iter().map(|p| p.vehicle.position));
         // a LAN host simulates the world around every player: the ground and the roads there
-        if self.lan.as_ref().map(|l| l.role == omsi_net::Role::Host).unwrap_or(false) {
+        if self
+            .lan
+            .as_ref()
+            .map(|l| l.role == omsi_net::Role::Host)
+            .unwrap_or(false)
+        {
             centers.extend(self.remotes.remotes.values().map(|r| r.vehicle().position));
         }
         let (Some(streamer), Some(w), Some(r), Some(scene)) = (
@@ -794,18 +1145,21 @@ impl App {
         w.update_texture_budget(r, scene, &centers, false);
         if centers.is_empty()
             || !streamer.update(
-                r,
-                scene,
-                &centers,
-                std::time::Duration::from_millis(6),
-                self.audio.as_ref(),
-            )
+            r,
+            scene,
+            &centers,
+            std::time::Duration::from_millis(6),
+            self.audio.as_ref(),
+        )
         {
             return;
         }
         if let Some(p) = self.player.as_mut() {
             // (OMSI's [no_collision]: no solid object stops the bus)
-            p.vehicle.collision = self.settings.collision_objects.then(|| w.collision.lock().clone());
+            p.vehicle.collision = self
+                .settings
+                .collision_objects
+                .then(|| w.collision.lock().clone());
             p.vehicle.wheel_walls = self.settings.collision_objects;
         }
         match self.traffic.as_mut() {
@@ -850,9 +1204,15 @@ pub(crate) fn report_missing_content(w: &World, msg: &mut Option<(String, f32)>)
     let addon = |f: &str| f.split('/').take(2).collect::<Vec<_>>().join("/");
     let mut by_addon: std::collections::BTreeMap<String, Vec<String>> = Default::default();
     for (f, what) in &files {
-        by_addon.entry(addon(f)).or_default().push(format!("{what}: {f}"));
+        by_addon
+            .entry(addon(f))
+            .or_default()
+            .push(format!("{what}: {f}"));
     }
-    let mut text = format!("openOMSI: content this map uses that is not installed\nmap: {}\n\n", w.map_dir.display());
+    let mut text = format!(
+        "openOMSI: content this map uses that is not installed\nmap: {}\n\n",
+        w.map_dir.display()
+    );
     for (a, list) in &by_addon {
         text.push_str(&format!("{a} ({} files)\n", list.len()));
         for l in list {
@@ -865,14 +1225,24 @@ pub(crate) fn report_missing_content(w: &World, msg: &mut Option<(String, f32)>)
             text.push_str(&format!("  {t}\n"));
         }
     }
-    let Some(dir) = crate::lan::data_dir() else { return };
+    let Some(dir) = crate::lan::data_dir() else {
+        return;
+    };
     let path = dir.join("missing_content.txt");
     let _ = std::fs::write(&path, text);
     let objects = files.iter().filter(|(_, w)| *w != "spline").count();
     let splines = files.len() - objects;
     let addons: Vec<&String> = by_addon.keys().take(4).collect();
-    let more = if by_addon.len() > 4 { format!(" and {} more", by_addon.len() - 4) } else { String::new() };
-    log::warn!("missing content: {objects} objects, {splines} splines, {} textures (list: {})", textures.len(), path.display());
+    let more = if by_addon.len() > 4 {
+        format!(" and {} more", by_addon.len() - 4)
+    } else {
+        String::new()
+    };
+    log::warn!(
+        "missing content: {objects} objects, {splines} splines, {} textures (list: {})",
+        textures.len(),
+        path.display()
+    );
     if !files.is_empty() {
         *msg = Some((
             format!(
@@ -882,5 +1252,136 @@ pub(crate) fn report_missing_content(w: &World, msg: &mut Option<(String, f32)>)
             ),
             15.0,
         ));
+    }
+}
+
+/// How long the glide between two cockpit cameras takes (seconds). The eye, the turn of the
+/// view and the field of view all follow the same curve over this time. 0 = hard cut.
+pub(crate) const CAM_BLEND_SECS: f32 = 0.6;
+/// The longest step of time one frame adds to the glide (seconds): a frame that hitches at
+/// the start of a switch does not skip ahead in it.
+pub(crate) const CAM_BLEND_MAX_DT: f32 = 1.0 / 30.0;
+
+fn wrap_deg(a: f32) -> f32 {
+    (a + 180.0).rem_euclid(360.0) - 180.0
+}
+
+/// `a` (k = 0) to `b` (k = 1), both cameras fixed in the bus's frame: the eye, the turn of the
+/// view and the field of view on a straight way. The bus's own motion (its pitch, bank, the
+/// head) is put on the result afterwards, so the glide is the same standing and driving.
+pub(crate) fn blend_local(a: &omsi_vehicle::Camera, b: &omsi_vehicle::Camera, k: f32) -> omsi_vehicle::Camera {
+    // (measured from `b`: at k = 1 every value is exactly `b`'s - no 360 degree residue of a
+    // yaw that went the short way round, no rounding left over for the hand-over to the
+    // plain camera to show)
+    let k = k.clamp(0.0, 1.0);
+    if k >= 1.0 {
+        return b.clone();
+    }
+    let rest = 1.0 - k;
+    let l = |x: f32, y: f32| y + (x - y) * rest;
+    // The view direction turns along the great circle between the two (a slerp of the
+    // directions), not yaw and pitch each on their own straight line: that swept the view
+    // out in a bow - up and across at once - while the eye went straight, which looked like
+    // a zigzag in the glide.
+    let dir = |c: &omsi_vehicle::Camera| {
+        let (sy, cy) = c.yaw.to_radians().sin_cos();
+        let (sp, cp) = c.pitch.to_radians().sin_cos();
+        glam::Vec3::new(sy * cp, cy * cp, sp)
+    };
+    let (fa, fb) = (dir(a), dir(b));
+    let dot = fa.dot(fb).clamp(-1.0, 1.0);
+    let (yaw, pitch) = if dot < -0.9995 {
+        // (turned right round: no one great circle, so the plain way)
+        (b.yaw - wrap_deg(b.yaw - a.yaw) * rest, l(a.pitch, b.pitch))
+    } else {
+        let f = if dot > 0.9995 {
+            (fa * rest + fb * k).normalize_or(fb)
+        } else {
+            let theta = dot.acos();
+            let s = theta.sin();
+            ((fa * ((rest * theta).sin() / s)) + (fb * ((k * theta).sin() / s))).normalize_or(fb)
+        };
+        (f.x.atan2(f.y).to_degrees(), f.z.clamp(-1.0, 1.0).asin().to_degrees())
+    };
+    omsi_vehicle::Camera {
+        pos: [l(a.pos[0], b.pos[0]), l(a.pos[1], b.pos[1]), l(a.pos[2], b.pos[2])],
+        dist: l(a.dist, b.dist),
+        fov: l(a.fov, b.fov),
+        yaw,
+        pitch,
+        extra: b.extra,
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct CamBlend {
+    /// (view, camera numbers) of the last frame: a change of the numbers inside the same
+    /// view is a camera switch.
+    pub key: Option<(String, (usize, usize))>,
+    /// The camera the glide started from (in the bus's frame), while one is under way.
+    pub from: Option<omsi_vehicle::Camera>,
+    /// The cockpit camera as it was drawn last frame (in the bus's frame): where the next
+    /// glide starts from.
+    pub shown: Option<omsi_vehicle::Camera>,
+    /// Just sat down at the wheel (from on foot): the next cockpit frame glides in from where
+    /// the walker's eyes were.
+    pub entering: bool,
+    /// 0..1 progress of the glide.
+    pub t: f32,
+    /// What the glide's last picture was off from the plain camera by, let go of over a
+    /// fraction of a second after the hand-over (so that nothing is left to jump).
+    pub carry: Option<CamCarry>,
+}
+
+/// A small difference between two pictures of the camera (world position, angles in degrees,
+/// field of view) that is eased out instead of being cut.
+#[derive(Clone, Copy)]
+pub(crate) struct CamCarry {
+    pub pos: glam::DVec3,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub roll: f32,
+    pub fov: f32,
+}
+
+impl CamCarry {
+    /// `a` minus `b`.
+    pub fn between(a: &omsi_render::Camera, b: &omsi_render::Camera) -> Self {
+        Self {
+            pos: a.position - b.position,
+            yaw: wrap_deg(a.yaw - b.yaw),
+            pitch: a.pitch - b.pitch,
+            roll: wrap_deg(a.roll - b.roll),
+            fov: a.fov_deg - b.fov_deg,
+        }
+    }
+
+    /// Put on a camera.
+    pub fn apply(&self, c: &mut omsi_render::Camera) {
+        c.position += self.pos;
+        c.yaw += self.yaw;
+        c.pitch = (c.pitch + self.pitch).clamp(-89.0, 89.0);
+        c.roll += self.roll;
+        c.fov_deg += self.fov;
+    }
+
+    /// Ease out by one frame; false once nothing is left.
+    pub fn decay(&mut self, dt: f32) -> bool {
+        let k = (-dt.clamp(0.0, 0.1) * 12.0).exp();
+        self.pos *= k as f64;
+        self.yaw *= k;
+        self.pitch *= k;
+        self.roll *= k;
+        self.fov *= k;
+        self.pos.length() > 1e-4 || self.yaw.abs() > 0.01 || self.pitch.abs() > 0.01 || self.roll.abs() > 0.01 || self.fov.abs() > 0.01
+    }
+}
+
+impl CamBlend {
+    /// How far along the way from the old camera to the new one: smootherstep of the time
+    /// (no jolt in speed or acceleration at either end).
+    pub fn progress(&self) -> f32 {
+        let t = self.t.clamp(0.0, 1.0);
+        t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
     }
 }

@@ -47,6 +47,9 @@ parking_lot = "0.12"
 rand = "0.9"
 wgpu = { version = "29", default-features = false, features = ["std", "parking_lot", "metal", "vulkan", "dx12", "gles", "wgsl", "noop"] }
 winit = "0.30"
+imgui = "0.12"
+imgui-winit-support = "0.13"
+imgui-wgpu = "0.28"
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"
 image = { version = "0.25", default-features = false, features = ["png", "bmp", "tga", "dds", "jpeg"] }

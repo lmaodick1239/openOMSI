@@ -4,10 +4,10 @@
 //! at 30Hz containing vehicle velocity, engine RPM, gear status, door states, selected
 //! entity properties, and watch table values.
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 /// WebSocket client connection limit.
 #[allow(dead_code)]
@@ -97,13 +97,13 @@ impl TelemetryServer {
     /// to avoid blocking the simulation.
     pub fn start(port: u16) -> Result<Self, io::Error> {
         log::info!("Starting telemetry server on port {}", port);
-        
+
         // TODO: Implement full WebSocket server with tokio-tungstenite
         // - Spawn async runtime thread
         // - Accept WebSocket connections (max MAX_CLIENTS)
         // - Handle handshake and upgrade
         // - Maintain client registry
-        
+
         let server = Self {
             port,
             clients: Arc::new(RwLock::new(Vec::new())),
@@ -128,7 +128,7 @@ impl TelemetryServer {
         // - Use try_lock or async channel to avoid blocking
         // - Remove disconnected clients
         // - Rate limit per client
-        
+
         let json = match serde_json::to_string(snapshot) {
             Ok(j) => j,
             Err(e) => {
@@ -137,8 +137,11 @@ impl TelemetryServer {
             }
         };
 
-        log::trace!("Broadcasting telemetry to {} clients ({} bytes)", 
-                    clients.len(), json.len());
+        log::trace!(
+            "Broadcasting telemetry to {} clients ({} bytes)",
+            clients.len(),
+            json.len()
+        );
     }
 
     /// Get current client count.
@@ -155,7 +158,7 @@ impl TelemetryServer {
     pub fn stop(&mut self) {
         log::info!("Stopping telemetry server");
         *self.running.write() = false;
-        
+
         // TODO: Close all WebSocket connections gracefully
         // - Send close frame to each client
         // - Wait for acknowledgment (with timeout)
@@ -192,19 +195,17 @@ mod tests {
                 position: [100.0, 50.0, 2.5],
                 rotation: [180.0, 0.0, 0.0],
             }),
-            watch_values: vec![
-                WatchValue {
-                    expression: "L.throttle".to_string(),
-                    value: 0.65,
-                    label: Some("Throttle".to_string()),
-                },
-            ],
+            watch_values: vec![WatchValue {
+                expression: "L.throttle".to_string(),
+                value: 0.65,
+                label: Some("Throttle".to_string()),
+            }],
         };
 
         let json = serde_json::to_string(&snapshot).unwrap();
         assert!(json.contains("velocity_ms"));
         assert!(json.contains("cockpit_speedo"));
-        
+
         let decoded: InspectorSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.timestamp_ms, 1234567890);
         assert!(decoded.vehicle.is_some());

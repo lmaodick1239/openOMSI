@@ -111,7 +111,15 @@ pub(crate) fn content_dir() -> Option<PathBuf> {
     } else {
         dir
     };
-    Some(omsi_cfg::content_folder_of(&dir))
+    let cand = omsi_cfg::content_folder_of(&dir);
+    if (cand.exists() || std::fs::create_dir_all(&cand).is_ok()) && omsi_cfg::is_writable(&cand) {
+        Some(cand)
+    } else {
+        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+        let fallback = PathBuf::from(home).join(".openomsi").join("content");
+        let _ = omsi_cfg::ensure_content_layout(&fallback);
+        Some(fallback)
+    }
 }
 
 /// Where the last working installation was remembered.
@@ -165,9 +173,10 @@ pub(crate) fn graphics_instance() -> wgpu::Instance {
     last.unwrap_or_else(|| wgpu::Instance::new(descriptor))
 }
 
-/// The graphics interfaces in the order they are tried: Metal on a Mac; elsewhere Vulkan
-/// first, and where the graphics chip or its driver has none (an older card - a GeForce GT
-/// 530 -, an old phone) DirectX 12 on Windows and then OpenGL. Settings → Graphics API
+/// The graphics interfaces in the order they are tried: Metal on a Mac; on Windows DirectX
+/// 12 first (the Windows drivers' best-kept path: on Vulkan they reset the device -
+/// "the graphics device was lost" - far more often), then Vulkan, then OpenGL for a card
+/// without either (a GeForce GT 530); elsewhere Vulkan, then OpenGL. Settings → Graphics API
 /// (`graphics_api`) or OMSI_BACKEND=vulkan|dx12|gl puts one first: a driver whose Vulkan
 /// misbehaves is got round.
 pub(crate) fn backend_order() -> Vec<wgpu::Backends> {
@@ -181,7 +190,7 @@ pub(crate) fn backend_order() -> Vec<wgpu::Backends> {
         omsi_cfg::env::var("OMSI_BACKEND").ok().unwrap_or(settings.graphics_api)
     };
     let all: Vec<wgpu::Backends> = if cfg!(windows) {
-        vec![wgpu::Backends::VULKAN, wgpu::Backends::DX12, wgpu::Backends::GL]
+        vec![wgpu::Backends::DX12, wgpu::Backends::VULKAN, wgpu::Backends::GL]
     } else {
         vec![wgpu::Backends::VULKAN, wgpu::Backends::GL]
     };
