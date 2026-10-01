@@ -16,6 +16,7 @@ pub enum ExportError {
     InvalidMesh(String),
     InvalidMaterial(String),
     EncodingFailed(String),
+    Unsupported(String),
 }
 
 impl std::fmt::Display for ExportError {
@@ -25,6 +26,7 @@ impl std::fmt::Display for ExportError {
             ExportError::InvalidMesh(msg) => write!(f, "Invalid mesh: {}", msg),
             ExportError::InvalidMaterial(msg) => write!(f, "Invalid material: {}", msg),
             ExportError::EncodingFailed(msg) => write!(f, "glTF encoding failed: {}", msg),
+            ExportError::Unsupported(msg) => write!(f, "Export unsupported: {}", msg),
         }
     }
 }
@@ -91,17 +93,22 @@ pub fn export_dir() -> Result<PathBuf, io::Error> {
     Ok(data_dir)
 }
 
-/// Export entity to glTF 2.0 (.glb) format.
+/// Inspector export is currently unsupported.
 ///
-/// This is a placeholder implementation. Full glTF export requires the `gltf` crate
-/// and proper material/texture baking pipeline. This stub creates a valid directory
-/// structure and returns a path.
+/// The production vehicle exporter remains available through `--export-glb`.
 pub fn export_to_gltf(
     entity_name: &str,
     transform: Mat4,
     mesh_data: &MeshData,
     material: &MaterialData,
 ) -> Result<PathBuf, ExportError> {
+    let _ = (entity_name, transform, mesh_data, material);
+    Err(ExportError::Unsupported(
+        "interactive inspector export is not implemented; use --export-glb".to_string(),
+    ))
+}
+
+/*
     // Validate mesh data
     if mesh_data.positions.is_empty() {
         return Err(ExportError::InvalidMesh(
@@ -133,8 +140,10 @@ pub fn export_to_gltf(
     log::info!("Successfully exported to {:?}", export_path);
     Ok(export_path)
 }
+*/
 
-/// Create a minimal glTF 2.0 placeholder.
+/// Legacy placeholder retained only as non-production reference; never called by the API.
+#[allow(dead_code)]
 ///
 /// This is a temporary stub that creates a valid (but minimal) glTF file.
 /// Full implementation requires proper binary buffer encoding, material setup,
@@ -222,7 +231,8 @@ fn create_minimal_gltf_placeholder(
     Ok(json_string.into_bytes())
 }
 
-/// Sanitize filename by removing invalid characters.
+/// Legacy helper for the removed placeholder writer.
+#[allow(dead_code)]
 fn sanitize_filename(name: &str) -> String {
     name.chars()
         .map(|c| match c {

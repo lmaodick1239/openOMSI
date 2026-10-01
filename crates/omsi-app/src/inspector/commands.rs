@@ -162,6 +162,18 @@ pub enum CommandError {
     SandboxNotActive(String),
 }
 
+pub fn unsupported_command_message(command: &InspectorCommand) -> Option<&'static str> {
+    match command {
+        InspectorCommand::Material(_) => Some("Material mutations are unavailable in the desktop inspector"),
+        InspectorCommand::Render(_) => Some("Render mutations are unavailable in the desktop inspector"),
+        InspectorCommand::Human(_) => Some("Human playback mutations are unavailable in the desktop inspector"),
+        InspectorCommand::Editor(_) => Some("Editor mutations are unavailable in the desktop inspector"),
+        InspectorCommand::Export(_) => Some("Interactive export is unavailable; use --export-glb"),
+        InspectorCommand::Telemetry(_) => Some("Telemetry watches are unavailable in the desktop inspector"),
+        _ => None,
+    }
+}
+
 impl std::fmt::Display for CommandError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -477,6 +489,15 @@ fn targets_match(a: &SelectionTarget, b: &SelectionTarget) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsupported_command_diagnostic_is_explicit() {
+        let command = InspectorCommand::Telemetry(TelemetryCommand::ClearWatches);
+        assert_eq!(
+            unsupported_command_message(&command),
+            Some("Telemetry watches are unavailable in the desktop inspector")
+        );
+    }
 
     #[test]
     fn test_command_serialization() {

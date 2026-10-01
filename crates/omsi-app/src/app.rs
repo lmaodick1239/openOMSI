@@ -1,6 +1,24 @@
 //! The window's game: `App`, its state and its per-frame work.
 
 use super::*;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+fn unix_epoch_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod inspector_contract_tests {
+    use super::unix_epoch_millis;
+
+    #[test]
+    fn inspector_timestamp_is_epoch_milliseconds() {
+        assert!(unix_epoch_millis() > 1_000_000_000_000);
+    }
+}
 
 pub(crate) struct App {
     pub(crate) args: Args,
@@ -363,7 +381,7 @@ impl App {
         let telemetry = self.renderer.as_ref().map(|renderer| {
             let stats = renderer.stats.borrow();
             TelemetryView {
-                timestamp_ms: self.started.elapsed().as_millis() as u64,
+                timestamp_ms: unix_epoch_millis(),
                 frame_time_ms: self
                     .profile
                     .get("frame")
@@ -423,6 +441,9 @@ impl App {
         command: &crate::inspector::InspectorCommand,
     ) -> crate::inspector::CommandResult {
         let selection = self.inspector_selection.clone().unwrap_or_default();
+        if let Some(message) = crate::inspector::unsupported_command_message(command) {
+            return Err(crate::inspector::CommandError::NotSupported(message.into()));
+        }
         crate::inspector::validate_command(command, &selection)?;
         match command {
             crate::inspector::InspectorCommand::Select(target) => {

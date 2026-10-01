@@ -513,10 +513,6 @@ pub fn apply_blue_theme(style: &mut imgui::Style) {
     style[StyleColor::Text] = [0.88, 0.91, 0.96, 1.0];
 }
 
-fn selected_target(view: Option<&InspectorMainView>) -> Option<crate::inspector::SelectionTarget> {
-    view.and_then(|view| view.selection_target.clone())
-}
-
 fn draw_inspector(
     ui: &Ui,
     view: Option<&InspectorMainView>,
@@ -596,53 +592,26 @@ fn draw_material(
     ui.text("Material mutation controls unavailable: no application operation is exposed.");
 }
 
-fn draw_render(ui: &Ui, view: Option<&RenderView>, commands: &mut VecDeque<InspectorCommand>) {
+fn draw_render(ui: &Ui, view: Option<&RenderView>, _commands: &mut VecDeque<InspectorCommand>) {
     let Some(view) = view else {
         ui.text("No render snapshot");
         return;
     };
+    ui.text(format!(
+        "Frame {:.2} ms  Draws {}  Triangles {}",
+        view.total_frame_time_ms, view.total_draw_calls, view.total_triangles
+    ));
     if !view.snapshot_available {
         ui.text(view.unavailable_reason.as_deref().unwrap_or(
             "Render debug state is unavailable.",
         ));
         return;
     }
-    ui.text(format!(
-        "Frame {:.2} ms  Draws {}  Triangles {}",
-        view.total_frame_time_ms, view.total_draw_calls, view.total_triangles
-    ));
+    ui.text("Render mutation controls unavailable: no application operation is exposed.");
     for pass in &view.passes {
         ui.bullet_text(format!(
             "{}: {:.2} ms ({} draws)",
             pass.name, pass.gpu_time_ms, pass.draw_calls
-        ));
-        if ui.small_button(format!("Toggle {}", pass.name)) {
-            commands.push_back(InspectorCommand::Render(
-                crate::inspector::RenderCommand::TogglePass(pass.name.clone()),
-            ));
-        }
-    }
-    for (label, command) in [
-        (
-            "Wireframe",
-            crate::inspector::RenderCommand::ToggleWireframe,
-        ),
-        (
-            "Collision hulls",
-            crate::inspector::RenderCommand::ToggleCollisionHulls,
-        ),
-        ("Normals", crate::inspector::RenderCommand::ToggleNormals),
-        ("UV seams", crate::inspector::RenderCommand::ToggleUVSeams),
-    ] {
-        if ui.small_button(label) {
-            commands.push_back(InspectorCommand::Render(command));
-        }
-        ui.same_line();
-    }
-    ui.new_line();
-    if ui.button("Clear isolation") {
-        commands.push_back(InspectorCommand::Render(
-            crate::inspector::RenderCommand::SetIsolation(None),
         ));
     }
 }
@@ -676,7 +645,7 @@ fn draw_human(
 fn draw_telemetry(
     ui: &Ui,
     view: Option<&TelemetryView>,
-    commands: &mut VecDeque<InspectorCommand>,
+    _commands: &mut VecDeque<InspectorCommand>,
 ) {
     let Some(view) = view else {
         ui.text("No telemetry snapshot");
@@ -686,31 +655,17 @@ fn draw_telemetry(
         "Frame {:.2} ms  Query {:.2} ms  GPU {:.2} ms",
         view.frame_time_ms, view.inspector_query_time_ms, view.gpu_staging_time_ms
     ));
-    if ui.button("Add L.throttle watch") {
-        commands.push_back(InspectorCommand::Telemetry(
-            crate::inspector::TelemetryCommand::AddWatch("L.throttle".into()),
-        ));
-    }
+    ui.text("Telemetry watch controls unavailable: no application operation is exposed.");
     for watch in &view.watch_expressions {
         ui.bullet_text(format!("{} = {}", watch.expression, watch.value));
-        if ui.small_button(format!("Remove##{}", watch.expression)) {
-            commands.push_back(InspectorCommand::Telemetry(
-                crate::inspector::TelemetryCommand::RemoveWatch(watch.expression.clone()),
-            ));
-        }
-    }
-    if ui.button("Clear watches") {
-        commands.push_back(InspectorCommand::Telemetry(
-            crate::inspector::TelemetryCommand::ClearWatches,
-        ));
     }
 }
 
 fn draw_editor(
     ui: &Ui,
     view: Option<&EditorView>,
-    inspector: Option<&InspectorMainView>,
-    commands: &mut VecDeque<InspectorCommand>,
+    _inspector: Option<&InspectorMainView>,
+    _commands: &mut VecDeque<InspectorCommand>,
 ) {
     let Some(view) = view else {
         ui.text("No editor snapshot");
@@ -721,56 +676,19 @@ fn draw_editor(
     } else {
         "Sandbox inactive"
     });
-    let Some(target) = selected_target(inspector) else {
-        return;
-    };
-    if !view.sandbox_active && ui.button("Start sandbox") {
-        commands.push_back(InspectorCommand::Editor(
-            crate::inspector::EditorCommand::StartSandbox {
-                target: target.clone(),
-            },
-        ));
-    }
-    if let Some(transform) = view.current_transform {
-        if ui.button("Update transform") {
-            commands.push_back(InspectorCommand::Editor(
-                crate::inspector::EditorCommand::UpdateTransform {
-                    target: target.clone(),
-                    position: transform.position,
-                    rotation: transform.rotation,
-                },
-            ));
-        }
-    }
-    for (label, command) in [
-        (
-            "Apply sandbox",
-            crate::inspector::EditorCommand::ApplySandbox {
-                target: target.clone(),
-            },
-        ),
-        (
-            "Revert sandbox",
-            crate::inspector::EditorCommand::RevertSandbox {
-                target: target.clone(),
-            },
-        ),
-        (
-            "Close sandbox",
-            crate::inspector::EditorCommand::CloseSandbox { target },
-        ),
-    ] {
-        if ui.button(label) {
-            commands.push_back(InspectorCommand::Editor(command));
-        }
-    }
+    ui.text(if view.sandbox_active {
+        "Editor mutation controls unavailable: no application operation is exposed."
+    } else {
+        "Editor mutation controls unavailable: sandbox is inactive."
+    });
+    return;
 }
 
 fn draw_export(
     ui: &Ui,
     view: Option<&ExportView>,
-    inspector: Option<&InspectorMainView>,
-    commands: &mut VecDeque<InspectorCommand>,
+    _inspector: Option<&InspectorMainView>,
+    _commands: &mut VecDeque<InspectorCommand>,
 ) {
     let Some(view) = view else {
         ui.text("No export snapshot");
@@ -781,25 +699,7 @@ fn draw_export(
         ui.text_colored([1.0, 0.39, 0.39, 1.0], error);
     }
     if view.status == crate::inspector::ExportStatus::Unavailable {
-        return;
-    }
-    if let Some(target) = selected_target(inspector) {
-        if ui.button("Export selection") {
-            commands.push_back(InspectorCommand::Export(
-                crate::inspector::ExportCommand::ExportSelection {
-                    target,
-                    destination: view
-                        .destination
-                        .clone()
-                        .unwrap_or_else(|| "inspector-export.gltf".into()),
-                },
-            ));
-        }
-    }
-    if ui.button("Cancel export") {
-        commands.push_back(InspectorCommand::Export(
-            crate::inspector::ExportCommand::CancelExport,
-        ));
+        ui.text("Interactive export controls unavailable: use --export-glb.");
     }
 }
 

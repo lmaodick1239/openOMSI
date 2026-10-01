@@ -72,8 +72,10 @@ fn test_gltf_export_validation() {
 
     let result = export::export_to_gltf("test_mesh", Mat4::IDENTITY, &mesh, &material);
 
-    // Should succeed with valid mesh data
-    assert!(result.is_ok(), "Valid mesh should export successfully");
+    assert!(matches!(
+        result,
+        Err(openomsi_game::inspector::export::ExportError::Unsupported(_))
+    ));
 
     // Test with empty mesh (should fail)
     let empty_mesh = export::MeshData {

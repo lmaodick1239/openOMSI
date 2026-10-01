@@ -352,9 +352,10 @@ one deactivates the other.
 
 On desktop builds, Ctrl+I opens the inspector as movable Dear ImGui windows. The layout and
 visibility of the Inspector, Hierarchy, Log, Materials, Render, Humans, Telemetry, Editor, and
-Export windows are restored between runs. Controls dispatch existing validated inspector commands
-for selection navigation, view overlays, material and render debugging, human playback, transform
-sandbox actions, glTF export, and telemetry watches.
+Export windows are restored between runs. The Inspector window supports selection navigation,
+hit cycling, and view overlays. The other panels are read-only snapshots and explicitly identify
+mutation, telemetry-watch, editor, and interactive-export features that are not available.
+The production vehicle exporter remains available through `--export-glb`.
 
 The ImGui inspector is desktop-only in this rollout. Android keeps the normal HUD and input path.
 While an inspector window has keyboard or pointer focus, game shortcuts and camera interaction are
