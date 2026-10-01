@@ -2789,9 +2789,14 @@ pub(crate) fn game_menu_for(args: &crate::Args) -> &'static [(&'static str, &'st
 }
 
 /// Apply inspector filtering to a menu based on args.
-/// Returns true if inspector should be included, false if it should be filtered out.
-pub(crate) fn should_include_inspector(args: &crate::Args) -> bool {
-    args.inspector
+/// Removes the inspector entry when `args.inspector` is false.
+pub(crate) fn apply_inspector_filter(
+    menu: &mut Vec<(&'static str, &'static str)>,
+    args: &crate::Args,
+) {
+    if !args.inspector {
+        menu.retain(|x| x.0 != "inspector");
+    }
 }
 
 impl crate::App {
@@ -2829,9 +2834,7 @@ impl crate::App {
             v.retain(|x| !matches!(x.0, "weather" | "clock" | "later" | "earlier" | "later10" | "earlier10" | "editor"));
         }
         // inspector only when enabled
-        if !self.args.inspector {
-            v.retain(|x| x.0 != "inspector");
-        }
+        apply_inspector_filter(&mut v, &self.args);
         // the everyday lines first; the rest behind "More..." (27 lines to scroll through
         // was the pause menu players found confusing)
         if self.menu_more {
@@ -2911,18 +2914,6 @@ pub(crate) fn swap_view_look(look: &mut (f32, f32), looks: &mut std::collections
 mod tests {
     use super::*;
 
-    /// Pure helper that applies inspector filtering to a menu based on args.
-    fn filter_inspector_from_menu(
-        menu: Vec<(&'static str, &'static str)>,
-        args: &crate::Args,
-    ) -> Vec<(&'static str, &'static str)> {
-        let mut v = menu;
-        if !should_include_inspector(args) {
-            v.retain(|x| x.0 != "inspector");
-        }
-        v
-    }
-
     #[test]
     fn inspector_in_base_menu() {
         // GAME_MENU constant includes inspector entry
@@ -2932,43 +2923,31 @@ mod tests {
 
     #[test]
     fn inspector_filtered_when_disabled() {
-        // Test filtering with disabled inspector
+        // Test production filtering helper with disabled inspector
         let args = crate::Args::parse_from(&["omsi"]);
         assert!(!args.inspector, "Default args should have inspector disabled");
         
-        let menu = game_menu_for(&args).to_vec();
-        let filtered = filter_inspector_from_menu(menu, &args);
+        let mut menu = game_menu_for(&args).to_vec();
+        apply_inspector_filter(&mut menu, &args);
         
-        assert!(!filtered.iter().any(|m| m.0 == "inspector"),
+        assert!(!menu.iter().any(|m| m.0 == "inspector"),
             "Inspector should be filtered out when args.inspector is false");
     }
 
     #[test]
     fn inspector_included_when_enabled() {
-        // Test filtering with enabled inspector
+        // Test production filtering helper with enabled inspector
         let args = crate::Args::parse_from(&["omsi", "--inspector"]);
         assert!(args.inspector, "Args should have inspector enabled");
         
-        let menu = game_menu_for(&args).to_vec();
-        let filtered = filter_inspector_from_menu(menu, &args);
+        let mut menu = game_menu_for(&args).to_vec();
+        apply_inspector_filter(&mut menu, &args);
         
-        assert!(filtered.iter().any(|m| m.0 == "inspector"),
+        assert!(menu.iter().any(|m| m.0 == "inspector"),
             "Inspector should be included when args.inspector is true");
         
-        let inspector_entry = filtered.iter().find(|m| m.0 == "inspector");
+        let inspector_entry = menu.iter().find(|m| m.0 == "inspector");
         assert_eq!(inspector_entry.map(|e| e.1), Some("Inspector"),
             "Inspector entry should have label 'Inspector'");
-    }
-
-    #[test]
-    fn should_include_inspector_helper() {
-        // Test the pure helper function
-        let args_disabled = crate::Args::parse_from(&["omsi"]);
-        assert!(!should_include_inspector(&args_disabled),
-            "should_include_inspector returns false when disabled");
-        
-        let args_enabled = crate::Args::parse_from(&["omsi", "--inspector"]);
-        assert!(should_include_inspector(&args_enabled),
-            "should_include_inspector returns true when enabled");
     }
 }
