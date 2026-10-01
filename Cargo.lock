@@ -3404,6 +3404,7 @@ dependencies = [
  "omsi-geometry",
  "omsi-texture",
  "pollster",
+ "rayon",
  "wgpu",
  "windows 0.62.2",
  "winit",
@@ -3432,6 +3433,7 @@ dependencies = [
 name = "omsi-sim"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "anyhow",
  "glam",
  "hashbrown 0.15.5",

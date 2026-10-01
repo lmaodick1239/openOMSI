@@ -20,6 +20,8 @@ mod inspector_contract_tests {
     }
 }
 
+const SLOW_UPLOAD_MB_S: f64 = 300.0;
+
 pub(crate) struct App {
     pub(crate) args: Args,
     pub(crate) instance: wgpu::Instance,
@@ -80,6 +82,7 @@ pub(crate) struct App {
     pub(crate) total_frames: u32,
     /// Mirror pictures due (see `MIRROR_RATE`), and which mirror is next.
     pub(crate) mirror_budget: f32,
+    pub(crate) mirrors_seen: usize,
     pub(crate) mirror_turn: usize,
     /// Cursor and view the hover was last worked out for (see the redraw).
     pub(crate) hover_key: Option<(i32, i32, i32, i32)>,
@@ -101,6 +104,12 @@ pub(crate) struct App {
     pub(crate) last: Instant,
     pub(crate) speed: f32,
     pub(crate) mouse_look: bool,
+    /// The left and right mouse buttons held.
+    pub(crate) buttons_held: (bool, bool),
+    /// The right button (or both) held: OMSI's mouse zoom (0x82c5f8) - moving the mouse up
+    /// widens the view in the bus or takes the outside camera further away, by the value at
+    /// the press over 500 pixels: (the cursor's height then, the zoom or distance then).
+    pub(crate) both_drag: Option<(f32, f32)>,
     /// Right mouse button toggles the headset picture zoom.
     #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) vr_zoom_active: bool,
@@ -108,6 +117,8 @@ pub(crate) struct App {
     pub(crate) hover: Option<String>,
     /// The part under the cursor when it is not a switch, so the HUD can say so.
     pub(crate) hover_part: Option<String>,
+    /// A `[mouseevent]` mesh is under the cursor (named in `hover` or not): the hand cursor.
+    pub(crate) hover_hand: bool,
     /// `OMSI_INPUT` script: (seconds after start, command), in order.
     pub(crate) input_script: Vec<(f32, String)>,
     /// `shot <file>` of the input script: the next frame is also rendered into this PNG.
@@ -120,6 +131,7 @@ pub(crate) struct App {
     /// The first line of the game menu (or chooser) shown, when a finger has scrolled it
     /// (in lines, fractional while dragged); `None`: the chosen line is kept in view.
     pub(crate) menu_top: Option<f32>,
+    pub(crate) menu_scroll_drag: bool,
     /// The game menu shows all its lines ("More..."), not only the everyday ones.
     pub(crate) menu_more: bool,
     /// Keys pressed (true) and let go since the Lua plugins' last frame.
@@ -219,6 +231,11 @@ pub(crate) struct App {
     pub(crate) timetable: bool,
     /// The left button is held on a switch: mouse movement turns it.
     pub(crate) dragging: bool,
+    /// The left button is held on a page of the bus (an `[htmltexture]`): its script texture
+    /// index and the place on it the pointer was last seen.
+    pub(crate) html_pressed: Option<(usize, f32, f32)>,
+    /// The same for a page of a scenery object: its map id, script texture index and place.
+    pub(crate) html_object_pressed: Option<(i64, usize, f32, f32)>,
     /// Cursor movement (logical pixels) while dragging a switch, not yet handed to the
     /// script: `<event>_drag` fires once a frame with it (see `Player::drag`).
     pub(crate) drag_delta: (f32, f32),
@@ -230,6 +247,8 @@ pub(crate) struct App {
     /// belongs to now; see `App::sync_view_look`.
     pub(crate) view_looks: std::collections::HashMap<String, (f32, f32)>,
     pub(crate) look_view: String,
+    /// Smooth switch between two cockpit cameras (arrow keys), see `CamBlend`.
+    pub(crate) cam_blend: CamBlend,
     /// The zoom of the views inside the bus (driver, passenger): their field of view is
     /// the camera's times this (the mouse wheel, + and -, a pinch), per view.
     pub(crate) view_zoom: std::collections::HashMap<String, f32>,
@@ -261,6 +280,8 @@ pub(crate) struct App {
     /// The frame-rate governor's two-second window.
     /// Window seconds, frames, and time waiting on presentation/GPU in that window.
     pub(crate) governor: (f32, u32, f32),
+    /// Readings in a row at the smallest render scale still waiting for the card.
+    pub(crate) governor_low: u32,
     /// Cumulative presentation wait at the previous frame, independent of OMSI_PROFILE.
     pub(crate) governor_wait_prev: f64,
     /// Frames the window was hidden for (they are not drawn) and whether the exit is under way.
@@ -600,6 +621,12 @@ impl App {
                 Err(e) => log::error!("OpenXR could not start: {e:#}"),
             }
         }
+        let upload = renderer.upload_speed_mb_s();
+        log::info!("graphics: {upload:.0} MB/s copied towards the card");
+        if upload < SLOW_UPLOAD_MB_S {
+            log::error!("graphics: the driver copies only {upload:.0} MB/s towards the card (thousands are usual); every texture and buffer the game sends waits on it, down to a few frames a second - restarting the computer usually brings it back");
+            self.service_msg = Some((format!("Graphics driver is slow ({upload:.0} MB/s): the game will stutter. Restarting the computer usually fixes it."), 30.0));
+        }
         crate::lights::load_smoke_texture(&mut renderer, &self.args.root);
         crate::lights::set_corona_root(&self.args.root);
         let size = window.inner_size();
@@ -822,6 +849,7 @@ impl App {
                         bus: Some(o.bus.clone()),
                         spawn: Some(o.spawn.clone()),
                         hof: o.hof.clone(),
+                        paint: o.paint.clone(),
                         situation_vars: o.vars.clone(),
                         situation_strvars: o.strvars.clone(),
                         situation_others: Vec::new(),
@@ -1117,12 +1145,12 @@ impl App {
         w.update_texture_budget(r, scene, &centers, false);
         if centers.is_empty()
             || !streamer.update(
-                r,
-                scene,
-                &centers,
-                std::time::Duration::from_millis(6),
-                self.audio.as_ref(),
-            )
+            r,
+            scene,
+            &centers,
+            std::time::Duration::from_millis(6),
+            self.audio.as_ref(),
+        )
         {
             return;
         }
@@ -1224,5 +1252,136 @@ pub(crate) fn report_missing_content(w: &World, msg: &mut Option<(String, f32)>)
             ),
             15.0,
         ));
+    }
+}
+
+/// How long the glide between two cockpit cameras takes (seconds). The eye, the turn of the
+/// view and the field of view all follow the same curve over this time. 0 = hard cut.
+pub(crate) const CAM_BLEND_SECS: f32 = 0.6;
+/// The longest step of time one frame adds to the glide (seconds): a frame that hitches at
+/// the start of a switch does not skip ahead in it.
+pub(crate) const CAM_BLEND_MAX_DT: f32 = 1.0 / 30.0;
+
+fn wrap_deg(a: f32) -> f32 {
+    (a + 180.0).rem_euclid(360.0) - 180.0
+}
+
+/// `a` (k = 0) to `b` (k = 1), both cameras fixed in the bus's frame: the eye, the turn of the
+/// view and the field of view on a straight way. The bus's own motion (its pitch, bank, the
+/// head) is put on the result afterwards, so the glide is the same standing and driving.
+pub(crate) fn blend_local(a: &omsi_vehicle::Camera, b: &omsi_vehicle::Camera, k: f32) -> omsi_vehicle::Camera {
+    // (measured from `b`: at k = 1 every value is exactly `b`'s - no 360 degree residue of a
+    // yaw that went the short way round, no rounding left over for the hand-over to the
+    // plain camera to show)
+    let k = k.clamp(0.0, 1.0);
+    if k >= 1.0 {
+        return b.clone();
+    }
+    let rest = 1.0 - k;
+    let l = |x: f32, y: f32| y + (x - y) * rest;
+    // The view direction turns along the great circle between the two (a slerp of the
+    // directions), not yaw and pitch each on their own straight line: that swept the view
+    // out in a bow - up and across at once - while the eye went straight, which looked like
+    // a zigzag in the glide.
+    let dir = |c: &omsi_vehicle::Camera| {
+        let (sy, cy) = c.yaw.to_radians().sin_cos();
+        let (sp, cp) = c.pitch.to_radians().sin_cos();
+        glam::Vec3::new(sy * cp, cy * cp, sp)
+    };
+    let (fa, fb) = (dir(a), dir(b));
+    let dot = fa.dot(fb).clamp(-1.0, 1.0);
+    let (yaw, pitch) = if dot < -0.9995 {
+        // (turned right round: no one great circle, so the plain way)
+        (b.yaw - wrap_deg(b.yaw - a.yaw) * rest, l(a.pitch, b.pitch))
+    } else {
+        let f = if dot > 0.9995 {
+            (fa * rest + fb * k).normalize_or(fb)
+        } else {
+            let theta = dot.acos();
+            let s = theta.sin();
+            ((fa * ((rest * theta).sin() / s)) + (fb * ((k * theta).sin() / s))).normalize_or(fb)
+        };
+        (f.x.atan2(f.y).to_degrees(), f.z.clamp(-1.0, 1.0).asin().to_degrees())
+    };
+    omsi_vehicle::Camera {
+        pos: [l(a.pos[0], b.pos[0]), l(a.pos[1], b.pos[1]), l(a.pos[2], b.pos[2])],
+        dist: l(a.dist, b.dist),
+        fov: l(a.fov, b.fov),
+        yaw,
+        pitch,
+        extra: b.extra,
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct CamBlend {
+    /// (view, camera numbers) of the last frame: a change of the numbers inside the same
+    /// view is a camera switch.
+    pub key: Option<(String, (usize, usize))>,
+    /// The camera the glide started from (in the bus's frame), while one is under way.
+    pub from: Option<omsi_vehicle::Camera>,
+    /// The cockpit camera as it was drawn last frame (in the bus's frame): where the next
+    /// glide starts from.
+    pub shown: Option<omsi_vehicle::Camera>,
+    /// Just sat down at the wheel (from on foot): the next cockpit frame glides in from where
+    /// the walker's eyes were.
+    pub entering: bool,
+    /// 0..1 progress of the glide.
+    pub t: f32,
+    /// What the glide's last picture was off from the plain camera by, let go of over a
+    /// fraction of a second after the hand-over (so that nothing is left to jump).
+    pub carry: Option<CamCarry>,
+}
+
+/// A small difference between two pictures of the camera (world position, angles in degrees,
+/// field of view) that is eased out instead of being cut.
+#[derive(Clone, Copy)]
+pub(crate) struct CamCarry {
+    pub pos: glam::DVec3,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub roll: f32,
+    pub fov: f32,
+}
+
+impl CamCarry {
+    /// `a` minus `b`.
+    pub fn between(a: &omsi_render::Camera, b: &omsi_render::Camera) -> Self {
+        Self {
+            pos: a.position - b.position,
+            yaw: wrap_deg(a.yaw - b.yaw),
+            pitch: a.pitch - b.pitch,
+            roll: wrap_deg(a.roll - b.roll),
+            fov: a.fov_deg - b.fov_deg,
+        }
+    }
+
+    /// Put on a camera.
+    pub fn apply(&self, c: &mut omsi_render::Camera) {
+        c.position += self.pos;
+        c.yaw += self.yaw;
+        c.pitch = (c.pitch + self.pitch).clamp(-89.0, 89.0);
+        c.roll += self.roll;
+        c.fov_deg += self.fov;
+    }
+
+    /// Ease out by one frame; false once nothing is left.
+    pub fn decay(&mut self, dt: f32) -> bool {
+        let k = (-dt.clamp(0.0, 0.1) * 12.0).exp();
+        self.pos *= k as f64;
+        self.yaw *= k;
+        self.pitch *= k;
+        self.roll *= k;
+        self.fov *= k;
+        self.pos.length() > 1e-4 || self.yaw.abs() > 0.01 || self.pitch.abs() > 0.01 || self.roll.abs() > 0.01 || self.fov.abs() > 0.01
+    }
+}
+
+impl CamBlend {
+    /// How far along the way from the old camera to the new one: smootherstep of the time
+    /// (no jolt in speed or acceleration at either end).
+    pub fn progress(&self) -> f32 {
+        let t = self.t.clamp(0.0, 1.0);
+        t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
     }
 }

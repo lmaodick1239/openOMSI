@@ -73,6 +73,8 @@ fn servers_path() -> std::path::PathBuf {
 pub struct Choice {
     pub bus: String,
     pub paint: String,
+    /// The number plate the player typed for the bus (empty: as the content says).
+    pub plate: String,
     pub hof: String,
     /// The depot file was chosen by hand (else it follows the map and the date).
     pub hof_manual: bool,
@@ -107,6 +109,7 @@ impl Default for Choice {
         Choice {
             bus: String::new(),
             paint: String::new(),
+            plate: String::new(),
             hof: String::new(),
             hof_manual: false,
             map: String::new(),
@@ -172,6 +175,10 @@ pub struct State {
     pub profile: Option<core::Profile>,
     pub settings: serde_json::Value,
     pub settings_dirty: f32,
+    /// `settings.cfg` as last read or written here: a game changes it too (its Options
+    /// in the pause menu), and the launcher's copy from before must not be written back
+    /// over that.
+    settings_file: Option<String>,
     pub keybindings: serde_json::Value,
     pub keybindings_error: String,
     pub instances: Vec<core::Instance>,
@@ -233,6 +240,7 @@ impl State {
             profile: None,
             settings,
             settings_dirty: 0.0,
+            settings_file: read_settings_file(),
             keybindings,
             keybindings_error: String::new(),
             instances: Vec::new(),
@@ -266,6 +274,12 @@ impl State {
         s.load_content();
         s.load_profiles();
         s.poll_now();
+        // (a phone runs the game in the launcher's process: a crash took both, and the
+        // launcher learns of it from the previous run's log)
+        #[cfg(target_os = "android")]
+        {
+            s.crash = crate::android::previous_run_crash();
+        }
         s
     }
 
@@ -485,6 +499,7 @@ impl State {
             map: host_map.unwrap_or_else(|| c.map.clone()),
             bus: c.bus.clone(),
             paint: Some(c.paint.clone()).filter(|p| !p.is_empty()),
+            plate: Some(c.plate.clone()).filter(|p| !p.trim().is_empty()),
             hof: Some(c.hof.clone()).filter(|p| !p.is_empty()),
             entry: Some(c.entry),
             line: if c.free { None } else { c.line.clone() },
@@ -546,6 +561,21 @@ impl State {
         self.spawn(move || Msg::Launched(core::launch(&d).map_err(|e| format!("{e:#}"))));
     }
 
+    /// Settings a game changed while it ran: taken over, unless the launcher's own changes
+    /// wait to be saved (those win, as the later ones).
+    fn reload_changed_settings(&mut self) {
+        if self.settings_dirty > 0.0 {
+            return;
+        }
+        let now = read_settings_file();
+        if now.is_some() && now != self.settings_file {
+            if let Ok(v) = core::get_settings() {
+                self.settings = v;
+            }
+            self.settings_file = now;
+        }
+    }
+
     fn save_pending_settings(&mut self) -> bool {
         if self.settings_dirty <= 0.0 {
             return true;
@@ -553,6 +583,7 @@ impl State {
         match core::save_settings(&self.settings) {
             Ok(()) => {
                 self.settings_dirty = 0.0;
+                self.settings_file = read_settings_file();
                 true
             }
             Err(e) => {
@@ -576,6 +607,7 @@ impl State {
         if self.poll_t <= 0.0 {
             self.poll_t = 2.5;
             self.poll_now();
+            self.reload_changed_settings();
         }
         if self.choice_dirty > 0.0 {
             self.choice_dirty -= dt;
@@ -589,7 +621,10 @@ impl State {
             self.settings_dirty -= dt;
             if self.settings_dirty <= 0.0 {
                 match core::save_settings(&self.settings) {
-                    Ok(()) => self.set_status("Settings saved.", false),
+                    Ok(()) => {
+                        self.settings_file = read_settings_file();
+                        self.set_status("Settings saved.", false)
+                    }
                     Err(e) => self.set_status(format!("{e:#}"), true),
                 }
             }
@@ -932,8 +967,13 @@ impl State {
     pub fn first_trip(&self) -> Option<usize> {
         let t = self.tour()?;
         let now = self.choice.time as f64 * 60.0;
-        t.trips.iter().position(|x| x.departure >= now - 120.0).or(if t.trips.is_empty() { None } else { Some(t.trips.len() - 1) })
+        trip_index_at(t, now)
     }
+}
+
+/// The trip a tour starts with at `now`, shared by the route preview and the launch choice.
+pub(super) fn trip_index_at(tour: &core::TourInfo, now: f64) -> Option<usize> {
+    tour.trips.iter().position(|x| x.departure >= now - 120.0).or(if tour.trips.is_empty() { None } else { Some(tour.trips.len() - 1) })
 }
 
 pub fn hhmm(seconds: f64) -> String {
@@ -980,14 +1020,28 @@ pub fn root_problem(root: &str) -> String {
 pub fn crash_of(log: &std::path::Path) -> Option<(String, String)> {
     let text = std::fs::read(log).ok()?;
     let text = String::from_utf8_lossy(&text[text.len().saturating_sub(64 * 1024)..]).to_string();
-    let lines: Vec<&str> = text.lines().collect();
+    let all: Vec<&str> = text.lines().collect();
+    // (the run itself only: an error the launcher logged before the game started - a
+    // preview's picture left out - titled the report of a game that died much later, and
+    // the phone's "died compiling a shader" hint never showed, #381, #331)
+    let lines: Vec<&str> = match all.iter().rposition(|l| l.contains("starting the game:")) {
+        Some(k) => all[k..].to_vec(),
+        None => all.clone(),
+    };
+    // (an error the game got over - "the game goes on", a part of the picture left out -
+    // is no crash)
+    let recovered = |l: &str| l.contains("the game goes on") || l.contains("left out") || l.contains("could not be recorded");
     // (a lost graphics device ends the game in order - it saves the run - but it is a crash
     // for the player all the same: the driver gave up)
+    // (one the game got over by starting again with safer graphics is no crash)
+    if lines.iter().any(|l| l.contains("starting again with safer graphics")) {
+        return None;
+    }
     let lost = lines.iter().rposition(|l| l.contains("the graphics device was lost"));
     if lost.is_none() && lines.iter().any(|l| l.contains("game ends")) {
         return None;
     }
-    let at = lost.or_else(|| lines.iter().rposition(|l| l.contains("the game stopped on an error") || l.contains(" ERROR ")))?;
+    let at = lost.or_else(|| lines.iter().rposition(|l| l.contains("the game stopped on an error") || (l.contains(" ERROR ") && !recovered(l))))?;
     let first = lines[at].split_once("] ").map(|x| x.1).unwrap_or(lines[at]).trim();
     // (a panic's message is on the following lines)
     let mut what = first.to_string();
@@ -998,8 +1052,23 @@ pub fn crash_of(log: &std::path::Path) -> Option<(String, String)> {
         what.push(' ');
         what.push_str(l.trim());
     }
-    let tail = lines[lines.len().saturating_sub(150)..].join("\n");
+    let tail = all[all.len().saturating_sub(150)..].join("\n");
     Some((what.chars().take(600).collect(), tail))
+}
+
+#[cfg(test)]
+mod choice_tests {
+    /// `launcher-duty.json` from before the number plate field: the missing key falls back to
+    /// the default (no plate), and a typed plate survives a round trip.
+    #[test]
+    fn an_old_duty_file_loads_and_a_typed_plate_is_kept() {
+        let old: super::Choice = serde_json::from_str(r#"{"bus":"Vehicles/x.bus","map":"maps/x/global.cfg"}"#).unwrap();
+        assert_eq!(old.plate, "");
+        let mut c = super::Choice::default();
+        c.plate = "B-AB 1234".into();
+        let back: super::Choice = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert_eq!(back.plate, "B-AB 1234");
+    }
 }
 
 #[cfg(test)]
@@ -1017,6 +1086,13 @@ mod crash_tests {
         assert!(super::crash_of(&p).is_none());
         std::fs::write(&p, "[t ERROR omsi_render] the graphics device was lost (Unknown): Unexpected error variant\n[t INFO openomsi_game::app_events] game ends\n").unwrap();
         assert!(super::crash_of(&p).unwrap().0.contains("device was lost"));
+        // an error before the game started, or one it got over, is not the crash
+        std::fs::write(&p, "[t ERROR omsi_render] a part of the picture could not be recorded (left out)\n[t INFO x] starting the game: omsi\n[t INFO omsi_render] renderer: compiling the sky and clouds shaders\n").unwrap();
+        assert!(super::crash_of(&p).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+fn read_settings_file() -> Option<String> {
+    std::fs::read_to_string(core::data_dir().join("settings.cfg")).ok()
 }

@@ -2,6 +2,16 @@
 
 use super::*;
 
+/// Global actions a controller button should send to the game instead of to the bus script.
+pub(crate) fn is_game_action(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.starts_with("view_")
+        || matches!(
+            name.as_str(),
+            "sim_pause" | "screenshot" | "quicksave" | "toggel_mouse_ctrl" | "toggel_ctrler"
+        )
+}
+
 impl App {
     /// Save the personnel file and the session summary (once: every caller ends the game,
     /// and the frames the loop still runs before it stops count no more time).
@@ -718,6 +728,53 @@ impl App {
         };
         p.action(action, true);
         p.action(action, false);
+    }
+
+    pub(crate) fn start_both_drag(&mut self) -> bool {
+        if self.game_menu.is_some()
+            || self.player.is_none()
+            || self.navigator.as_ref().is_some_and(|n| n.map_open())
+        {
+            return false;
+        }
+        let value = match self.view.as_str() {
+            "outside" => self.orbit,
+            "driver" | "pax" => *self.view_zoom.get(&self.view).unwrap_or(&1.0),
+            _ => return false,
+        };
+        self.both_drag = Some((self.cursor.1, value));
+        self.mouse_look = false;
+        self.update_hover();
+        true
+    }
+
+    pub(crate) fn right_zooms(&self) -> bool {
+        !self.settings.alt_view
+            || self.keys.contains(&KeyCode::ShiftLeft)
+            || self.keys.contains(&KeyCode::ShiftRight)
+    }
+
+    pub(crate) fn on_right(&mut self, pressed: bool) {
+        self.buttons_held.1 = pressed;
+        if pressed && self.buttons_held.0 && !self.dragging && self.start_both_drag() {
+            return;
+        }
+        if pressed && self.dragging {
+            return;
+        }
+        if !pressed {
+            self.both_drag = None;
+        }
+        if pressed && self.mouse_drive && self.game_menu.is_none() {
+            self.mouse_drive = false;
+            crate::player::keep_wheel(self.player.as_mut());
+            self.service_msg = Some(("Mouse steering off".into(), 3.0));
+        }
+        if pressed && self.right_zooms() && self.start_both_drag() {
+            return;
+        }
+        self.mouse_look = pressed;
+        self.update_hover();
     }
 
     pub(crate) fn on_mouse_moved(&mut self, x: f32, y: f32) {
@@ -2372,9 +2429,9 @@ pub(crate) fn script_key(name: &str) -> Option<KeyCode> {
                 p.hovered_part(o, d, spread)
             }
             // (in another player's bus nothing is offered: its switches are the driver's)
-            _ => None,
+            _ => (None, false),
         };
-        match found {
+        match found.0 {
             Some((name, true)) => {
                 self.hover = Some(name);
                 self.hover_part = None;

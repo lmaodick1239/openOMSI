@@ -387,6 +387,11 @@ add_camera_reflexion(_2) mass momentofintertia cog boundingbox crashmode_pole ne
 (attach_trans attach_rot_x/y/z) maplight rail_enh third_rail triggerbox_new triggerbox_setreverb
 plus the whole model.cfg vocabulary inline.
 
+`[rendertype] presurface` draws the object before terrain and ordinary scenery, keeping
+its mesh/material order. Alpha-blended materials still write depth at transparent texels:
+an invisible cover can keep terrain from hiding an excavation already drawn below it.
+Alpha-tested materials retain their cutouts, and `[matl_noZwrite]` disables blended depth writes.
+
 ## Model (.cfg) - unit `mc_complobj`
 
 LOD VFDmaxmin detail_factor tex_detail_factor noDistanceCheck terrainhole CTC CTCTexture
@@ -509,6 +514,9 @@ the bottom.
 
 * `tile_x_y.map.LM.bmp` (256×256): the tile's **night light map** - pools of street lamp
   light on the ground (not shadows), north at the top row; added to the terrain at night.
+  It covers the tile **and its eight neighbours**: the tile itself is the middle third
+  (texels 85⅓..170⅔ each way). Neighbouring light maps are the same picture shifted by a
+  third - 85 texels between two tiles, 171 between every other one, on all stock maps.
 * Spline profiles (`[profilepnt] x z u v`) are extruded as-is: a road's outer points sit at
   the kerb height (0.25 m on the Marcel street splines) with no skirt down to the terrain,
   so the roadway is a slab standing on the ground. The terrain is only cut away under
@@ -834,8 +842,13 @@ of a dirt overlay material. `veh_wash` clears them.
 
 `[matl_change] texture index variable` followed by one `[matl_item]` block (every stock
 file has exactly one): the block's `[matl_nightmap]`, `[matl_lightmap]`, `[matl_allcolor]` …
-describe the material *variant* that is active while the variable is set (≥ 0.5); with the
-variable at 0 the plain material applies. The item's `[matl_nightmap]` glows at full strength while the
+describe the material *variant*. Omsi.exe (0x5fd6xx) rounds the variable to the nearest
+whole number (ties to even) and shows item n for 1 ≤ n ≤ the number of items, the plain
+material for anything else - a variable at 2 with one item is dark. A variable no script
+declares is registered by the model loader at 0 (the stock MANs' spare buttons are switched
+by `*Noch nicht belegt*`, "not assigned yet", and stay dark). The `[matl_change]` block
+itself changes the plain material; each `[matl_item]` starts as a copy of the plain
+material as it is at that point (openOMSI draws the first item). The item's `[matl_nightmap]` glows at full strength while the
 variable is on, by day as well - warning lamps (`lights_blinkgeber`, `cockpit_light_*`,
 `haltewunschlampe`) and dashboard screens drawn only in the night map (the Procity's pressure
 screen, switched by `elec_busbar_main`) depend on it; a plain `[matl_nightmap]` fades in with

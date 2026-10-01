@@ -203,6 +203,7 @@ pub fn omsi_options(root: &Path) -> Option<OmsiOptions> {
     }
     // flags: present or not
     v["head_movement"] = json!(o.flag("driverview_moving"));
+    v["driverview_smooth"] = json!(o.flag("driverview_smooth"));
     v["collision_vehicles"] = json!(!o.flag("no_collision_vehtoveh"));
     v["collision_objects"] = json!(!o.flag("no_collision"));
     v["driver"] = json!(o.flag("see_own_driver"));
@@ -255,7 +256,13 @@ pub fn content_dir() -> Option<PathBuf> {
             let c = load_config_raw();
             let game = find_game(&c.game)?;
             let dir = game.parent()?.to_path_buf();
-            omsi_cfg::content_folder_of(&if dir.ends_with("Contents/MacOS") { dir.parent()?.parent()?.parent()?.to_path_buf() } else { dir })
+            let beside = if dir.ends_with("Contents/MacOS") { dir.parent()?.parent()?.parent()?.to_path_buf() } else { dir };
+            let cand = omsi_cfg::content_folder_of(&beside);
+            if (cand.exists() || std::fs::create_dir_all(&cand).is_ok()) && omsi_cfg::is_writable(&cand) {
+                cand
+            } else {
+                data_dir().join("content")
+            }
         }
     };
     let _ = omsi_cfg::ensure_content_layout(&dir);
@@ -1436,12 +1443,29 @@ pub fn delete_profile(name: &str) -> Result<()> {
 // game reads that first), else the original installation's, which is never written
 
 fn keyboard_cfg_write_path() -> Result<PathBuf> {
-    Ok(content_dir().unwrap_or(root()?).join("Inputs").join("keyboard.cfg"))
+    let cand = content_dir().unwrap_or(root()?).join("Inputs").join("keyboard.cfg");
+    if let Some(p) = cand.parent() {
+        if (p.exists() || std::fs::create_dir_all(p).is_ok()) && omsi_cfg::is_writable(p) {
+            return Ok(cand);
+        }
+    }
+    let fallback = data_dir().join("Inputs").join("keyboard.cfg");
+    if let Some(p) = fallback.parent() {
+        let _ = std::fs::create_dir_all(p);
+    }
+    Ok(fallback)
 }
 
 fn keyboard_cfg_read_path() -> Result<PathBuf> {
     let own = keyboard_cfg_write_path()?;
-    Ok(if own.exists() { own } else { omsi_cfg::original_keyboard_cfg(&root()?) })
+    if own.exists() {
+        return Ok(own);
+    }
+    let fallback = data_dir().join("Inputs").join("keyboard.cfg");
+    if fallback.exists() {
+        return Ok(fallback);
+    }
+    Ok(omsi_cfg::original_keyboard_cfg(&root()?))
 }
 
 fn binding_to_json(b: &omsi_content::input::KeyBinding) -> Value {
@@ -1528,6 +1552,7 @@ pub const LANGUAGES: &[(&str, &str, &str, &[&str])] = &[
     ("HUN", "Magyar", "hu", &["hu", "hungarian", "magyar"]),
     ("ESP", "Español", "es", &["es", "spa", "spanish", "español"]),
     ("PTB", "Português (Brasil)", "pt", &["pt", "br", "pt-br", "por", "portuguese", "português"]),
+    ("PTP", "Português (Portugal)", "pt-pt", &["pt-pt", "pt_pt", "pt-portugal", "portuguese-portugal", "português (portugal)", "português de portugal"]),
     ("ITA", "Italiano", "it", &["it", "italian", "italiano"]),
     ("NLD", "Nederlands", "nl", &["nl", "dutch", "nederlands"]),
     ("TUR", "Türkçe", "tr", &["tr", "turkish", "türkçe"]),
@@ -1578,11 +1603,11 @@ pub fn settings_from_text(text: Option<&str>) -> Value {
     v["vr_mirror_rate"] = json!(16);
     v["vr_desktop_mirror"] = json!(true);
     // OMSI's own options
-    for (k, d) in [("maintenance", json!(0)), ("ai_unsched_factor", json!(100)), ("ai_max_scheduled", json!(0)), ("ai_max_parked", json!(0)), ("use_real_time", json!(false)), ("use_real_date", json!(false)), ("use_real_year", json!(false)), ("collision_vehicles", json!(true)), ("collision_objects", json!(true)), ("collision_pedestrians", json!(true)), ("head_movement", json!(true))] {
+    for (k, d) in [("maintenance", json!(0)), ("ai_unsched_factor", json!(100)), ("ai_max_scheduled", json!(0)), ("ai_max_parked", json!(0)), ("use_real_time", json!(false)), ("use_real_date", json!(false)), ("use_real_year", json!(false)), ("collision_vehicles", json!(true)), ("collision_objects", json!(true)), ("collision_pedestrians", json!(true)), ("head_movement", json!(true)), ("driverview_smooth", json!(true)), ("hands_in_cab", json!(false)), ("alt_view", json!(true))] {
         v[k] = d;
     }
     // openOMSI's own: what passengers say, OMSI's route arrows, getting up from the seat
-    for (k, d) in [("pax_voices", json!("all")), ("nav_arrows", json!(false)), ("get_up", json!(false)), ("time_speed", json!("1")), ("machine_translation", json!(false)), ("shadow_casters", json!("all")), ("reflections", json!(true)), ("mouse_sens", json!(1.0)), ("graphics_api", json!("auto")), ("ctrl_off", json!("")), ("steering_linear", json!(false)), ("old_steering", json!(false)), ("ff_invert", json!(false)), ("ff_enabled", json!(true)), ("brake_hold", json!(true)), ("wheel_range", json!(900.0)), ("wheel_lock", json!(0.0)), ("fov", json!(0.0)), ("camera_collision", json!(true)), ("pedal_throttle", json!(1.0)), ("pedal_brake", json!(1.0)), ("seat_x", json!(0.0)), ("seat_y", json!(0.0)), ("seat_z", json!(0.0)), ("head_tracking", json!(false))] {
+    for (k, d) in [("pax_voices", json!("all")), ("nav_arrows", json!(false)), ("get_up", json!(false)), ("time_speed", json!("1")), ("machine_translation", json!(false)), ("shadow_casters", json!("all")), ("reflections", json!(true)), ("mouse_sens", json!(1.0)), ("graphics_api", json!("auto")), ("ctrl_off", json!("")), ("steering_linear", json!(false)), ("old_steering", json!(false)), ("red_steer_spd", json!(false)), ("ff_invert", json!(false)), ("ff_enabled", json!(true)), ("brake_hold", json!(true)), ("auto_clutch", json!(true)), ("wheel_range", json!(900.0)), ("wheel_lock", json!(0.0)), ("fov", json!(0.0)), ("camera_collision", json!(true)), ("steer_look", json!(false)), ("pedal_throttle", json!(1.0)), ("pedal_brake", json!(1.0)), ("seat_x", json!(0.0)), ("seat_y", json!(0.0)), ("seat_z", json!(0.0)), ("head_tracking", json!(false)), ("led_glow", json!(6)), ("led_mips", json!(true))] {
         v[k] = d;
     }
     // updates from the GitHub releases: looked for when the launcher starts, installed
@@ -1609,23 +1634,25 @@ pub fn settings_from_text(text: Option<&str>) -> Value {
             "vr_scale" => v[&k] = json!(val.parse::<f64>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.5, 1.0)).unwrap_or(0.65)),
             "vr_head_smoothing_ms" => v[&k] = json!(val.parse::<f64>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.0, 30.0) as i64).unwrap_or(0)),
             "vr_mirror_rate" => v[&k] = json!(val.parse::<f64>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.0, 60.0) as i64).unwrap_or(16)),
-            "mirror_size" | "max_fps" => v[&k] = json!(val.parse::<f64>().map(|x| x as i64).unwrap_or(0)),
+            "mirror_size" => v[&k] = json!(val.parse::<i64>().map(|x| if x == 0 { 0 } else { x.clamp(64, 2048) }).unwrap_or(256)),
+            "max_fps" => v[&k] = json!(val.parse::<f64>().map(|x| x as i64).unwrap_or(0)),
             "max_obj_dist" => v[&k] = if val.eq_ignore_ascii_case("auto") { json!("auto") } else { json!(val.parse::<f64>().map(|m| (m.round() as i64).to_string()).unwrap_or_else(|_| "auto".into())) },
-            "ssao" | "shadows" | "navigator" | "enhanced" | "vr" | "vr_desktop_mirror" | "fullscreen" | "vsync" | "exact_fare" | "detail_textures" | "texture_compression" | "chat" | "tooltips" | "name_tags" | "show_fps" | "clouds" | "doppler" | "driver" | "use_real_time" | "use_real_date" | "use_real_year" | "collision_vehicles" | "collision_objects" | "collision_pedestrians" | "head_movement" => v[&k] = json!(b(val)),
+            "ssao" | "shadows" | "navigator" | "enhanced" | "vr" | "vr_desktop_mirror" | "fullscreen" | "vsync" | "exact_fare" | "detail_textures" | "texture_compression" | "chat" | "tooltips" | "name_tags" | "show_fps" | "clouds" | "doppler" | "driver" | "use_real_time" | "use_real_date" | "use_real_year" | "collision_vehicles" | "collision_objects" | "collision_pedestrians" | "head_movement" | "driverview_smooth" | "hands_in_cab" | "alt_view" => v[&k] = json!(b(val)),
             "maintenance" | "ai_unsched_factor" | "ai_max_scheduled" | "ai_max_parked" => v[&k] = json!(val.trim_end_matches('%').parse::<f64>().map(|x| x.max(0.0) as i64).unwrap_or(0)),
             "drive_keys" | "navigator_corner" | "boarding" | "render_scale" | "pax_voices" => v[&k] = json!(val),
             "ctrl_off" => v[&k] = json!(val),
             "graphics_api" => v[&k] = json!(match val.to_ascii_lowercase().as_str() { "vulkan" => "vulkan", "dx12" => "dx12", "gl" => "gl", _ => "auto" }),
             "shadow_casters" => v[&k] = json!(if val.eq_ignore_ascii_case("omsi") { "omsi" } else { "all" }),
             "ctrl_deadzone" => v[&k] = json!(val.parse::<f64>().unwrap_or(0.0).clamp(0.0, 0.3)),
-            "mouse_sens" => v[&k] = json!(val.parse::<f64>().unwrap_or(1.0).clamp(0.25, 2.0)),
+            "mouse_sens" => v[&k] = json!(val.parse::<f64>().unwrap_or(1.0).clamp(0.1, 3.0)),
             "wheel_range" => v[&k] = json!(val.parse::<f64>().unwrap_or(900.0).clamp(90.0, 2880.0)),
             "wheel_lock" => v[&k] = json!(val.parse::<f64>().map(|x| if x < 45.0 { 0.0 } else { x.min(2880.0) }).unwrap_or(0.0)),
             "fov" => v[&k] = json!(val.parse::<f64>().map(|x| if x < 20.0 { 0.0 } else { x.min(120.0) }).unwrap_or(0.0)),
-            "camera_collision" | "head_tracking" => v[&k] = json!(b(val)),
+            "camera_collision" | "steer_look" | "head_tracking" | "led_mips" => v[&k] = json!(b(val)),
+            "led_glow" => v[&k] = json!(val.parse::<i64>().map(|x| x.clamp(0, 15)).unwrap_or(6)),
             "pedal_throttle" | "pedal_brake" => v[&k] = json!(val.parse::<f64>().map(|x| x.clamp(0.25, 4.0)).unwrap_or(1.0)),
             "seat_x" | "seat_y" | "seat_z" => v[&k] = json!(val.parse::<f64>().map(|x| x.clamp(-1.5, 1.5)).unwrap_or(0.0)),
-            "nav_arrows" | "get_up" | "machine_translation" | "update_check" | "update_auto" | "reflections" | "steering_linear" | "old_steering" | "ff_invert" | "ff_enabled" | "brake_hold" => v[&k] = json!(b(val)),
+            "nav_arrows" | "get_up" | "machine_translation" | "update_check" | "update_auto" | "reflections" | "steering_linear" | "old_steering" | "red_steer_spd" | "ff_invert" | "ff_enabled" | "brake_hold" | "auto_clutch" => v[&k] = json!(b(val)),
             "time_speed" => v[&k] = json!(val.trim_start_matches(['x', 'X']).parse::<f64>().map(|x| x.clamp(1.0, 30.0)).map(|x| if x.fract() == 0.0 { format!("{}", x as i64) } else { x.to_string() }).unwrap_or_else(|_| "1".into())),
             "language" => v[&k] = json!(language_code(val)),
             "graphics" | "renderer" => graphics = Some(graphics_mode(val)),
@@ -1792,7 +1819,7 @@ pub fn settings_to_text(v: &Value, old: Option<&str>) -> String {
         f("pax_density", 1.0),
         f("vol_ai", 1.0),
         f("vol_scenery", 1.0),
-        n("mirror_size", 256).clamp(64, 2048),
+        match n("mirror_size", 256) { 0 => 0, x => x.clamp(64, 2048) },
         b("doppler", true),
         b("driver", true),
         n("max_fps", 0).max(0),
@@ -1806,7 +1833,7 @@ pub fn settings_to_text(v: &Value, old: Option<&str>) -> String {
     // OMSI's own options (options.cfg): maintenance ([wear_lifespan]), the AI counts and
     // the share of random traffic, the real clock and calendar, collisions, head movement
     let text = format!(
-        "{text}maintenance={}\nai_unsched_factor={}\nai_max_scheduled={}\nai_max_parked={}\nuse_real_time={}\nuse_real_date={}\nuse_real_year={}\ncollision_vehicles={}\ncollision_objects={}\ncollision_pedestrians={}\nhead_movement={}\n",
+        "{text}maintenance={}\nai_unsched_factor={}\nai_max_scheduled={}\nai_max_parked={}\nuse_real_time={}\nuse_real_date={}\nuse_real_year={}\ncollision_vehicles={}\ncollision_objects={}\ncollision_pedestrians={}\nhead_movement={}\ndriverview_smooth={}\nhands_in_cab={}\nalt_view={}\n",
         n("maintenance", 0).clamp(0, 4),
         n("ai_unsched_factor", 100).clamp(0, 300),
         n("ai_max_scheduled", 0).max(0),
@@ -1818,9 +1845,12 @@ pub fn settings_to_text(v: &Value, old: Option<&str>) -> String {
         b("collision_objects", true),
         b("collision_pedestrians", true),
         b("head_movement", true),
+        b("driverview_smooth", true),
+        b("hands_in_cab", false),
+        b("alt_view", true),
     );
     let text = format!(
-        "{text}pax_voices={}\nnav_arrows={}\nget_up={}\ntime_speed={}\nmachine_translation={}\nshadow_casters={}\nctrl_deadzone={}\nupdate_check={}\nupdate_auto={}\nreflections={}\nmouse_sens={}\ngraphics_api={}\nctrl_off={}\nsteering_linear={}\nold_steering={}\nff_invert={}\nwheel_range={}\nwheel_lock={}\nfov={}\ncamera_collision={}\npedal_throttle={}\npedal_brake={}\nseat_x={}\nseat_y={}\nseat_z={}\nhead_tracking={}\nff_enabled={}\nbrake_hold={}\n",
+        "{text}pax_voices={}\nnav_arrows={}\nget_up={}\ntime_speed={}\nmachine_translation={}\nshadow_casters={}\nctrl_deadzone={}\nupdate_check={}\nupdate_auto={}\nreflections={}\nmouse_sens={}\ngraphics_api={}\nctrl_off={}\nsteering_linear={}\nold_steering={}\nred_steer_spd={}\nff_invert={}\nwheel_range={}\nwheel_lock={}\nfov={}\ncamera_collision={}\npedal_throttle={}\npedal_brake={}\nseat_x={}\nseat_y={}\nseat_z={}\nsteer_look={}\nhead_tracking={}\nff_enabled={}\nbrake_hold={}\nauto_clutch={}\nled_glow={}\nled_mips={}\n",
         match v.get("pax_voices").and_then(|x| x.as_str()).unwrap_or("all") {
             "tickets" => "tickets",
             "off" => "off",
@@ -1839,7 +1869,7 @@ pub fn settings_to_text(v: &Value, old: Option<&str>) -> String {
         b("update_check", true),
         b("update_auto", false),
         b("reflections", true),
-        f("mouse_sens", 1.0).clamp(0.25, 2.0),
+        f("mouse_sens", 1.0).clamp(0.1, 3.0),
         match v.get("graphics_api").and_then(|x| x.as_str()).unwrap_or("auto") {
             "vulkan" => "vulkan",
             "dx12" => "dx12",
@@ -1849,6 +1879,7 @@ pub fn settings_to_text(v: &Value, old: Option<&str>) -> String {
         v.get("ctrl_off").and_then(|x| x.as_str()).unwrap_or("").replace(['\n', '\r'], " "),
         b("steering_linear", false),
         b("old_steering", false),
+        b("red_steer_spd", false),
         b("ff_invert", false),
         f("wheel_range", 900.0).clamp(90.0, 2880.0),
         f("wheel_lock", 0.0).clamp(0.0, 2880.0),
@@ -1859,9 +1890,13 @@ pub fn settings_to_text(v: &Value, old: Option<&str>) -> String {
         f("seat_x", 0.0).clamp(-1.5, 1.5),
         f("seat_y", 0.0).clamp(-1.5, 1.5),
         f("seat_z", 0.0).clamp(-1.5, 1.5),
+        b("steer_look", false),
         b("head_tracking", false),
         b("ff_enabled", true),
         b("brake_hold", true),
+        b("auto_clutch", true),
+        n("led_glow", 6).clamp(0, 15),
+        b("led_mips", true),
     );
     let vr_scale = v.get("vr_scale").and_then(|x| x.as_f64().or_else(|| x.as_str().and_then(|s| s.parse().ok()))).filter(|x| x.is_finite()).unwrap_or(0.65).clamp(0.5, 1.0);
     let vr_head_smoothing_ms = v.get("vr_head_smoothing_ms").and_then(|x| x.as_f64().or_else(|| x.as_str().and_then(|s| s.parse().ok()))).filter(|x| x.is_finite()).unwrap_or(0.0).clamp(0.0, 30.0);
@@ -1921,6 +1956,10 @@ pub struct Duty {
     pub map: String,
     pub bus: String,
     pub paint: Option<String>,
+    /// The number plate (registration) the player typed: it wins over the plate the bus's
+    /// `[number]` list or the map's `registrations.txt` gives it (empty: as the content says).
+    #[serde(default)]
+    pub plate: Option<String>,
     pub hof: Option<String>,
     pub entry: Option<i32>,
     pub line: Option<String>,
@@ -1991,6 +2030,9 @@ pub fn duty_args(d: &Duty) -> Result<Vec<String>> {
     let mut a: Vec<String> = vec!["--root".into(), root.to_string_lossy().to_string(), "--no-menu".into(), "--map".into(), d.map.clone(), "--bus".into(), d.bus.clone(), "--time".into(), if d.time.trim().is_empty() { "09:00".into() } else { d.time.trim().to_string() }];
     if let Some(p) = d.paint.as_deref().filter(|p| !p.trim().is_empty()) {
         a.extend(["--paint".into(), p.trim().to_string()]);
+    }
+    if let Some(pl) = d.plate.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        a.extend(["--plate".into(), pl.to_string()]);
     }
     // (a vehicle file taken for a depot from a broken ailists.cfg by older launchers is none)
     if let Some(h) = d.hof.as_deref().filter(|h| !h.trim().is_empty() && !h.to_ascii_lowercase().contains(".bus") && !h.to_ascii_lowercase().contains(".ovh")) {
@@ -2279,6 +2321,19 @@ pub fn cli(cmd: &str, arg: &str) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn the_games_options_survive_a_save() {
+        // what the pause menu's Options change, read back as they were set
+        let mut v = settings_from_text(None);
+        for (k, x) in [("steer_look", json!(true)), ("camera_collision", json!(false)), ("brake_hold", json!(false)), ("auto_clutch", json!(false)), ("ff_enabled", json!(false)), ("head_tracking", json!(true)), ("collision_objects", json!(false)), ("led_mips", json!(false)), ("led_glow", json!(11)), ("pedal_brake", json!(1.5)), ("seat_y", json!(-0.1))] {
+            v[k] = x;
+        }
+        let back = settings_from_text(Some(&settings_to_text(&v, None)));
+        for k in ["steer_look", "camera_collision", "brake_hold", "auto_clutch", "ff_enabled", "head_tracking", "collision_objects", "led_mips", "led_glow", "pedal_brake", "seat_y"] {
+            assert_eq!(back[k], v[k], "{k}");
+        }
+    }
+
+    #[test]
     fn dsc_files_give_name_and_description() {
         let d = super::parse_dsc("\r\n[friendlyname]\r\nMAN\r\nNL202 - EN92\r\nBeige\r\n\r\n[description]\r\nAlthough the BVG did not purchase\r\n\r\n-Technical specifications-\r\n[end]\r\n");
         assert_eq!(d.name, vec!["MAN", "NL202 - EN92", "Beige"]);
@@ -2293,6 +2348,32 @@ mod tests {
     }
 
     use super::*;
+
+    /// A duty file written before the number plate field (or one that leaves it out) loads
+    /// with no plate, and a plate the player typed is kept as it stands.
+    #[test]
+    fn a_duty_keeps_its_plate_and_older_files_load_without_one() {
+        let old: Duty = serde_json::from_str(r#"{"map":"maps/x/global.cfg","bus":"Vehicles/x.bus","time":"09:00"}"#).unwrap();
+        assert_eq!(old.plate, None);
+        let typed: Duty = serde_json::from_str(r#"{"map":"maps/x/global.cfg","bus":"Vehicles/x.bus","time":"09:00","plate":"B-AB 1234"}"#).unwrap();
+        assert_eq!(typed.plate.as_deref(), Some("B-AB 1234"));
+    }
+
+    #[test]
+    fn portuguese_variants_are_distinct() {
+        assert_eq!(language_code("pt-BR"), "PTB");
+        assert_eq!(language_iso("PTB"), "pt");
+        assert_eq!(language_code("pt-PT"), "PTP");
+        assert_eq!(language_iso("PTP"), "pt-pt");
+    }
+
+    #[test]
+    fn mirror_rendering_can_be_disabled() {
+        let v = settings_from_text(Some("mirror_size=0\n"));
+        assert_eq!(v["mirror_size"], 0);
+        let text = settings_to_text(&v, None);
+        assert!(text.lines().any(|l| l == "mirror_size=0"), "{text}");
+    }
 
     #[test]
     fn update_settings_round_trip() {

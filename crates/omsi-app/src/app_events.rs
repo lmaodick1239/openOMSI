@@ -4,6 +4,7 @@
 const MIRROR_RATE: f32 = 75.0;
 /// The least a mirror is redrawn a second (see the mirrors in `window_event`).
 const MIRROR_MIN_HZ: f32 = 8.0;
+const MIRROR_MAX_HZ: f32 = 30.0;
 
 fn render_scale_step(fps: f32, slow_frame_wait_share: f32) -> f32 {
     if fps < 45.0 && slow_frame_wait_share >= 0.35 {
@@ -204,18 +205,7 @@ impl ApplicationHandler for App {
                         }
                     }
                 } else {
-                    // a right click lets go of the mouse steering, as in OMSI (#162)
-                    if state == ElementState::Pressed
-                        && self.mouse_drive
-                        && self.game_menu.is_none()
-                    {
-                        self.mouse_drive = false;
-                        crate::player::keep_wheel(self.player.as_mut());
-                        self.service_msg = Some(("Mouse steering off".into(), 3.0));
-                    }
-                    self.mouse_look = state == ElementState::Pressed;
-                    // (the cursor shows it at once, not with the next look at what is under it)
-                    self.update_hover();
+                    self.on_right(state == ElementState::Pressed);
                 }
             }
             // (the middle button - the wheel pressed - turns the view as well: OMSI's pan)
@@ -657,6 +647,7 @@ impl ApplicationHandler for App {
                 let ctl = self.controllers.get_or_insert_with(|| {
                     crate::controllers::Controllers::new(&self.args.root, hwnd)
                 });
+                ctl.set_focus(self.window_focused);
                 ctl.deadzone = self.settings.ctrl_deadzone;
                 ctl.pedal_throttle = self.settings.pedal_throttle;
                 ctl.pedal_brake = self.settings.pedal_brake;
@@ -687,11 +678,21 @@ impl ApplicationHandler for App {
                 let driving = self.player.as_ref().filter(|_| {
                     matches!(self.view.as_str(), "driver" | "outside" | "pax") && !self.paused
                 });
+                let kmh = driving
+                    .map(|p| p.vehicle.physics.velocity_kmh())
+                    .unwrap_or(0.0);
                 ctl.feedback(crate::controllers::FfInput {
                     on: driving.is_some(),
-                    kmh: driving
-                        .map(|p| p.vehicle.physics.velocity_kmh() as f32)
+                    kmh,
+                    lateral_accel: driving
+                        .and_then(|p| p.vehicle.rigid.as_ref())
+                        .map(|r| r.accel_body.x)
                         .unwrap_or(0.0),
+                    wheel_bump: driving
+                        .and_then(|p| p.vehicle.rigid.as_ref())
+                        .map(|r| crate::controllers::wheel_contact_bump(r, kmh))
+                        .unwrap_or(0.0),
+                    wheel_bump_age: 0.0,
                     vib_amp: driving
                         .and_then(|p| p.vehicle.var("FF_Vib_Amp"))
                         .unwrap_or(0.0),
@@ -886,8 +887,21 @@ impl ApplicationHandler for App {
                         w.terrains.read().contains_key(&k) || w.surfaces.read().contains_key(&k)
                     });
                     if !self.paused && ground_here {
-                        p.tick(dt, self.audio.as_ref(), self.in_cab);
-                        p.move_head(dt, self.settings.head_movement);
+                        p.tick(
+                            dt,
+                            self.audio.as_ref(),
+                            self.in_cab,
+                            !matches!(self.view.as_str(), "free" | "foot"),
+                        );
+                        #[cfg(windows)]
+                        let vr_on = self.vr.is_some();
+                        #[cfg(not(windows))]
+                        let vr_on = false;
+                        p.move_head(
+                            dt,
+                            self.settings.head_movement && !vr_on,
+                            self.settings.steer_look && !vr_on,
+                        );
                         if let Some(w) = self.world.as_ref() {
                             crate::rail_drive::frame(
                                 p,
@@ -953,12 +967,13 @@ impl ApplicationHandler for App {
                     // from the driver's seat the figure stays in the mirrors
                     // (from the driver's seat only the mirrors show him)
                     // (out of the seat: nobody at the wheel)
-                    p.sync_driver(
+                    p.sync_driver_hands(
                         r,
                         scene,
                         dt,
                         self.settings.driver && self.on_foot.is_none(),
                         self.view == "driver",
+                        self.settings.hands_in_cab,
                     );
                     if self.view != "free" && self.view != "foot" {
                         let key = crate::input_script::look_key_of(&self.view, Some(p.cam_choice));
@@ -1054,8 +1069,8 @@ impl ApplicationHandler for App {
                     let cursor_moved =
                         key.map(|k| (k.0, k.1)) != self.hover_key.map(|k| (k.0, k.1));
                     if cursor_moved
-                        || (key != self.hover_key && self.total_frames % 3 == 0)
-                        || self.total_frames % 6 == 0
+                        || (key != self.hover_key && self.total_frames % 6 == 0)
+                        || self.total_frames % 12 == 0
                     {
                         self.hover_key = key;
                         self.update_hover();
@@ -1230,10 +1245,6 @@ impl ApplicationHandler for App {
                             // rear door opened again whenever it was shut)
                             p.vehicle.trigger("door_haltewunsch_off");
                         }
-                        if std::mem::take(&mut h.door_request) {
-                            p.vehicle.trigger("door_aussenoeffner");
-                            p.vehicle.trigger("door_aussenoeffner_off");
-                        }
                         h.write_pax_vars(&mut p.vehicle);
                         p.vehicle.host.humans_on_path_link = h.path_link_counts();
                         p.vehicle.host.humans_on_seat = h.seat_counts();
@@ -1248,6 +1259,12 @@ impl ApplicationHandler for App {
                 if let (Some(d), Some(p), false) =
                     (self.duty.as_mut(), self.player.as_mut(), self.paused)
                 {
+                    if let Some(stop) = p.html_next_stop.take() {
+                        if d.skip_to(stop) {
+                            let (trip, k) = d.trip_for_ibis();
+                            p.ibis_to_stop(trip, k);
+                        }
+                    }
                     if let Some((arrival, departure)) = d.update(&mut p.vehicle, self.clock.time) {
                         self.career.stop_served(arrival, departure);
                     }
@@ -1860,8 +1877,10 @@ impl ApplicationHandler for App {
                                             pitch: 1.0,
                                             looping: false,
                                             position: Some(line.position.as_vec3()),
+                                            doppler: false,
                                             range: 3.0,
                                             lowpass_hz: 0.0,
+                                            important: false,
                                         },
                                     );
                                 }
@@ -1878,7 +1897,6 @@ impl ApplicationHandler for App {
                                 dt,
                                 (kind, rate),
                                 inside,
-                                engine_running,
                                 street_condition(wt, self.wetness),
                                 cam.position,
                                 &steps,
@@ -2352,13 +2370,17 @@ impl ApplicationHandler for App {
                         // Procity) at 25 fps each was redrawn three times a second, and the
                         // street jerked past in them - up to two a frame then (each costs a
                         // few milliseconds of the frame).
-                        let mirrors = self
+                        if self.settings.mirror_size == 0 {
+                            self.mirror_budget = 0.0;
+                            self.mirrors_seen = 0;
+                        } else {
+                            let mirrors = self
                             .player
                             .as_ref()
                             .map(|p| p.vehicle.ty.def.cameras_reflexion.len())
                             .unwrap_or(0) as f32;
-                        let rate = {
-                            #[cfg(windows)]
+                            let rate = {
+                                #[cfg(windows)]
                             let vr_active = self.vr.is_some();
                             #[cfg(not(windows))]
                             let vr_active = false;
@@ -2372,10 +2394,12 @@ impl ApplicationHandler for App {
                                     .filter(|rate| rate.is_finite() && *rate >= 0.0)
                                     .unwrap_or(self.settings.vr_mirror_rate)
                             } else {
-                                MIRROR_RATE.max(mirrors * MIRROR_MIN_HZ)
+                                MIRROR_RATE
+                                    .max(mirrors * MIRROR_MIN_HZ)
+                                    .min(MIRROR_MAX_HZ * self.mirrors_seen.max(1) as f32)
                             }
                         };
-                        self.mirror_budget = (self.mirror_budget + raw_dt.min(0.1) * rate).min(2.5);
+                            self.mirror_budget = (self.mirror_budget + raw_dt.min(0.1) * rate).min(2.5);
                         let mut drawn = 0;
                         // (in the cab, and from outside too while the bus is near: its
                         // mirrors are seen from the pavement and stood frozen)
@@ -2386,7 +2410,10 @@ impl ApplicationHandler for App {
                                 .is_some_and(|(p, c)| {
                                     (p.vehicle.position - c.position).length() < 12.0
                                 });
-                        while (self.in_cab || near) && self.mirror_budget >= 1.0 && drawn < 2 {
+                        while (self.in_cab || near)
+                            && self.mirror_budget >= 1.0
+                            && drawn < self.mirrors_seen.clamp(1, 2)
+                        {
                             let (Some(w), Some(p)) = (self.world.as_ref(), self.player.as_ref())
                             else {
                                 break;
@@ -2394,7 +2421,7 @@ impl ApplicationHandler for App {
                             self.mirror_budget -= 1.0;
                             drawn += 1;
                             self.mirror_turn = self.mirror_turn.wrapping_add(1);
-                            render_mirrors(
+                            self.mirrors_seen = render_mirrors(
                                 r,
                                 scene,
                                 w,
@@ -2403,6 +2430,7 @@ impl ApplicationHandler for App {
                                 Some(self.mirror_turn),
                                 Some((*cam, s.config.width as f32 / s.config.height.max(1) as f32)),
                             );
+                        }
                         }
                         *self.profile.entry("mirrors").or_default() += __t.elapsed().as_secs_f64();
                         let __t = Instant::now();

@@ -86,6 +86,11 @@ pub(crate) struct Args {
     /// Paint scheme / advert of the player vehicle: item name or index from its .cti files.
     #[arg(long)]
     pub(crate) paint: Option<String>,
+    /// Number plate (registration) of the player vehicle, e.g. `--plate "B-AB 1234"`: it goes
+    /// into the bus's `ident` string variable instead of the plate its `[number]` list, its
+    /// `[registration_*]` mode or the map's `registrations.txt` gives it.
+    #[arg(long)]
+    pub(crate) plate: Option<String>,
     /// Time of day at start, HH:MM (default 09:00).
     #[arg(long, default_value = "09:00")]
     pub(crate) time: String,
@@ -271,6 +276,7 @@ pub(crate) struct SituationOther {
     /// x,y,heading,z as `--spawn` takes it
     pub spawn: String,
     pub hof: Option<String>,
+    pub paint: Option<String>,
     pub vars: Vec<(String, f32)>,
     pub strvars: Vec<(String, String)>,
 }

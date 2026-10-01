@@ -436,7 +436,13 @@ impl RigidBody {
         let mass = if def.mass < 100.0 { def.mass * 1000.0 } else { def.mass }.max(500.0);
         let moi = def.moment_of_inertia;
         let scale = if moi[0] < 5000.0 { 1000.0 } else { 1.0 };
-        let inertia = Vec3::new((moi[0] * scale).max(100.0), (moi[1] * scale).max(100.0), (moi[2] * scale).max(100.0));
+        // `[momentofintertia]` goes to ODE as I11, I22, I33 of Omsi.exe's y-up body frame
+        // (0x7af0a4): about the lateral axis (pitch), the vertical one (yaw) and the
+        // longitudinal one (roll) - roll takes the third value (0x7e4ef3), yaw the second
+        // (0x7e5110), whatever the SDK's comment says. Here (right, forward, up): pitch,
+        // roll, yaw. Read in the comment's order the SD202 rolled on 80 t m² instead of
+        // 300, twice as fast, and every uneven patch rocked it like a boat.
+        let inertia = Vec3::new((moi[0] * scale).max(100.0), (moi[2] * scale).max(100.0), (moi[1] * scale).max(100.0));
         let cog_xy = def.cog.map(|c| (c[0], c[1])).unwrap_or((0.0, 0.0));
         let cog_z = if def.cog_height > 0.0 { def.cog_height } else { def.cog.map(|c| c[2]).filter(|z| *z > 0.0).unwrap_or(1.0) };
         let cog = Vec3::new(cog_xy.0, cog_xy.1, cog_z);
@@ -764,8 +770,18 @@ impl RigidBody {
                     // on: "like a boat on the sea".)
                     let k = w.spring * w.spring_factor.max(0.0);
                     let top = hub0.z + (CLIMB * r) as f64;
-                    let under = probe(hub0.x, hub0.y, top).below;
-                    let t = under.map(|g| ((g + r as f64 - hub0.z) / up.z.max(0.3) as f64) as f32);
+                    // (nothing under it: Omsi.exe's ground query looks from 3 m over the model
+                    // origin's plane, 0x7a0985 - a wheel that sank through a face at a joint of
+                    // two surfaces, or into a bridge deck, found nothing within reach, the
+                    // spring let go and the bus fell through the world)
+                    // The spring's point is where Omsi.exe puts it (0x7e47aa): on the model's
+                    // origin plane (z = 0) under the wheel, and its height over the ground is
+                    // measured straight up. Measured from the hub less the `.bus` file's tyre
+                    // radius instead, a mod whose tyre mesh is larger than that radius stood
+                    // with its wheels drawn sunk a few centimetres into the road.
+                    let plane0 = position + rot.mul_vec3(Vec3::new(w.attach.x, w.attach.y, 0.0) - cog).as_dvec3();
+                    let under = probe(plane0.x, plane0.y, top).below.or_else(|| probe(plane0.x, plane0.y, plane0.z + 3.0).below);
+                    let t = under.map(|g| (g - plane0.z) as f32);
                     if let Some(g) = under {
                         w.ground_z = g;
                         w.ground_seen = true;
@@ -960,6 +976,8 @@ impl RigidBody {
                 standing.iter().map(|&k| if total > 1e-3 { (need * cap(&contacts[k]) / total).clamp(-cap(&contacts[k]), cap(&contacts[k])) } else { 0.0 }).collect()
             };
             let hold_long = hold(body_fwd, self.mass + towed, &|c| c.brake);
+            // (the tyres' pull along the body, for the pitch lever below)
+            let mut long_sum = 0.0f32;
             for (k, c) in contacts.iter().enumerate() {
                 let mut f_long = match standing.iter().position(|&j| j == k) {
                     Some(si) => c.drive + hold_long[si],
@@ -968,11 +986,20 @@ impl RigidBody {
                 let max_f = self.friction * c.grip;
                 f_long = f_long.clamp(-max_f, max_f);
                 let f_world = c.base + c.fwd * f_long;
+                long_sum += f_long * c.fwd.dot(body_fwd);
                 if let Some(i) = c.wheel {
                     self.wheels[i].advance_spin(c, f_long, self.friction, h);
                 }
                 force += f_world;
                 torque += rot.inverse().mul_vec3(c.r).cross(rot.inverse().mul_vec3(f_world));
+            }
+            // Driving and braking pitch the body about a lever longer than the centre of
+            // gravity's height over the road: Omsi.exe takes the tyres' forces at the hubs,
+            // their radius more (0x7e46a5: (drive - brake) x d/2 besides [schwerpunkt] x
+            // the pull), and not while the bus stands with its brakes holding (0x7e4660).
+            if self.velocity.dot(body_fwd).abs() > 0.2 {
+                let r = self.wheels.iter().map(|w| w.radius).sum::<f32>() / self.wheels.len().max(1) as f32;
+                torque.x += long_sum * r;
             }
             // Across the tyre: OMSI has no slip angle. Each axle takes away the sideways
             // speed it has - the bus follows its wheels exactly - with no more force than
@@ -989,11 +1016,20 @@ impl RigidBody {
                 let mut v = self.velocity + ((force - body_fwd * along) / m + body_fwd * (along / mt)) * h;
                 let mut w = self.omega + (torque - self.omega.cross(self.inertia * self.omega)) / self.inertia * h;
                 let lat: Vec<usize> = (0..contacts.len()).filter(|&k| contacts[k].lateral && contacts[k].grip > 0.0).collect();
+                // (following its wheels: hardly any speed across the body)
+                let gripped = self.velocity.dot(rot.mul_vec3(Vec3::X)).abs() < 0.5 && self.velocity.dot(body_fwd).abs() > 1.0;
                 let arms: Vec<(Vec3, f32)> = lat
                     .iter()
                     .map(|&k| {
                         let c = &contacts[k];
-                        let rn = rot.inverse().mul_vec3(c.r).cross(rot.inverse().mul_vec3(c.right));
+                        let mut rn = rot.inverse().mul_vec3(c.r).cross(rot.inverse().mul_vec3(c.right));
+                        // (holding, no roll from the tyres' hold across: Omsi.exe then sets the
+                        // sideways motion outright and rolls the body by the bend's pull alone,
+                        // below - taken at the ground, every turn of the wheel kicked the body
+                        // over; sliding, the tyres trip it as before)
+                        if self.holding && gripped {
+                            rn.y = 0.0;
+                        }
                         let inv = c.right.dot(lin(c.right)) + (rn / self.inertia).dot(rn);
                         (rn, inv.max(1e-9))
                     })
@@ -1031,6 +1067,11 @@ impl RigidBody {
                 }
                 if !self.holding && !slipping && lat.iter().all(|&k| (v + rot.mul_vec3(w).cross(contacts[k].r)).dot(contacts[k].right).abs() < 0.1) {
                     self.holding = true;
+                }
+                // the bend's pull rolls the body out of it (0x7e4629: [schwerpunkt] x mass x
+                // the centripetal acceleration)
+                if self.holding && gripped && !lat.is_empty() {
+                    torque.y += m * self.cog.z * v_fwd * self.omega.z;
                 }
             }
             // integrate
@@ -1930,7 +1971,9 @@ mod tests {
                 assert!(crash > 0.5 * kinetic && crash < 1.05 * kinetic, "{kmh} km/h at {fps} fps: crash of {crash} J for {kinetic} J");
                 assert!(front < 6.0 - 0.47 + 0.03, "{kmh} km/h at {fps} fps: front axle reached {front}");
                 assert!(top < 0.3, "{kmh} km/h at {fps} fps: thrown up to {top}");
-                assert!(rb.forward_speed().abs() < 1.0, "{kmh} km/h at {fps} fps: still at {}", rb.forward_speed());
+                // (a rebound of a metre or so: with the moments of inertia on Omsi.exe's axes
+                // the body's lower yaw inertia takes a little more of the blow back)
+                assert!(rb.forward_speed().abs() < 1.5, "{kmh} km/h at {fps} fps: still at {}", rb.forward_speed());
             }
         }
     }
