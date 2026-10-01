@@ -655,7 +655,7 @@ impl App {
         );
         let scene = renderer.new_scene();
         #[cfg(not(target_os = "android"))]
-        {
+        if self.args.inspector {
             let layout = crate::inspector::persistence::InspectorLayout::config_path()
                 .ok()
                 .map(|path| crate::inspector::imgui_inspector::ImGuiLayout::load(&path))

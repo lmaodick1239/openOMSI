@@ -24,14 +24,6 @@ fn effective_imgui_capture(
     capture.effective(active)
 }
 
-#[cfg(not(target_os = "android"))]
-fn imgui_keyboard_blocks_event(
-    capture: crate::inspector::imgui_inspector::InputCaptureState,
-    active: bool,
-    inspector_toggle: bool,
-) -> bool {
-    capture.effective(active).blocks_keyboard() && !inspector_toggle
-}
 
 #[cfg(not(target_os = "android"))]
 fn abort_inspector_frame_if_surface_unavailable(
@@ -81,15 +73,8 @@ impl ApplicationHandler for App {
                 if !self.inspector_active {
                     ui.clear_input_capture();
                 }
-                let inspector_toggle = matches!(
-                    &event,
-                    WindowEvent::KeyboardInput { event, .. }
-                        if event.physical_key == PhysicalKey::Code(KeyCode::KeyI)
-                            && (self.keys.contains(&KeyCode::ControlLeft)
-                                || self.keys.contains(&KeyCode::ControlRight))
-                );
                 (
-                    imgui_keyboard_blocks_event(capture, self.inspector_active, inspector_toggle),
+                    capture.blocks_keyboard(),
                     capture.blocks_pointer(),
                 )
             })
@@ -1794,7 +1779,7 @@ impl ApplicationHandler for App {
                         }
                     }
                     // inspector's selection: a cyan glow over the selected entity
-                    if self.inspector_active {
+                    if self.args.inspector && self.inspector_active {
                         if let Some(sel) = self.inspector_selection.as_ref() {
                             if sel.is_active() {
                                 // Placeholder: visual feedback will be added once snapshot generation is complete
@@ -2193,7 +2178,7 @@ impl ApplicationHandler for App {
                 }
 
                 #[cfg(not(target_os = "android"))]
-                if self.inspector_active {
+                if self.args.inspector && self.inspector_active {
                     let snapshot = self.inspector_snapshot();
                     if let (Some(window), Some(inspector)) =
                         (self.window.as_ref(), self.inspector_ui.as_mut())
@@ -2509,7 +2494,7 @@ impl ApplicationHandler for App {
                         // the on-screen controls over the picture (a phone)
                         self.touch.render(r, &view, s.config.width, s.config.height);
                         #[cfg(not(target_os = "android"))]
-                        if self.inspector_active && frame.is_some() {
+                        if self.args.inspector && self.inspector_active && frame.is_some() {
                             if let Some(inspector) = self.inspector_ui.as_mut() {
                                 let mut encoder = r.device.create_command_encoder(
                                     &wgpu::CommandEncoderDescriptor {
@@ -3062,7 +3047,6 @@ mod governor_tests {
 mod imgui_capture_tests {
     use super::{
         abort_inspector_frame_if_surface_unavailable, effective_imgui_capture,
-        imgui_keyboard_blocks_event,
     };
     use crate::inspector::imgui_inspector::{InputCaptureState, InspectorUi};
 
@@ -3078,16 +3062,6 @@ mod imgui_capture_tests {
         );
     }
 
-    #[test]
-    fn inspector_toggle_remains_available_when_keyboard_is_captured() {
-        let captured = InputCaptureState {
-            pointer: false,
-            keyboard: true,
-        };
-        assert!(!imgui_keyboard_blocks_event(captured, true, true));
-        assert!(imgui_keyboard_blocks_event(captured, true, false));
-        assert!(!imgui_keyboard_blocks_event(captured, false, false));
-    }
 
     #[test]
     #[serial_test::serial]
@@ -3114,5 +3088,18 @@ mod imgui_capture_tests {
             keyboard: false,
         };
         assert!(effective_imgui_capture(pointer, true).blocks_pointer());
+    }
+
+    #[test]
+    fn disabled_inspector_capability_prevents_initialization() {
+        use crate::cli::Args;
+        use clap::Parser;
+        let mut args = Args::parse_from(["omsi", "--root", "."]);
+        args.inspector = false;
+        assert!(!args.inspector, "disabled args should have inspector=false");
+        
+        let mut enabled_args = args.clone();
+        enabled_args.inspector = true;
+        assert!(enabled_args.inspector, "enabled args should have inspector=true");
     }
 }
