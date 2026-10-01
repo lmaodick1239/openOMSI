@@ -111,6 +111,8 @@ fn test_view_model_serialization_material() {
 #[test]
 fn test_view_model_serialization_render() {
     let view = RenderView {
+        snapshot_available: true,
+        unavailable_reason: None,
         passes: vec![PassView {
             name: "main_pass".to_string(),
             gpu_time_ms: 5.2,

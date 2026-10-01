@@ -421,6 +421,12 @@ impl InspectorUi {
         Ok(())
     }
 
+    #[cfg(test)]
+    fn begin_frame_for_test(&mut self) {
+        let _ = self.context.frame();
+        self.frame_started = true;
+    }
+
     /// End a frame when no render pass/surface is available.
     pub fn abort_frame(&mut self) {
         if self.frame_started {
@@ -595,6 +601,12 @@ fn draw_render(ui: &Ui, view: Option<&RenderView>, commands: &mut VecDeque<Inspe
         ui.text("No render snapshot");
         return;
     };
+    if !view.snapshot_available {
+        ui.text(view.unavailable_reason.as_deref().unwrap_or(
+            "Render debug state is unavailable.",
+        ));
+        return;
+    }
     ui.text(format!(
         "Frame {:.2} ms  Draws {}  Triangles {}",
         view.total_frame_time_ms, view.total_draw_calls, view.total_triangles
@@ -768,6 +780,9 @@ fn draw_export(
     if let Some(error) = &view.error {
         ui.text_colored([1.0, 0.39, 0.39, 1.0], error);
     }
+    if view.status == crate::inspector::ExportStatus::Unavailable {
+        return;
+    }
     if let Some(target) = selected_target(inspector) {
         if ui.button("Export selection") {
             commands.push_back(InspectorCommand::Export(
@@ -876,10 +891,7 @@ mod tests {
         let mut inspector = InspectorUi::new();
         inspector.context.io_mut().display_size = [1280.0, 720.0];
         inspector.context.fonts().build_rgba32_texture();
-        {
-            let _frame = inspector.context.frame();
-        }
-        inspector.frame_started = true;
+        inspector.begin_frame_for_test();
         inspector.input_capture = InputCaptureState {
             pointer: true,
             keyboard: true,

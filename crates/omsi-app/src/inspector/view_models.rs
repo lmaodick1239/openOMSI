@@ -100,6 +100,10 @@ pub struct MaterialView {
 /// Render panel view model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenderView {
+    /// Whether frame-graph/debug data is available for this snapshot.
+    pub snapshot_available: bool,
+    /// Why frame-graph/debug data is unavailable, if applicable.
+    pub unavailable_reason: Option<String>,
     /// Frame graph passes.
     pub passes: Vec<PassView>,
     /// Total frame time (ms).
@@ -222,6 +226,7 @@ pub struct ExportView {
 /// Export status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExportStatus {
+    Unavailable,
     Idle,
     InProgress,
     Success,
@@ -448,7 +453,9 @@ impl PartialEq for MaterialView {
 
 impl PartialEq for RenderView {
     fn eq(&self, other: &Self) -> bool {
-        (self.total_frame_time_ms - other.total_frame_time_ms).abs() < 1e-6
+        self.snapshot_available == other.snapshot_available
+            && self.unavailable_reason == other.unavailable_reason
+            && (self.total_frame_time_ms - other.total_frame_time_ms).abs() < 1e-6
             && self.total_draw_calls == other.total_draw_calls
             && self.total_triangles == other.total_triangles
             && self.isolation_mode == other.isolation_mode

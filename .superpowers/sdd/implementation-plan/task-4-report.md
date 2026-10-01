@@ -58,3 +58,19 @@ Observed validation results:
 - `cargo test -p omsi-app inspector --lib --tests --quiet -- --test-threads=1` — passed: 79 library tests, plus selected integration binaries with 1 and 6 tests, all passed.
 - `cargo check --workspace --quiet` — passed.
 - The retained human snapshot method in `crates/omsi-app/src/humans.rs` was required by the retained `app.rs` panel-source change and is included as a directly coupled migration change.
+
+## Task 4 Fix Round 3 (2026-10-01)
+
+Fix notes:
+
+- Render frame-graph/debug fields are now explicitly marked unavailable with a diagnostic because `App` has no owned live frame-graph/debug state; empty passes and false toggles are no longer presented as current state, while real renderer counters remain visible.
+- Export now exposes `ExportStatus::Unavailable` with an actionable `--export-glb` diagnostic instead of an absent snapshot; the ImGui panel does not emit unsupported export/cancel commands.
+- The abort-frame regression test now starts a genuine ImGui context frame through a test-only helper before calling `abort_frame`; it no longer manually toggles `frame_started`.
+
+Exact validation commands and output:
+
+- `cd /mnt/Random/users/user/Documents/GitHub/openOMSI/.worktrees/imgui-inspector-migration && cargo test -p omsi-app inspector --lib --tests --quiet -- --test-threads=1` — passed: 79 library tests, plus selected integration binaries with 1 and 6 tests; all passed.
+- `cd /mnt/Random/users/user/Documents/GitHub/openOMSI/.worktrees/imgui-inspector-migration && cargo check --workspace --quiet` — passed (exit 0).
+- `cd /mnt/Random/users/user/Documents/GitHub/openOMSI/.worktrees/imgui-inspector-migration && git diff --check` — passed (exit 0).
+
+Scope: `app.rs`, `inspector/imgui_inspector.rs`, `inspector/view_models.rs`, this report, and the focused view-model test only. Unrelated pre-existing worktree changes were not modified.

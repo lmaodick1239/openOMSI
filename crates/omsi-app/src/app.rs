@@ -303,6 +303,11 @@ impl App {
         let render = self.renderer.as_ref().map(|renderer| {
             let counts = renderer.counts.borrow();
             RenderView {
+                snapshot_available: false,
+                unavailable_reason: Some(
+                    "Frame-graph and render debug state are not exposed by the active renderer."
+                        .into(),
+                ),
                 passes: Vec::new(),
                 total_frame_time_ms: self
                     .profile
@@ -399,7 +404,14 @@ impl App {
             human,
             telemetry,
             editor,
-            export: None,
+            export: Some(crate::inspector::ExportView {
+                status: crate::inspector::ExportStatus::Unavailable,
+                destination: None,
+                error: Some(
+                    "Selection export is unavailable in the interactive application; use --export-glb."
+                        .into(),
+                ),
+            }),
             hierarchy,
             log_lines,
         }
