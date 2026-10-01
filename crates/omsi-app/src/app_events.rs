@@ -29,8 +29,9 @@ fn effective_imgui_capture(
 fn abort_inspector_frame_if_surface_unavailable(
     inspector: &mut crate::inspector::imgui_inspector::InspectorUi,
     surface_available: bool,
+    inspector_enabled: bool,
 ) {
-    if !surface_available {
+    if inspector_enabled && !surface_available {
         inspector.abort_frame();
     }
 }
@@ -2360,7 +2361,7 @@ impl ApplicationHandler for App {
                         self.hidden_frames += 1;
                         #[cfg(not(target_os = "android"))]
                         if let Some(inspector) = self.inspector_ui.as_mut() {
-                            abort_inspector_frame_if_surface_unavailable(inspector, false);
+                            abort_inspector_frame_if_surface_unavailable(inspector, false, self.args.inspector);
                         }
                     }
                     let view = frame
@@ -2692,7 +2693,9 @@ impl ApplicationHandler for App {
                     win.request_redraw();
                 }
                 #[cfg(not(target_os = "android"))]
-                self.process_inspector_commands();
+                if self.args.inspector && self.inspector_active {
+                    self.process_inspector_commands();
+                }
                 if reconfigure {
                     // the drawable went away under us (display change, lost surface)
                     if let (Some(s), Some(r), Some(win)) = (
@@ -2724,17 +2727,20 @@ impl ApplicationHandler for App {
             }
         }
         #[cfg(not(target_os = "android"))]
-        let imgui_captures_pointer = self
-            .inspector_ui
-            .as_mut()
-            .map(|ui| {
-                let capture = effective_imgui_capture(ui.input_capture, self.inspector_active);
-                if !self.inspector_active {
-                    ui.clear_input_capture();
-                }
-                capture.blocks_pointer()
-            })
-            .unwrap_or(false);
+        let imgui_captures_pointer = if self.args.inspector {
+            self.inspector_ui
+                .as_mut()
+                .map(|ui| {
+                    let capture = effective_imgui_capture(ui.input_capture, self.inspector_active);
+                    if !self.inspector_active {
+                        ui.clear_input_capture();
+                    }
+                    capture.blocks_pointer()
+                })
+                .unwrap_or(false)
+        } else {
+            false
+        };
         #[cfg(target_os = "android")]
         let imgui_captures_pointer = false;
         if let DeviceEvent::MouseMotion { delta } = event {
@@ -2772,10 +2778,12 @@ impl ApplicationHandler for App {
     /// anything else is torn down (Cmd+Q ends the process without returning from the loop).
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         #[cfg(not(target_os = "android"))]
-        if let Some(inspector) = self.inspector_ui.as_ref() {
-            if let Ok(path) = crate::inspector::persistence::InspectorLayout::config_path() {
-                if let Err(error) = inspector.layout.save(&path) {
-                    log::debug!("could not save ImGui inspector layout: {error}");
+        if self.args.inspector {
+            if let Some(inspector) = self.inspector_ui.as_ref() {
+                if let Ok(path) = crate::inspector::persistence::InspectorLayout::config_path() {
+                    if let Err(error) = inspector.layout.save(&path) {
+                        log::debug!("could not save ImGui inspector layout: {error}");
+                    }
                 }
             }
         }
@@ -3071,8 +3079,26 @@ mod imgui_capture_tests {
             pointer: true,
             keyboard: true,
         };
-        abort_inspector_frame_if_surface_unavailable(&mut inspector, false);
+        abort_inspector_frame_if_surface_unavailable(&mut inspector, false, true);
         assert_eq!(inspector.input_capture, InputCaptureState::default());
+    }
+
+    #[test]
+    fn abort_inspector_requires_inspector_capability() {
+        let mut inspector = InspectorUi::new();
+        inspector.input_capture = InputCaptureState {
+            pointer: true,
+            keyboard: true,
+        };
+        abort_inspector_frame_if_surface_unavailable(&mut inspector, false, false);
+        // With inspector capability disabled, the abort should not happen
+        assert_eq!(
+            inspector.input_capture,
+            InputCaptureState {
+                pointer: true,
+                keyboard: true,
+            }
+        );
     }
 
     #[test]
