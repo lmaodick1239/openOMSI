@@ -3,8 +3,8 @@
 //! Typed, validated commands queued by UI and executed at application boundary.
 //! Preserves stable selection keys and prevents stale UI references.
 
-use serde::{Deserialize, Serialize};
 use crate::inspector::core::*;
+use serde::{Deserialize, Serialize};
 
 /// Inspector command enum.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,7 +51,11 @@ pub enum MaterialCommand {
     /// Toggle sandbox mode for a specific target.
     ToggleSandbox { target: SelectionTarget },
     /// Set PBR parameter override for a specific target.
-    SetPBROverride { target: SelectionTarget, metallic: f32, roughness: f32 },
+    SetPBROverride {
+        target: SelectionTarget,
+        metallic: f32,
+        roughness: f32,
+    },
     /// Clear PBR overrides for a specific target.
     ClearOverrides { target: SelectionTarget },
 }
@@ -79,9 +83,15 @@ pub enum RenderCommand {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HumanCommand {
     /// Set playback control mode for a specific human.
-    SetPlayback { target: SelectionTarget, mode: PlaybackMode },
+    SetPlayback {
+        target: SelectionTarget,
+        mode: PlaybackMode,
+    },
     /// Toggle bone tree node collapsed state for a specific human.
-    ToggleBone { target: SelectionTarget, bone_name: String },
+    ToggleBone {
+        target: SelectionTarget,
+        bone_name: String,
+    },
 }
 
 /// Playback control mode.
@@ -98,7 +108,11 @@ pub enum EditorCommand {
     /// Start transform sandbox for entity.
     StartSandbox { target: SelectionTarget },
     /// Update sandbox transform for the active sandbox target.
-    UpdateTransform { target: SelectionTarget, position: [f32; 3], rotation: [f32; 3] },
+    UpdateTransform {
+        target: SelectionTarget,
+        position: [f32; 3],
+        rotation: [f32; 3],
+    },
     /// Apply sandbox changes for the active sandbox target.
     ApplySandbox { target: SelectionTarget },
     /// Revert sandbox changes for the active sandbox target.
@@ -111,7 +125,10 @@ pub enum EditorCommand {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ExportCommand {
     /// Export selected entity to glTF.
-    ExportSelection { target: SelectionTarget, destination: String },
+    ExportSelection {
+        target: SelectionTarget,
+        destination: String,
+    },
     /// Cancel ongoing export.
     CancelExport,
 }
@@ -271,7 +288,11 @@ fn validate_material_command(
             target
         }
         MaterialCommand::ToggleSandbox { target } => target,
-        MaterialCommand::SetPBROverride { target, metallic, roughness } => {
+        MaterialCommand::SetPBROverride {
+            target,
+            metallic,
+            roughness,
+        } => {
             if !(*metallic >= 0.0 && *metallic <= 1.0) {
                 return Err(CommandError::InvalidParameter(format!(
                     "Metallic {} out of range [0.0, 1.0]",
@@ -308,10 +329,7 @@ fn validate_human_command(cmd: &HumanCommand, selection: &InspectorSelection) ->
     validate_target_matches_selection(cmd_target, selection)
 }
 
-fn validate_editor_command(
-    cmd: &EditorCommand,
-    selection: &InspectorSelection,
-) -> CommandResult {
+fn validate_editor_command(cmd: &EditorCommand, selection: &InspectorSelection) -> CommandResult {
     let cmd_target = match cmd {
         EditorCommand::StartSandbox { target } => target,
         EditorCommand::UpdateTransform { target, .. } => target,
@@ -337,7 +355,8 @@ fn validate_editor_command(
             // These require active sandbox state. Without context, we reject them.
             // Callers must use validate_command_with_context for proper validation.
             Err(CommandError::SandboxNotActive(
-                "Editor command requires sandbox context; use validate_command_with_context".to_string()
+                "Editor command requires sandbox context; use validate_command_with_context"
+                    .to_string(),
             ))
         }
     }
@@ -367,7 +386,7 @@ pub fn validate_editor_command_with_sandbox(
             // StartSandbox should not have an active sandbox
             if sandbox_target.is_some() {
                 return Err(CommandError::NotSupported(
-                    "Sandbox already active".to_string()
+                    "Sandbox already active".to_string(),
                 ));
             }
             Ok(())
@@ -379,14 +398,14 @@ pub fn validate_editor_command_with_sandbox(
             // These require active sandbox matching the command target
             match sandbox_target {
                 None => Err(CommandError::SandboxNotActive(
-                    "No active sandbox for this operation".to_string()
+                    "No active sandbox for this operation".to_string(),
                 )),
                 Some(active_target) => {
                     if targets_match(target, active_target) {
                         Ok(())
                     } else {
                         Err(CommandError::StaleSelection(
-                            "Sandbox target does not match command target".to_string()
+                            "Sandbox target does not match command target".to_string(),
                         ))
                     }
                 }
@@ -442,8 +461,14 @@ fn targets_match(a: &SelectionTarget, b: &SelectionTarget) -> bool {
             SelectionTarget::Scenery { key: k2, mesh: m2 },
         ) => k1 == k2 && m1 == m2,
         (
-            SelectionTarget::Human { key: k1, mesh_id: m1 },
-            SelectionTarget::Human { key: k2, mesh_id: m2 },
+            SelectionTarget::Human {
+                key: k1,
+                mesh_id: m1,
+            },
+            SelectionTarget::Human {
+                key: k2,
+                mesh_id: m2,
+            },
         ) => k1 == k2 && m1 == m2,
         _ => false,
     }
@@ -483,16 +508,14 @@ mod tests {
     #[test]
     fn test_validate_jump_out_of_range() {
         let mut selection = InspectorSelection::default();
-        selection.penetration_stack = vec![
-            PenetrationHit::new(
-                1.0,
-                SelectionTarget::Vehicle {
-                    key: VehicleKey::Player { generation: 1 },
-                    mesh: None,
-                },
-                "Test".to_string(),
-            ),
-        ];
+        selection.penetration_stack = vec![PenetrationHit::new(
+            1.0,
+            SelectionTarget::Vehicle {
+                key: VehicleKey::Player { generation: 1 },
+                mesh: None,
+            },
+            "Test".to_string(),
+        )];
 
         let cmd = InspectorCommand::JumpToHit(5);
         let result = validate_command(&cmd, &selection);
@@ -507,10 +530,7 @@ mod tests {
         };
         let selection = InspectorSelection::new(target.clone());
 
-        let cmd = InspectorCommand::Material(MaterialCommand::SetMipmapLevel {
-            target,
-            level: 20,
-        });
+        let cmd = InspectorCommand::Material(MaterialCommand::SetMipmapLevel { target, level: 20 });
         let result = validate_command(&cmd, &selection);
         assert!(result.is_err());
     }

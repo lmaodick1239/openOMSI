@@ -131,9 +131,7 @@ fn test_validate_command_with_context_rejects_no_sandbox() {
     let target = make_vehicle_target(1);
     let selection = InspectorSelection::new(target.clone());
 
-    let cmd = InspectorCommand::Editor(EditorCommand::ApplySandbox {
-        target,
-    });
+    let cmd = InspectorCommand::Editor(EditorCommand::ApplySandbox { target });
 
     let context = ValidationContext {
         sandbox_target: None,
@@ -152,9 +150,7 @@ fn test_validate_command_allows_start_sandbox() {
     let target = make_vehicle_target(1);
     let selection = InspectorSelection::new(target.clone());
 
-    let cmd = InspectorCommand::Editor(EditorCommand::StartSandbox {
-        target,
-    });
+    let cmd = InspectorCommand::Editor(EditorCommand::StartSandbox { target });
 
     // StartSandbox should be allowed by validate_command (no context needed)
     let result = validate_command(&cmd, &selection);
@@ -167,9 +163,7 @@ fn test_validate_command_with_context_rejects_start_when_active() {
     let selection = InspectorSelection::new(target.clone());
     let active_sandbox = make_vehicle_target(1);
 
-    let cmd = InspectorCommand::Editor(EditorCommand::StartSandbox {
-        target,
-    });
+    let cmd = InspectorCommand::Editor(EditorCommand::StartSandbox { target });
 
     let context = ValidationContext {
         sandbox_target: Some(&active_sandbox),
@@ -188,10 +182,7 @@ fn test_validate_command_with_context_passes_through_non_editor() {
     let target = make_vehicle_target(1);
     let selection = InspectorSelection::new(target.clone());
 
-    let cmd = InspectorCommand::Material(MaterialCommand::SetMipmapLevel {
-        target,
-        level: 5,
-    });
+    let cmd = InspectorCommand::Material(MaterialCommand::SetMipmapLevel { target, level: 5 });
 
     let context = ValidationContext {
         sandbox_target: None,
@@ -207,9 +198,7 @@ fn test_validate_close_sandbox_without_context() {
     let target = make_vehicle_target(1);
     let selection = InspectorSelection::new(target.clone());
 
-    let cmd = InspectorCommand::Editor(EditorCommand::CloseSandbox {
-        target,
-    });
+    let cmd = InspectorCommand::Editor(EditorCommand::CloseSandbox { target });
 
     // Should be rejected without context
     let result = validate_command(&cmd, &selection);
@@ -225,9 +214,7 @@ fn test_validate_revert_sandbox_without_context() {
     let target = make_vehicle_target(1);
     let selection = InspectorSelection::new(target.clone());
 
-    let cmd = InspectorCommand::Editor(EditorCommand::RevertSandbox {
-        target,
-    });
+    let cmd = InspectorCommand::Editor(EditorCommand::RevertSandbox { target });
 
     // Should be rejected without context
     let result = validate_command(&cmd, &selection);

@@ -262,12 +262,9 @@ pub(crate) struct App {
 impl App {
     #[cfg(not(target_os = "android"))]
     pub(crate) fn inspector_snapshot(
-        &self,
+        &mut self,
     ) -> crate::inspector::imgui_inspector::InspectorUiSnapshot {
-        use crate::inspector::{
-            EditorView, ExportStatus, ExportView, HumanView, MaterialView, RenderView,
-            TelemetryView,
-        };
+        use crate::inspector::{EditorView, HumanView, MaterialView, RenderView, TelemetryView};
 
         let inspector = self
             .inspector_selection
@@ -277,51 +274,71 @@ impl App {
             .as_ref()
             .and_then(|view| view.selection_target.clone());
         let material = self.scene.as_ref().and_then(|scene| {
-            target
-                .as_ref()
-                .and_then(|_| scene.query_material_snapshot(0))
-                .map(|snapshot| MaterialView {
-                    name: target
-                        .as_ref()
-                        .map(|t| format!("{t:?}"))
-                        .unwrap_or_else(|| "Material 0".into()),
-                    shader_variant: snapshot.shader_variant,
-                    alpha_mode: format!("{:?}", snapshot.alpha_mode),
-                    blend_mode: format!("{:?}", snapshot.blend_mode),
-                    base_color: snapshot.color,
-                    metallic: snapshot.pbr_params.metalness,
-                    roughness: snapshot.pbr_params.roughness,
-                    base_texture: snapshot
-                        .diffuse_tex
-                        .map(|texture| format!("{:?}", texture.id)),
-                    mipmap_level: 0,
-                    sandbox_active: false,
-                })
+            let crate::inspector::SelectionTarget::Vehicle {
+                key: crate::inspector::VehicleKey::Player { .. },
+                mesh: Some(mesh),
+            } = target.as_ref()?
+            else {
+                return None;
+            };
+            let player = self.player.as_ref()?;
+            let instance_index = *player.render.instances.get(mesh.definition_index)?;
+            let material_id = *scene.instances.get(instance_index)?.materials.first()?;
+            let snapshot = scene.query_material_snapshot(material_id)?;
+            Some(MaterialView {
+                name: format!("{} material {material_id:?}", mesh.mesh_name),
+                shader_variant: snapshot.shader_variant,
+                alpha_mode: format!("{:?}", snapshot.alpha_mode),
+                blend_mode: format!("{:?}", snapshot.blend_mode),
+                base_color: snapshot.color,
+                metallic: snapshot.pbr_params.metalness,
+                roughness: snapshot.pbr_params.roughness,
+                base_texture: snapshot
+                    .diffuse_tex
+                    .map(|texture| format!("{:?}", texture.id)),
+                mipmap_level: 0,
+                sandbox_active: false,
+            })
         });
-        let render = Some(RenderView {
-            passes: Vec::new(),
-            total_frame_time_ms: self.profile.get("render").copied().unwrap_or_default() as f32
-                * 1000.0,
-            total_draw_calls: 0,
-            total_triangles: 0,
-            isolation_mode: None,
-            wireframe_enabled: false,
-            collision_hulls_enabled: false,
-            show_normals: false,
-            show_uv_seams: false,
+        let render = self.renderer.as_ref().map(|renderer| {
+            let counts = renderer.counts.borrow();
+            RenderView {
+                passes: Vec::new(),
+                total_frame_time_ms: self
+                    .profile
+                    .get("render")
+                    .copied()
+                    .map(|seconds| seconds as f32 * 1000.0)
+                    .unwrap_or(0.0),
+                total_draw_calls: counts.get("main draws").copied().unwrap_or(0.0) as usize,
+                total_triangles: counts.get("ktris main").copied().unwrap_or(0.0) as usize * 1000,
+                isolation_mode: None,
+                wireframe_enabled: false,
+                collision_hulls_enabled: false,
+                show_normals: false,
+                show_uv_seams: false,
+            }
         });
         let human = match target {
-            Some(crate::inspector::SelectionTarget::Human { key, .. }) => Some(HumanView {
-                id: key.id,
-                generation: key.generation,
-                is_driver: key.is_driver,
-                position: [0.0; 3],
-                velocity: 0.0,
-                current_animation: "unavailable".into(),
-                animation_phase: 0.0,
-                bone_count: 0,
-                playback: "Playing".into(),
-            }),
+            Some(crate::inspector::SelectionTarget::Human { key, .. }) => self
+                .humans
+                .as_mut()
+                .and_then(|humans| humans.inspector_snapshot(key.id, key.generation, key.is_driver))
+                .map(|snapshot| HumanView {
+                    id: snapshot.id,
+                    generation: snapshot.generation,
+                    is_driver: snapshot.is_driver,
+                    position: snapshot.position.into(),
+                    velocity: snapshot.velocity.length(),
+                    current_animation: snapshot.active_animation,
+                    animation_phase: snapshot.animation_phase,
+                    bone_names: snapshot
+                        .skeleton_bones
+                        .into_iter()
+                        .map(|bone| bone.name)
+                        .collect(),
+                    playback: "Playing".into(),
+                }),
             _ => None,
         };
         let editor = Some(EditorView {
@@ -338,15 +355,25 @@ impl App {
                 .map(|editor| editor.added.len())
                 .unwrap_or_default(),
         });
-        let telemetry = Some(TelemetryView {
-            timestamp_ms: self.started.elapsed().as_millis() as u64,
-            frame_time_ms: self.profile.get("frame").copied().unwrap_or_default() as f32 * 1000.0,
-            inspector_query_time_ms: self.profile.get("inspector").copied().unwrap_or_default()
-                as f32
-                * 1000.0,
-            gpu_staging_time_ms: self.profile.get("gpu").copied().unwrap_or_default() as f32
-                * 1000.0,
-            watch_expressions: Vec::new(),
+        let telemetry = self.renderer.as_ref().map(|renderer| {
+            let stats = renderer.stats.borrow();
+            TelemetryView {
+                timestamp_ms: self.started.elapsed().as_millis() as u64,
+                frame_time_ms: self
+                    .profile
+                    .get("frame")
+                    .copied()
+                    .map(|seconds| seconds as f32 * 1000.0)
+                    .unwrap_or(0.0),
+                inspector_query_time_ms: self
+                    .profile
+                    .get("inspector")
+                    .copied()
+                    .map(|seconds| seconds as f32 * 1000.0)
+                    .unwrap_or(0.0),
+                gpu_staging_time_ms: stats.get("gpu").copied().unwrap_or(0.0) as f32 * 1000.0,
+                watch_expressions: Vec::new(),
+            }
         });
         let mut hierarchy = Vec::new();
         if let Some(view) = inspector.as_ref() {
@@ -372,11 +399,7 @@ impl App {
             human,
             telemetry,
             editor,
-            export: Some(ExportView {
-                status: ExportStatus::Idle,
-                destination: None,
-                error: None,
-            }),
+            export: None,
             hierarchy,
             log_lines,
         }

@@ -46,8 +46,7 @@ fn test_inspector_snapshot_serialization_preserves_target_identity() {
     };
 
     let json = serde_json::to_string(&snapshot).expect("Serialization failed");
-    let restored: InspectorSnapshot =
-        serde_json::from_str(&json).expect("Deserialization failed");
+    let restored: InspectorSnapshot = serde_json::from_str(&json).expect("Deserialization failed");
 
     assert_eq!(restored, snapshot);
     assert_eq!(restored.target, target);
@@ -61,7 +60,8 @@ fn test_view_serialization_preserves_selection_target() {
 
     // Serialize and deserialize
     let json = serde_json::to_string(&view).expect("Serialization failed");
-    let deserialized: InspectorMainView = serde_json::from_str(&json).expect("Deserialization failed");
+    let deserialized: InspectorMainView =
+        serde_json::from_str(&json).expect("Deserialization failed");
 
     // Verify selection_target is preserved
     assert!(deserialized.selection_target.is_some());
@@ -89,7 +89,8 @@ fn test_with_snapshot_after_deserialization_validates_generation() {
 
     // Serialize and deserialize
     let json = serde_json::to_string(&view).expect("Serialization failed");
-    let deserialized: InspectorMainView = serde_json::from_str(&json).expect("Deserialization failed");
+    let deserialized: InspectorMainView =
+        serde_json::from_str(&json).expect("Deserialization failed");
 
     // Create snapshot with different generation
     let snapshot = InspectorSnapshot {
@@ -141,7 +142,8 @@ fn test_with_snapshot_after_deserialization_accepts_matching() {
 
     // Serialize and deserialize
     let json = serde_json::to_string(&view).expect("Serialization failed");
-    let deserialized: InspectorMainView = serde_json::from_str(&json).expect("Deserialization failed");
+    let deserialized: InspectorMainView =
+        serde_json::from_str(&json).expect("Deserialization failed");
 
     // Create snapshot with matching target
     let snapshot = InspectorSnapshot {
@@ -172,7 +174,8 @@ fn test_with_snapshot_human_generation_after_roundtrip() {
 
     // Serialize and deserialize
     let json = serde_json::to_string(&view).expect("Serialization failed");
-    let deserialized: InspectorMainView = serde_json::from_str(&json).expect("Deserialization failed");
+    let deserialized: InspectorMainView =
+        serde_json::from_str(&json).expect("Deserialization failed");
 
     // Try snapshot with different generation
     let snapshot = InspectorSnapshot {

@@ -25,10 +25,7 @@ fn test_inspector_main_view_from_selection_vehicle() {
 
     assert_eq!(view.selection_status, "Selected");
     assert_eq!(view.entity_type, Some("Vehicle".to_string()));
-    assert!(view
-        .entity_identity
-        .unwrap()
-        .contains("Player Vehicle"));
+    assert!(view.entity_identity.unwrap().contains("Player Vehicle"));
 }
 
 #[test]
@@ -148,7 +145,7 @@ fn test_view_model_serialization_human() {
         velocity: 1.5,
         current_animation: "walk".to_string(),
         animation_phase: 0.5,
-        bone_count: 32,
+        bone_names: (0..32).map(|index| format!("bone_{index}")).collect(),
         playback: "Playing".to_string(),
     };
 
@@ -241,7 +238,9 @@ fn test_inspector_main_view_enrichment() {
         ],
     };
 
-    let view = InspectorMainView::from(&selection).with_snapshot(&snapshot).unwrap();
+    let view = InspectorMainView::from(&selection)
+        .with_snapshot(&snapshot)
+        .unwrap();
 
     assert_eq!(view.position, Some([100.0, 50.0, 200.0]));
     assert_eq!(view.model_path, Some("vehicles/bus.cfg".to_string()));

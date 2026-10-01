@@ -3,8 +3,8 @@
 //! Owned, serializable snapshots for ImGui or other UI backends.
 //! No egui dependencies, no mutable simulation borrows across frames.
 
-use serde::{Deserialize, Serialize};
 use crate::inspector::core::*;
+use serde::{Deserialize, Serialize};
 
 /// Subsystem adapter trait for building view models from runtime state.
 ///
@@ -13,7 +13,7 @@ use crate::inspector::core::*;
 pub trait SubsystemAdapter {
     /// The view model type this adapter produces.
     type ViewModel;
-    
+
     /// Snapshot the current subsystem state for the given selection target.
     fn snapshot(&self, target: &SelectionTarget) -> Option<Self::ViewModel>;
 }
@@ -22,7 +22,7 @@ pub trait SubsystemAdapter {
 pub trait MaterialAdapter: SubsystemAdapter<ViewModel = MaterialView> {
     /// Check if sandbox mode is active for the target.
     fn is_sandbox_active(&self, target: &SelectionTarget) -> bool;
-    
+
     /// Get current mipmap level for the target material.
     fn get_mipmap_level(&self, target: &SelectionTarget) -> Option<u8>;
 }
@@ -31,7 +31,7 @@ pub trait MaterialAdapter: SubsystemAdapter<ViewModel = MaterialView> {
 pub trait RenderAdapter: SubsystemAdapter<ViewModel = RenderView> {
     /// Get active isolation mode.
     fn get_isolation_mode(&self) -> Option<String>;
-    
+
     /// Check if wireframe mode is enabled.
     fn is_wireframe_enabled(&self) -> bool;
 }
@@ -40,7 +40,7 @@ pub trait RenderAdapter: SubsystemAdapter<ViewModel = RenderView> {
 pub trait HumanAdapter: SubsystemAdapter<ViewModel = HumanView> {
     /// Get current playback control state.
     fn get_playback_state(&self, target: &SelectionTarget) -> Option<String>;
-    
+
     /// Get animation phase for the target human.
     fn get_animation_phase(&self, target: &SelectionTarget) -> Option<f32>;
 }
@@ -49,7 +49,7 @@ pub trait HumanAdapter: SubsystemAdapter<ViewModel = HumanView> {
 pub trait TelemetryAdapter: SubsystemAdapter<ViewModel = TelemetryView> {
     /// Get current frame time in milliseconds.
     fn get_frame_time_ms(&self) -> f32;
-    
+
     /// Get inspector query time in milliseconds.
     fn get_query_time_ms(&self) -> f32;
 }
@@ -58,7 +58,7 @@ pub trait TelemetryAdapter: SubsystemAdapter<ViewModel = TelemetryView> {
 pub trait EditorAdapter: SubsystemAdapter<ViewModel = EditorView> {
     /// Check if a transform sandbox is active for the target.
     fn is_sandbox_active(&self, target: &SelectionTarget) -> bool;
-    
+
     /// Get the active sandbox target, if any.
     fn get_sandbox_target(&self) -> Option<SelectionTarget>;
 }
@@ -67,7 +67,7 @@ pub trait EditorAdapter: SubsystemAdapter<ViewModel = EditorView> {
 pub trait ExportAdapter: SubsystemAdapter<ViewModel = ExportView> {
     /// Get current export status.
     fn get_export_status(&self) -> ExportStatus;
-    
+
     /// Get export destination path, if an export is in progress.
     fn get_export_destination(&self) -> Option<String>;
 }
@@ -152,8 +152,8 @@ pub struct HumanView {
     pub current_animation: String,
     /// Animation phase [0.0, 1.0].
     pub animation_phase: f32,
-    /// Skeleton bones (simplified).
-    pub bone_count: usize,
+    /// Skeleton bone names from the live human pose.
+    pub bone_names: Vec<String>,
     /// Playback control state.
     pub playback: String,
 }
@@ -266,25 +266,49 @@ pub struct PenetrationHitView {
 
 impl From<&InspectorSelection> for InspectorMainView {
     fn from(selection: &InspectorSelection) -> Self {
-        let (selection_status, entity_type, entity_identity, selection_target) = match &selection.status {
+        let (selection_status, entity_type, entity_identity, selection_target) = match &selection
+            .status
+        {
             SelectionStatus::None => ("No selection".to_string(), None, None, None),
             SelectionStatus::Selected(target) => {
                 let (etype, eid) = match target {
                     SelectionTarget::Vehicle { key, .. } => {
                         let id = match key {
-                            VehicleKey::Player { generation } => format!("Player Vehicle (gen {})", generation),
+                            VehicleKey::Player { generation } => {
+                                format!("Player Vehicle (gen {})", generation)
+                            }
                             VehicleKey::AiCar { id } => format!("AI Car #{}", id),
-                            VehicleKey::Remote { player_id, generation } => format!("Remote #{} (gen {})", player_id, generation),
-                            VehicleKey::PlayerTrailer { generation, trailer_index } => format!("Player Trailer {} (gen {})", trailer_index, generation),
-                            VehicleKey::AiTrailer { car_id, trailer_index } => format!("AI Car #{} Trailer {}", car_id, trailer_index),
-                            VehicleKey::RemoteTrailer { player_id, generation, trailer_index } => format!("Remote #{} Trailer {} (gen {})", player_id, trailer_index, generation),
+                            VehicleKey::Remote {
+                                player_id,
+                                generation,
+                            } => format!("Remote #{} (gen {})", player_id, generation),
+                            VehicleKey::PlayerTrailer {
+                                generation,
+                                trailer_index,
+                            } => format!("Player Trailer {} (gen {})", trailer_index, generation),
+                            VehicleKey::AiTrailer {
+                                car_id,
+                                trailer_index,
+                            } => format!("AI Car #{} Trailer {}", car_id, trailer_index),
+                            VehicleKey::RemoteTrailer {
+                                player_id,
+                                generation,
+                                trailer_index,
+                            } => format!(
+                                "Remote #{} Trailer {} (gen {})",
+                                player_id, trailer_index, generation
+                            ),
                         };
                         ("Vehicle".to_string(), id)
                     }
                     SelectionTarget::Scenery { key, .. } => {
                         let id = match key {
                             SceneryKey::Editable { map_id } => format!("Editable #{}", map_id),
-                            SceneryKey::NonEditable { tile_x, tile_y, key } => format!("Tile ({}, {}) key {}", tile_x, tile_y, key),
+                            SceneryKey::NonEditable {
+                                tile_x,
+                                tile_y,
+                                key,
+                            } => format!("Tile ({}, {}) key {}", tile_x, tile_y, key),
                             SceneryKey::Parked { key } => format!("Parked #{}", key),
                         };
                         ("Scenery".to_string(), id)
@@ -294,7 +318,12 @@ impl From<&InspectorSelection> for InspectorMainView {
                         ("Human".to_string(), id)
                     }
                 };
-                ("Selected".to_string(), Some(etype), Some(eid), Some(target.clone()))
+                (
+                    "Selected".to_string(),
+                    Some(etype),
+                    Some(eid),
+                    Some(target.clone()),
+                )
             }
             SelectionStatus::Invalidated { reason } => {
                 (format!("Invalidated: {}", reason), None, None, None)
@@ -335,7 +364,7 @@ impl InspectorMainView {
         if self.selection_status == "No selection" {
             return Err("Cannot enrich view with no selection".to_string());
         }
-        
+
         if self.selection_status.starts_with("Invalidated") {
             return Err("Cannot enrich invalidated selection".to_string());
         }
@@ -350,7 +379,9 @@ impl InspectorMainView {
         } else {
             // Without full target identity, we cannot safely validate
             // Reject to prevent stale data acceptance after deserialization
-            return Err("View missing selection target identity; cannot validate snapshot".to_string());
+            return Err(
+                "View missing selection target identity; cannot validate snapshot".to_string(),
+            );
         }
 
         self.position = snapshot.position;
@@ -367,16 +398,34 @@ impl InspectorMainView {
 fn targets_match(a: &SelectionTarget, b: &SelectionTarget) -> bool {
     match (a, b) {
         (
-            SelectionTarget::Vehicle { key: key_a, mesh: mesh_a },
-            SelectionTarget::Vehicle { key: key_b, mesh: mesh_b },
+            SelectionTarget::Vehicle {
+                key: key_a,
+                mesh: mesh_a,
+            },
+            SelectionTarget::Vehicle {
+                key: key_b,
+                mesh: mesh_b,
+            },
         ) => key_a == key_b && mesh_a == mesh_b,
         (
-            SelectionTarget::Scenery { key: key_a, mesh: mesh_a },
-            SelectionTarget::Scenery { key: key_b, mesh: mesh_b },
+            SelectionTarget::Scenery {
+                key: key_a,
+                mesh: mesh_a,
+            },
+            SelectionTarget::Scenery {
+                key: key_b,
+                mesh: mesh_b,
+            },
         ) => key_a == key_b && mesh_a == mesh_b,
         (
-            SelectionTarget::Human { key: key_a, mesh_id: mesh_a },
-            SelectionTarget::Human { key: key_b, mesh_id: mesh_b },
+            SelectionTarget::Human {
+                key: key_a,
+                mesh_id: mesh_a,
+            },
+            SelectionTarget::Human {
+                key: key_b,
+                mesh_id: mesh_b,
+            },
         ) => key_a == key_b && mesh_a == mesh_b,
         _ => false,
     }
@@ -418,7 +467,7 @@ impl PartialEq for HumanView {
             && (self.velocity - other.velocity).abs() < 1e-6
             && self.current_animation == other.current_animation
             && (self.animation_phase - other.animation_phase).abs() < 1e-6
-            && self.bone_count == other.bone_count
+            && self.bone_names == other.bone_names
             && self.playback == other.playback
     }
 }

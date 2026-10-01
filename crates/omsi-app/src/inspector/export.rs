@@ -4,10 +4,10 @@
 //! with resolved transforms, vertex colors, PBR materials, and embedded PNG textures
 //! into a standard `.glb` file saved to `~/.local/share/openomsi/exports/`.
 
+use glam::Mat4;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
-use glam::Mat4;
 
 /// glTF export error types.
 #[derive(Debug)]
@@ -104,7 +104,9 @@ pub fn export_to_gltf(
 ) -> Result<PathBuf, ExportError> {
     // Validate mesh data
     if mesh_data.positions.is_empty() {
-        return Err(ExportError::InvalidMesh("Empty position buffer".to_string()));
+        return Err(ExportError::InvalidMesh(
+            "Empty position buffer".to_string(),
+        ));
     }
     if mesh_data.indices.is_empty() {
         return Err(ExportError::InvalidMesh("Empty index buffer".to_string()));
@@ -116,22 +118,18 @@ pub fn export_to_gltf(
         .unwrap()
         .as_secs();
     let filename = format!("{}_{}.glb", sanitize_filename(entity_name), timestamp);
-    
+
     let export_path = export_dir()?.join(&filename);
 
     log::info!("Exporting entity '{}' to {:?}", entity_name, export_path);
-    
+
     // TODO: Implement full glTF encoding using `gltf` crate
     // For now, create a placeholder file to validate the export path
-    let placeholder_data = create_minimal_gltf_placeholder(
-        entity_name,
-        transform,
-        mesh_data,
-        material,
-    )?;
-    
+    let placeholder_data =
+        create_minimal_gltf_placeholder(entity_name, transform, mesh_data, material)?;
+
     fs::write(&export_path, placeholder_data)?;
-    
+
     log::info!("Successfully exported to {:?}", export_path);
     Ok(export_path)
 }
@@ -240,7 +238,10 @@ mod tests {
 
     #[test]
     fn test_sanitize_filename() {
-        assert_eq!(sanitize_filename("mesh/test:file?.o3d"), "mesh_test_file_.o3d");
+        assert_eq!(
+            sanitize_filename("mesh/test:file?.o3d"),
+            "mesh_test_file_.o3d"
+        );
         assert_eq!(sanitize_filename("normal_name"), "normal_name");
     }
 
@@ -269,12 +270,7 @@ mod tests {
             alpha_mode: AlphaMode::Opaque,
         };
 
-        let result = export_to_gltf(
-            "test",
-            Mat4::IDENTITY,
-            &empty_mesh,
-            &material,
-        );
+        let result = export_to_gltf("test", Mat4::IDENTITY, &empty_mesh, &material);
 
         assert!(result.is_err());
     }

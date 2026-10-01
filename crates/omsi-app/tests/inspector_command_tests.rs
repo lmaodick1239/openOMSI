@@ -163,10 +163,7 @@ fn test_validate_toggle_view_with_selection() {
 fn test_validate_material_mipmap_level_too_high() {
     let target = make_vehicle_target(1);
     let selection = InspectorSelection::new(target.clone());
-    let cmd = InspectorCommand::Material(MaterialCommand::SetMipmapLevel {
-        target,
-        level: 20,
-    });
+    let cmd = InspectorCommand::Material(MaterialCommand::SetMipmapLevel { target, level: 20 });
 
     let result = validate_command(&cmd, &selection);
     assert!(result.is_err());
@@ -331,7 +328,7 @@ fn test_validate_material_command_stale_generation() {
     let target_gen1 = make_vehicle_target(1);
     let target_gen2 = make_vehicle_target(2);
     let selection = InspectorSelection::new(target_gen2);
-    
+
     let cmd = InspectorCommand::Material(MaterialCommand::SetMipmapLevel {
         target: target_gen1,
         level: 5,
@@ -352,7 +349,7 @@ fn test_validate_human_command_stale_generation() {
     let target_gen1 = make_human_target(42, 1);
     let target_gen2 = make_human_target(42, 2);
     let selection = InspectorSelection::new(target_gen2);
-    
+
     let cmd = InspectorCommand::Human(HumanCommand::SetPlayback {
         target: target_gen1,
         mode: PlaybackMode::Paused,
@@ -371,7 +368,7 @@ fn test_validate_editor_command_target_mismatch() {
     let target1 = make_vehicle_target(1);
     let target2 = make_vehicle_target(2);
     let selection = InspectorSelection::new(target2);
-    
+
     let cmd = InspectorCommand::Editor(EditorCommand::StartSandbox { target: target1 });
 
     let result = validate_command(&cmd, &selection);
@@ -383,7 +380,7 @@ fn test_validate_editor_command_invalidated_selection() {
     let target = make_vehicle_target(1);
     let mut selection = InspectorSelection::new(target.clone());
     selection.invalidate("Entity removed".to_string());
-    
+
     let cmd = InspectorCommand::Editor(EditorCommand::StartSandbox { target });
 
     let result = validate_command(&cmd, &selection);
@@ -401,7 +398,7 @@ fn test_validate_export_command_target_mismatch() {
     let target1 = make_vehicle_target(1);
     let target2 = make_vehicle_target(2);
     let selection = InspectorSelection::new(target2);
-    
+
     let cmd = InspectorCommand::Export(ExportCommand::ExportSelection {
         target: target1,
         destination: "test.glb".to_string(),
@@ -416,7 +413,7 @@ fn test_validate_material_command_different_entity_type() {
     let vehicle_target = make_vehicle_target(1);
     let human_target = make_human_target(1, 1);
     let selection = InspectorSelection::new(human_target);
-    
+
     let cmd = InspectorCommand::Material(MaterialCommand::ToggleSandbox {
         target: vehicle_target,
     });

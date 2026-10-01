@@ -574,8 +574,8 @@ fn draw_lines(ui: &Ui, label: &str, lines: &[String]) {
 fn draw_material(
     ui: &Ui,
     view: Option<&MaterialView>,
-    inspector: Option<&InspectorMainView>,
-    commands: &mut VecDeque<InspectorCommand>,
+    _inspector: Option<&InspectorMainView>,
+    _commands: &mut VecDeque<InspectorCommand>,
 ) {
     let Some(view) = view else {
         ui.text("No material snapshot");
@@ -587,42 +587,7 @@ fn draw_material(
         "Metallic {:.2}  Roughness {:.2}",
         view.metallic, view.roughness
     ));
-    let Some(target) = selected_target(inspector) else {
-        return;
-    };
-    if ui.button(format!("Mipmap {}", view.mipmap_level)) {
-        commands.push_back(InspectorCommand::Material(
-            crate::inspector::MaterialCommand::SetMipmapLevel {
-                target: target.clone(),
-                level: view.mipmap_level,
-            },
-        ));
-    }
-    if ui.button(if view.sandbox_active {
-        "Disable sandbox"
-    } else {
-        "Enable sandbox"
-    }) {
-        commands.push_back(InspectorCommand::Material(
-            crate::inspector::MaterialCommand::ToggleSandbox {
-                target: target.clone(),
-            },
-        ));
-    }
-    if ui.button("Apply PBR values") {
-        commands.push_back(InspectorCommand::Material(
-            crate::inspector::MaterialCommand::SetPBROverride {
-                target: target.clone(),
-                metallic: view.metallic,
-                roughness: view.roughness,
-            },
-        ));
-    }
-    if ui.button("Clear PBR overrides") {
-        commands.push_back(InspectorCommand::Material(
-            crate::inspector::MaterialCommand::ClearOverrides { target },
-        ));
-    }
+    ui.text("Material mutation controls unavailable: no application operation is exposed.");
 }
 
 fn draw_render(ui: &Ui, view: Option<&RenderView>, commands: &mut VecDeque<InspectorCommand>) {
@@ -673,8 +638,8 @@ fn draw_render(ui: &Ui, view: Option<&RenderView>, commands: &mut VecDeque<Inspe
 fn draw_human(
     ui: &Ui,
     view: Option<&HumanView>,
-    inspector: Option<&InspectorMainView>,
-    commands: &mut VecDeque<InspectorCommand>,
+    _inspector: Option<&InspectorMainView>,
+    _commands: &mut VecDeque<InspectorCommand>,
 ) {
     let Some(view) = view else {
         ui.text("No human snapshot");
@@ -683,41 +648,17 @@ fn draw_human(
     ui.text(format!("Human #{}  {}", view.id, view.current_animation));
     ui.text(format!(
         "Playback: {}  phase {:.2}  bones {}",
-        view.playback, view.animation_phase, view.bone_count
+        view.playback,
+        view.animation_phase,
+        view.bone_names.len()
     ));
     if ui.collapsing_header("Skeleton", imgui::TreeNodeFlags::empty()) {
-        for index in 0..view.bone_count {
-            let bone_name = format!("bone_{index}");
-            if ui.small_button(format!("Toggle {bone_name}")) {
-                if let Some(target) = selected_target(inspector) {
-                    commands.push_back(InspectorCommand::Human(
-                        crate::inspector::HumanCommand::ToggleBone { target, bone_name },
-                    ));
-                }
-            }
+        for bone_name in &view.bone_names {
+            ui.bullet_text(bone_name);
         }
     }
     ui.separator();
-    ui.text("Navigation and economy diagnostics are snapshot-owned.");
-    let Some(target) = selected_target(inspector) else {
-        return;
-    };
-    for (label, mode) in [
-        ("Play", crate::inspector::PlaybackMode::Playing),
-        ("Pause", crate::inspector::PlaybackMode::Paused),
-        ("Slow motion", crate::inspector::PlaybackMode::SlowMotion),
-    ] {
-        if ui.button(label) {
-            commands.push_back(InspectorCommand::Human(
-                crate::inspector::HumanCommand::SetPlayback {
-                    target: target.clone(),
-                    mode,
-                },
-            ));
-        }
-        ui.same_line();
-    }
-    ui.new_line();
+    ui.text("Human mutation controls unavailable: no application operation is exposed.");
 }
 
 fn draw_telemetry(
@@ -930,6 +871,26 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
+    fn active_imgui_frame_can_be_aborted_without_rendering() {
+        let mut inspector = InspectorUi::new();
+        inspector.context.io_mut().display_size = [1280.0, 720.0];
+        inspector.context.fonts().build_rgba32_texture();
+        {
+            let _frame = inspector.context.frame();
+        }
+        inspector.frame_started = true;
+        inspector.input_capture = InputCaptureState {
+            pointer: true,
+            keyboard: true,
+        };
+        inspector.abort_frame();
+        assert!(!inspector.frame_started);
+        assert_eq!(inspector.input_capture, InputCaptureState::default());
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn abort_without_active_frame_clears_capture() {
         let mut inspector = InspectorUi::new();
         inspector.input_capture = InputCaptureState {

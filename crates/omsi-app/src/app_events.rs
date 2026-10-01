@@ -32,6 +32,16 @@ fn imgui_keyboard_blocks_event(
     capture.effective(active).blocks_keyboard() && !inspector_toggle
 }
 
+#[cfg(not(target_os = "android"))]
+fn abort_inspector_frame_if_surface_unavailable(
+    inspector: &mut crate::inspector::imgui_inspector::InspectorUi,
+    surface_available: bool,
+) {
+    if !surface_available {
+        inspector.abort_frame();
+    }
+}
+
 use super::*;
 
 impl ApplicationHandler for App {
@@ -2325,7 +2335,7 @@ impl ApplicationHandler for App {
                         self.hidden_frames += 1;
                         #[cfg(not(target_os = "android"))]
                         if let Some(inspector) = self.inspector_ui.as_mut() {
-                            inspector.abort_frame();
+                            abort_inspector_frame_if_surface_unavailable(inspector, false);
                         }
                     }
                     let view = frame
@@ -2994,8 +3004,11 @@ mod governor_tests {
 #[cfg(not(target_os = "android"))]
 #[cfg(test)]
 mod imgui_capture_tests {
-    use super::{effective_imgui_capture, imgui_keyboard_blocks_event};
-    use crate::inspector::imgui_inspector::InputCaptureState;
+    use super::{
+        abort_inspector_frame_if_surface_unavailable, effective_imgui_capture,
+        imgui_keyboard_blocks_event,
+    };
+    use crate::inspector::imgui_inspector::{InputCaptureState, InspectorUi};
 
     #[test]
     fn inactive_inspector_disables_stale_capture_before_game_input() {
@@ -3018,6 +3031,18 @@ mod imgui_capture_tests {
         assert!(!imgui_keyboard_blocks_event(captured, true, true));
         assert!(imgui_keyboard_blocks_event(captured, true, false));
         assert!(!imgui_keyboard_blocks_event(captured, false, false));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn no_surface_path_aborts_inspector_and_clears_capture() {
+        let mut inspector = InspectorUi::new();
+        inspector.input_capture = InputCaptureState {
+            pointer: true,
+            keyboard: true,
+        };
+        abort_inspector_frame_if_surface_unavailable(&mut inspector, false);
+        assert_eq!(inspector.input_capture, InputCaptureState::default());
     }
 
     #[test]

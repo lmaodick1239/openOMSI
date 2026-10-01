@@ -128,7 +128,7 @@ impl InspectorLayout {
     /// Load the layout from the config file. Returns default on missing/corrupt file.
     pub fn load() -> Result<Self, io::Error> {
         let path = Self::config_path()?;
-        
+
         if !path.exists() {
             log::debug!("No inspector layout found, using defaults");
             return Ok(Self::default());

@@ -62,6 +62,9 @@ dirs = "5"
 # updates: the release archives from GitHub
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
+[dev-dependencies]
+serial_test = "3"
+
 # the desktop's clipboard and file dialogs (a phone has neither in this form)
 [target.'cfg(not(target_os = "android"))'.dependencies]
 imgui.workspace = true

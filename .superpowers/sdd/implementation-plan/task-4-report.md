@@ -37,3 +37,24 @@ Validation:
 - `cargo test -p omsi-app inspector --lib --tests --quiet -- --test-threads=1` passed: 77 library tests and all selected integration binaries passed.
 - A parallel focused test run hit the existing ImGui global-context race; the serial run passed.
 - `cargo check --workspace --quiet` and `git diff --check` run after this report update.
+
+## Task 4 Fix-Round Cleanup (2026-10-01)
+
+- Restored all accidental repository-wide formatting changes outside the migration allowlist to `HEAD`.
+- Retained only `Cargo.lock`, `crates/omsi-app/Cargo.toml`, `crates/omsi-app/src/app.rs`, `crates/omsi-app/src/app_events.rs`, `crates/omsi-app/src/inspector/**`, and `crates/omsi-app/tests/*inspector*`.
+- Kept the intentional `serial_test = "3"` dev-dependency and matching lockfile entries for serial inspector coverage.
+- Removed the unrelated `crates/omsi-app/tests/penetration_stack_tests.rs` formatting-only change.
+- Verified retained panel-source, material/human mutation-boundary, and frame-lifecycle test changes in the diff.
+
+Validation commands for this cleanup:
+
+- `cargo test -p omsi-app inspector --lib --tests --quiet -- --test-threads=1`
+- `cargo check --workspace --quiet`
+- `cargo fmt --all -- --check` — failed because unrelated restored `HEAD` files (first reported: `crates/omsi-app/build.rs`) are not rustfmt-clean; no formatting sweep was reapplied.
+- `git diff --check` — passed.
+
+Observed validation results:
+
+- `cargo test -p omsi-app inspector --lib --tests --quiet -- --test-threads=1` — passed: 79 library tests, plus selected integration binaries with 1 and 6 tests, all passed.
+- `cargo check --workspace --quiet` — passed.
+- The retained human snapshot method in `crates/omsi-app/src/humans.rs` was required by the retained `app.rs` panel-source change and is included as a directly coupled migration change.

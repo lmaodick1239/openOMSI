@@ -8141,6 +8141,32 @@ pub struct SeatSpot {
 }
 
 impl Humans {
+    /// Snapshot a live person for the owned inspector UI boundary.
+    pub fn inspector_snapshot(
+        &mut self,
+        id: u32,
+        generation: u64,
+        is_driver: bool,
+    ) -> Option<omsi_sim::human::HumanSnapshot> {
+        let person = self.people.iter_mut().find(|person| person.id == id)?;
+        if self.generations.get(&id).copied().unwrap_or_default() != generation {
+            return None;
+        }
+        let posed = person.anim.bones(&person.ty.rig);
+        Some(omsi_sim::human::HumanSnapshot::from_pose(
+            person.id,
+            generation,
+            is_driver,
+            &person.anim,
+            &posed,
+            &person.ty.rig,
+            person.activity,
+            person.position.as_vec3(),
+            glam::Vec3::new(person.vel.x as f32, person.vel.y as f32, 0.0),
+            None,
+        ))
+    }
+
     /// Put avatar `key` where `cmd` says (made on its first call, of figure `kind`).
     pub fn avatar(&mut self, key: u32, world: &World, renderer: &Renderer, scene: &mut Scene, cmd: AvatarCmd, kind: u64) {
         let known = self.avatars.get(&key).copied().filter(|id| self.people.iter().any(|p| p.id == *id));
