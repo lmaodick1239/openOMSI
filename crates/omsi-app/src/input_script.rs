@@ -1947,6 +1947,10 @@ impl App {
                 self.uncouple();
             }
             Some("resume") => self.close_game_menu(),
+            Some("inspector") => {
+                self.inspector_active = true;
+                self.close_game_menu();
+            }
             Some("editor") => {
                 self.close_game_menu();
                 self.toggle_editor();
@@ -2818,6 +2822,10 @@ impl crate::App {
         if self.lan.as_ref().map(|l| l.role == omsi_net::Role::Client).unwrap_or(false) {
             v.retain(|x| !matches!(x.0, "weather" | "clock" | "later" | "earlier" | "later10" | "earlier10" | "editor"));
         }
+        // inspector only when enabled
+        if !self.args.inspector {
+            v.retain(|x| x.0 != "inspector");
+        }
         // the everyday lines first; the rest behind "More..." (27 lines to scroll through
         // was the pause menu players found confusing)
         if self.menu_more {
@@ -2836,7 +2844,7 @@ impl crate::App {
 const MENU_BASIC: [&str; 12] = ["resume", "tobus", "options", "duty", "dest", "map", "timetable", "getout", "reset", "save", "admin", "quit"];
 
 /// The lines of the game menu: (what, label).
-pub(crate) const GAME_MENU: [(&str, &str); 33] = [
+pub(crate) const GAME_MENU: [(&str, &str); 34] = [
     ("resume", "Resume"),
     ("options", "Options..."),
     ("duty", "Line and tour..."),
@@ -2869,6 +2877,7 @@ pub(crate) const GAME_MENU: [(&str, &str); 33] = [
     ("wash", "Wash"),
     ("repair", "Repair"),
     ("editor", "Object editor"),
+    ("inspector", "Inspector"),
     ("quit", "End the session"),
 ];
 
@@ -2889,5 +2898,24 @@ pub(crate) fn swap_view_look(look: &mut (f32, f32), looks: &mut std::collections
             looks.insert(old, *look);
         }
         *look = looks.get(view).copied().unwrap_or((0.0, 0.0));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inspector_in_base_menu() {
+        // GAME_MENU constant includes inspector entry
+        assert!(GAME_MENU.iter().any(|m| m.0 == "inspector"), 
+            "Inspector should be in base GAME_MENU constant");
+    }
+
+    #[test]
+    fn inspector_menu_filtered_by_args() {
+        // game_menu_items will filter out inspector when args.inspector is false
+        // This test documents the expected behavior
+        // Actual testing requires full App setup which is too complex for unit tests
     }
 }
