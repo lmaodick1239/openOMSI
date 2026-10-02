@@ -77,8 +77,9 @@ The main **Inspector** window is the starting point for selection details and se
 - **Bounds** toggles the selected entity’s bounds overlay.
 - **Local axes** toggles local-axis visualization.
 - **Mesh name** toggles the selected mesh name overlay.
+- **Highlight all hover hits** keeps the default topmost hover behavior for selection but highlights every object intersected by the current ray. It is off by default and persists with the selection state.
 
-The exact controls shown depend on whether a current selection and a penetration/hit stack are available.
+Hover highlighting uses a translucent white fill and white outline over the complete object geometry. A selected object uses cyan and takes precedence over its hover styling. The exact controls shown depend on whether a current selection and a penetration/hit stack are available.
 
 ### Input capture
 

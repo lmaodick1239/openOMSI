@@ -5,7 +5,7 @@
 
 use crate::inspector::{
     EditorView, ExportView, HumanView, InspectorCommand, InspectorMainView, MaterialView,
-    RenderView, TelemetryView,
+    RenderView, SelectionTarget, TelemetryView,
 };
 use imgui::{Condition, ConfigFlags, Context, StyleColor, Ui, WindowFlags};
 use imgui_wgpu::{Renderer, RendererConfig, RendererError};
@@ -170,6 +170,7 @@ pub struct InspectorUiSnapshot {
     pub editor: Option<EditorView>,
     pub export: Option<ExportView>,
     pub hierarchy: Vec<String>,
+    pub hierarchy_targets: Vec<SelectionTarget>,
     pub log_lines: Vec<String>,
 }
 
@@ -218,6 +219,8 @@ pub struct InspectorUi {
     pub input_capture: InputCaptureState,
     pub last_backend_error: Option<BackendError>,
     frame_started: bool,
+    pub hover_target: Option<crate::inspector::SelectionTarget>,
+    pub hover_targets: Vec<crate::inspector::SelectionTarget>,
 }
 
 impl InspectorUi {
@@ -240,6 +243,8 @@ impl InspectorUi {
             input_capture: InputCaptureState::default(),
             last_backend_error: None,
             frame_started: false,
+            hover_target: None,
+            hover_targets: Vec::new(),
         }
     }
 
@@ -298,7 +303,7 @@ impl InspectorUi {
                 for window in InspectorWindow::all() {
                     let mut open = captured_layout[window.index()].open;
                     if ui.menu_item_config(window.name()).selected(open).build() {
-                        open = true;
+                        open = !open;
                     }
                     captured_layout[window.index()].open = open;
                 }
@@ -306,25 +311,32 @@ impl InspectorUi {
         });
         captured_layout[InspectorWindow::Inspector.index()] = draw_window(
             ui,
-            layout.windows[InspectorWindow::Inspector.index()],
+            captured_layout[InspectorWindow::Inspector.index()],
             InspectorWindow::Inspector,
             |ui| draw_inspector(ui, snapshot.inspector.as_ref(), &mut commands),
         );
         captured_layout[InspectorWindow::Hierarchy.index()] = draw_window(
             ui,
-            layout.windows[InspectorWindow::Hierarchy.index()],
+            captured_layout[InspectorWindow::Hierarchy.index()],
             InspectorWindow::Hierarchy,
-            |ui| draw_lines(ui, "Entities", &snapshot.hierarchy),
+            |ui| {
+                draw_hierarchy(
+                    ui,
+                    &snapshot.hierarchy,
+                    &snapshot.hierarchy_targets,
+                    &mut commands,
+                )
+            },
         );
         captured_layout[InspectorWindow::Log.index()] = draw_window(
             ui,
-            layout.windows[InspectorWindow::Log.index()],
+            captured_layout[InspectorWindow::Log.index()],
             InspectorWindow::Log,
             |ui| draw_lines(ui, "Diagnostics", &snapshot.log_lines),
         );
         captured_layout[InspectorWindow::Materials.index()] = draw_window(
             ui,
-            layout.windows[InspectorWindow::Materials.index()],
+            captured_layout[InspectorWindow::Materials.index()],
             InspectorWindow::Materials,
             |ui| {
                 draw_material(
@@ -337,13 +349,13 @@ impl InspectorUi {
         );
         captured_layout[InspectorWindow::Render.index()] = draw_window(
             ui,
-            layout.windows[InspectorWindow::Render.index()],
+            captured_layout[InspectorWindow::Render.index()],
             InspectorWindow::Render,
             |ui| draw_render(ui, snapshot.render.as_ref(), &mut commands),
         );
         captured_layout[InspectorWindow::Humans.index()] = draw_window(
             ui,
-            layout.windows[InspectorWindow::Humans.index()],
+            captured_layout[InspectorWindow::Humans.index()],
             InspectorWindow::Humans,
             |ui| {
                 draw_human(
@@ -356,13 +368,13 @@ impl InspectorUi {
         );
         captured_layout[InspectorWindow::Telemetry.index()] = draw_window(
             ui,
-            layout.windows[InspectorWindow::Telemetry.index()],
+            captured_layout[InspectorWindow::Telemetry.index()],
             InspectorWindow::Telemetry,
             |ui| draw_telemetry(ui, snapshot.telemetry.as_ref(), &mut commands),
         );
         captured_layout[InspectorWindow::Editor.index()] = draw_window(
             ui,
-            layout.windows[InspectorWindow::Editor.index()],
+            captured_layout[InspectorWindow::Editor.index()],
             InspectorWindow::Editor,
             |ui| {
                 draw_editor(
@@ -375,7 +387,7 @@ impl InspectorUi {
         );
         captured_layout[InspectorWindow::Export.index()] = draw_window(
             ui,
-            layout.windows[InspectorWindow::Export.index()],
+            captured_layout[InspectorWindow::Export.index()],
             InspectorWindow::Export,
             |ui| {
                 draw_export(
@@ -551,6 +563,14 @@ fn draw_inspector(
             commands.push_back(InspectorCommand::JumpToHit(index));
         }
     }
+    let mut highlight_all_hits = view.highlight_all_hits;
+    if ui.checkbox("Highlight all hover hits", &mut highlight_all_hits)
+        && highlight_all_hits != view.highlight_all_hits
+    {
+        commands.push_back(InspectorCommand::ToggleView(
+            crate::inspector::ViewToggle::HighlightAllHits,
+        ));
+    }
     if view.selection_target.is_some() {
         for (label, toggle) in [
             ("Bounds", crate::inspector::ViewToggle::ShowBounds),
@@ -570,6 +590,20 @@ fn draw_lines(ui: &Ui, label: &str, lines: &[String]) {
     ui.text(label);
     for line in lines {
         ui.bullet_text(line);
+    }
+}
+
+fn draw_hierarchy(
+    ui: &Ui,
+    lines: &[String],
+    targets: &[SelectionTarget],
+    commands: &mut VecDeque<InspectorCommand>,
+) {
+    ui.text("Entities");
+    for (line, target) in lines.iter().zip(targets.iter()) {
+        if ui.selectable(line) {
+            commands.push_back(InspectorCommand::Select(target.clone()));
+        }
     }
 }
 
@@ -602,9 +636,11 @@ fn draw_render(ui: &Ui, view: Option<&RenderView>, _commands: &mut VecDeque<Insp
         view.total_frame_time_ms, view.total_draw_calls, view.total_triangles
     ));
     if !view.snapshot_available {
-        ui.text(view.unavailable_reason.as_deref().unwrap_or(
-            "Render debug state is unavailable.",
-        ));
+        ui.text(
+            view.unavailable_reason
+                .as_deref()
+                .unwrap_or("Render debug state is unavailable."),
+        );
         return;
     }
     ui.text("Render mutation controls unavailable: no application operation is exposed.");

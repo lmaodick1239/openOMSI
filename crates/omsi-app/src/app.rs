@@ -420,9 +420,13 @@ impl App {
             }
         });
         let mut hierarchy = Vec::new();
+        let mut hierarchy_targets = Vec::new();
         if let Some(view) = inspector.as_ref() {
             if let Some(identity) = view.entity_identity.as_ref() {
                 hierarchy.push(identity.clone());
+                if let Some(target) = view.selection_target.as_ref() {
+                    hierarchy_targets.push(target.clone());
+                }
             }
         }
         hierarchy.extend(
@@ -431,6 +435,12 @@ impl App {
                 .enumerate()
                 .map(|(index, _)| format!("Placed vehicle {index}")),
         );
+        hierarchy_targets.extend(self.placed.iter().enumerate().map(|(index, _vehicle)| {
+            crate::inspector::SelectionTarget::Vehicle {
+                key: crate::inspector::VehicleKey::AiCar { id: index as u64 },
+                mesh: None,
+            }
+        }));
         let mut log_lines = Vec::new();
         if let Some((message, _)) = &self.service_msg {
             log_lines.push(message.clone());
@@ -452,6 +462,7 @@ impl App {
                 ),
             }),
             hierarchy,
+            hierarchy_targets,
             log_lines,
         }
     }
@@ -470,6 +481,12 @@ impl App {
             crate::inspector::InspectorCommand::Select(target) => {
                 self.inspector_selection =
                     Some(crate::inspector::InspectorSelection::new(target.clone()));
+                Ok(())
+            }
+            crate::inspector::InspectorCommand::SelectWithHits { target, hits } => {
+                let mut selection = crate::inspector::InspectorSelection::new(target.clone());
+                selection.set_penetration_stack(hits.clone());
+                self.inspector_selection = Some(selection);
                 Ok(())
             }
             crate::inspector::InspectorCommand::ClearSelection => {
@@ -512,6 +529,26 @@ impl App {
                         "No active selection".into(),
                     ))
                 }),
+            crate::inspector::InspectorCommand::ToggleView(toggle) => {
+                let selection = self.inspector_selection.as_mut().ok_or_else(|| {
+                    crate::inspector::CommandError::StaleSelection("No active selection".into())
+                })?;
+                match toggle {
+                    crate::inspector::ViewToggle::ShowBounds => {
+                        selection.view.show_bounds = !selection.view.show_bounds
+                    }
+                    crate::inspector::ViewToggle::ShowLocalAxes => {
+                        selection.view.show_local_axes = !selection.view.show_local_axes
+                    }
+                    crate::inspector::ViewToggle::ShowMeshName => {
+                        selection.view.show_mesh_name = !selection.view.show_mesh_name
+                    }
+                    crate::inspector::ViewToggle::HighlightAllHits => {
+                        selection.view.highlight_all_hits = !selection.view.highlight_all_hits
+                    }
+                }
+                Ok(())
+            }
             _ => Err(crate::inspector::CommandError::NotSupported(
                 "Inspector command has no application boundary yet".into(),
             )),
@@ -1061,7 +1098,13 @@ impl App {
         ) {
             scene.overlays.clear();
             let dpi = win.scale_factor() as f32;
-            let scale = dpi * crate::ui::size_factor(s.config.height as f32, dpi, self.settings.ui_scale, self.settings.ui_scale_window);
+            let scale = dpi
+                * crate::ui::size_factor(
+                    s.config.height as f32,
+                    dpi,
+                    self.settings.ui_scale,
+                    self.settings.ui_scale_window,
+                );
             ui.loading(
                 &renderer,
                 &mut scene,
@@ -1154,12 +1197,12 @@ impl App {
         w.update_texture_budget(r, scene, &centers, false);
         if centers.is_empty()
             || !streamer.update(
-            r,
-            scene,
-            &centers,
-            std::time::Duration::from_millis(6),
-            self.audio.as_ref(),
-        )
+                r,
+                scene,
+                &centers,
+                std::time::Duration::from_millis(6),
+                self.audio.as_ref(),
+            )
         {
             return;
         }
@@ -1278,7 +1321,11 @@ fn wrap_deg(a: f32) -> f32 {
 /// `a` (k = 0) to `b` (k = 1), both cameras fixed in the bus's frame: the eye, the turn of the
 /// view and the field of view on a straight way. The bus's own motion (its pitch, bank, the
 /// head) is put on the result afterwards, so the glide is the same standing and driving.
-pub(crate) fn blend_local(a: &omsi_vehicle::Camera, b: &omsi_vehicle::Camera, k: f32) -> omsi_vehicle::Camera {
+pub(crate) fn blend_local(
+    a: &omsi_vehicle::Camera,
+    b: &omsi_vehicle::Camera,
+    k: f32,
+) -> omsi_vehicle::Camera {
     // (measured from `b`: at k = 1 every value is exactly `b`'s - no 360 degree residue of a
     // yaw that went the short way round, no rounding left over for the hand-over to the
     // plain camera to show)
@@ -1310,10 +1357,17 @@ pub(crate) fn blend_local(a: &omsi_vehicle::Camera, b: &omsi_vehicle::Camera, k:
             let s = theta.sin();
             ((fa * ((rest * theta).sin() / s)) + (fb * ((k * theta).sin() / s))).normalize_or(fb)
         };
-        (f.x.atan2(f.y).to_degrees(), f.z.clamp(-1.0, 1.0).asin().to_degrees())
+        (
+            f.x.atan2(f.y).to_degrees(),
+            f.z.clamp(-1.0, 1.0).asin().to_degrees(),
+        )
     };
     omsi_vehicle::Camera {
-        pos: [l(a.pos[0], b.pos[0]), l(a.pos[1], b.pos[1]), l(a.pos[2], b.pos[2])],
+        pos: [
+            l(a.pos[0], b.pos[0]),
+            l(a.pos[1], b.pos[1]),
+            l(a.pos[2], b.pos[2]),
+        ],
         dist: l(a.dist, b.dist),
         fov: l(a.fov, b.fov),
         yaw,
@@ -1382,7 +1436,11 @@ impl CamCarry {
         self.pitch *= k;
         self.roll *= k;
         self.fov *= k;
-        self.pos.length() > 1e-4 || self.yaw.abs() > 0.01 || self.pitch.abs() > 0.01 || self.roll.abs() > 0.01 || self.fov.abs() > 0.01
+        self.pos.length() > 1e-4
+            || self.yaw.abs() > 0.01
+            || self.pitch.abs() > 0.01
+            || self.roll.abs() > 0.01
+            || self.fov.abs() > 0.01
     }
 }
 

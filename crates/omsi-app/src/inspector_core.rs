@@ -4,9 +4,9 @@
 //! without triggering interactive side-effects. This module defines the types for stable
 //! entity identity, hit candidates, selection state, and ordering policy.
 
-use std::cmp::Ordering;
 use glam::{DVec3, Vec3};
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 
 /// Stable identity for a vehicle entity across frames.
 ///
@@ -24,7 +24,10 @@ pub enum VehicleKey {
     /// Remote vehicle by player ID. Generation increments on replacement under same ID.
     Remote { player_id: u32, generation: u64 },
     /// Player trailer part by index.
-    PlayerTrailer { generation: u64, trailer_index: usize },
+    PlayerTrailer {
+        generation: u64,
+        trailer_index: usize,
+    },
     /// AI car trailer part.
     AiTrailer { car_id: u64, trailer_index: usize },
     /// Remote vehicle trailer part.
@@ -306,12 +309,14 @@ pub struct ViewToggles {
     pub show_bounds: bool,
     pub show_local_axes: bool,
     pub show_mesh_name: bool,
+    /// Highlight every object intersected by the current hover ray.
+    pub highlight_all_hits: bool,
 }
 
 /// A single hit in the penetration stack with display metadata.
 ///
 /// Stores the hit target, distance, and display name for UI presentation.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PenetrationHit {
     /// Hit distance from ray origin (meters).
     pub distance: f32,
@@ -357,6 +362,34 @@ impl Ord for PenetrationHit {
     fn cmp(&self, other: &Self) -> Ordering {
         self.partial_cmp(other).unwrap_or(Ordering::Equal)
     }
+}
+
+/// Resolve the geometry targets that should be highlighted for one Inspector frame.
+/// The first penetration hit is the default hover target; all-hit mode retains the ordered
+/// penetration list. Selection is marked explicitly so renderers can give cyan precedence.
+pub fn inspector_highlight_targets(
+    selected: Option<&SelectionTarget>,
+    penetration: &[PenetrationHit],
+    hover: Option<&SelectionTarget>,
+    all_hits: bool,
+) -> Vec<(SelectionTarget, bool)> {
+    let mut targets = Vec::new();
+    if let Some(selected) = selected {
+        targets.push((selected.clone(), true));
+    }
+    let hover_targets: Vec<&SelectionTarget> = if all_hits {
+        penetration.iter().map(|hit| &hit.target).collect()
+    } else {
+        hover.into_iter().collect()
+    };
+    for target in hover_targets {
+        if let Some(existing) = targets.iter_mut().find(|(current, _)| current == target) {
+            existing.1 = true;
+        } else {
+            targets.push((target.clone(), false));
+        }
+    }
+    targets
 }
 
 impl Default for InspectorSelection {
@@ -573,7 +606,11 @@ pub fn raycast_vehicle_meshes(
         }
     }
 
-    hits.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(Ordering::Equal));
+    hits.sort_by(|a, b| {
+        a.distance
+            .partial_cmp(&b.distance)
+            .unwrap_or(Ordering::Equal)
+    });
     hits
 }
 
@@ -633,7 +670,11 @@ pub fn raycast_vehicle_trailers(
         }
     }
 
-    hits.sort_by(|a, b| a.1.distance.partial_cmp(&b.1.distance).unwrap_or(Ordering::Equal));
+    hits.sort_by(|a, b| {
+        a.1.distance
+            .partial_cmp(&b.1.distance)
+            .unwrap_or(Ordering::Equal)
+    });
     hits
 }
 
@@ -641,7 +682,10 @@ pub fn raycast_vehicle_trailers(
 ///
 /// Returns `None` if the mesh name is unique, or `Some(occurrence_index)` where 0 is the
 /// first occurrence, 1 is the second, etc.
-fn compute_mesh_disambiguator(model_meshes: &[omsi_model::MeshDef], def_index: usize) -> Option<usize> {
+fn compute_mesh_disambiguator(
+    model_meshes: &[omsi_model::MeshDef],
+    def_index: usize,
+) -> Option<usize> {
     let target_name = &model_meshes[def_index].file;
     let mut occurrence = 0;
     let mut count = 0;
@@ -947,7 +991,11 @@ pub fn raycast_scenery_object_meshes(
         }
     }
 
-    hits.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(Ordering::Equal));
+    hits.sort_by(|a, b| {
+        a.distance
+            .partial_cmp(&b.distance)
+            .unwrap_or(Ordering::Equal)
+    });
     hits
 }
 
@@ -981,7 +1029,14 @@ pub fn raycast_tile_scenery(
         let lod_level = determine_lod_level(&scenery.ty, distance);
 
         // Raycast against this scenery object
-        for hit in raycast_scenery_object_meshes(&scenery.ty, scenery.pos, &scenery.xf, origin, dir, lod_level) {
+        for hit in raycast_scenery_object_meshes(
+            &scenery.ty,
+            scenery.pos,
+            &scenery.xf,
+            origin,
+            dir,
+            lod_level,
+        ) {
             // Get mesh name for identity from model definition
             // For LOD 0, use mesh_def_index mapping; for lower LODs, the definition index
             // is not tracked per-mesh, so we use mesh_index as a fallback logical identifier
@@ -1047,7 +1102,10 @@ pub fn build_hit_display_name(target: &SelectionTarget, distance: f32) -> String
             }
         }
         SelectionTarget::Scenery { key, mesh } => {
-            let mesh_name = mesh.as_ref().map(|m| m.mesh_name.as_str()).unwrap_or("object");
+            let mesh_name = mesh
+                .as_ref()
+                .map(|m| m.mesh_name.as_str())
+                .unwrap_or("object");
             let location = match key {
                 SceneryKey::Editable { map_id } => format!("Editable #{}", map_id),
                 SceneryKey::NonEditable { tile_x, tile_y, .. } => {
@@ -1193,7 +1251,9 @@ mod tests {
             _ => panic!("Expected player vehicle first"),
         }
         match &hits[1].target {
-            SelectionTarget::Vehicle { key, .. } => assert!(matches!(key, VehicleKey::AiCar { .. })),
+            SelectionTarget::Vehicle { key, .. } => {
+                assert!(matches!(key, VehicleKey::AiCar { .. }))
+            }
             _ => panic!("Expected AI vehicle second"),
         }
         match &hits[2].target {
@@ -1204,12 +1264,7 @@ mod tests {
 
     #[test]
     fn test_mesh_identity_unique_name() {
-        let mesh = MeshIdentity::new(
-            "test.sco".to_string(),
-            5,
-            "door_front".to_string(),
-            None,
-        );
+        let mesh = MeshIdentity::new("test.sco".to_string(), 5, "door_front".to_string(), None);
 
         assert_eq!(mesh.model_path, "test.sco");
         assert_eq!(mesh.definition_index, 5);
@@ -1219,24 +1274,14 @@ mod tests {
 
     #[test]
     fn test_mesh_identity_duplicate_name() {
-        let mesh = MeshIdentity::new(
-            "test.sco".to_string(),
-            7,
-            "wheel".to_string(),
-            Some(2),
-        );
+        let mesh = MeshIdentity::new("test.sco".to_string(), 7, "wheel".to_string(), Some(2));
 
         assert_eq!(mesh.disambiguator, Some(2));
     }
 
     #[test]
     fn test_mesh_lod_fallback_exact_match() {
-        let mesh = MeshIdentity::new(
-            "test.sco".to_string(),
-            5,
-            "body".to_string(),
-            None,
-        );
+        let mesh = MeshIdentity::new("test.sco".to_string(), 5, "body".to_string(), None);
 
         let available = vec![3, 5, 8];
         let fallback = mesh.find_fallback_index(&available);
@@ -1246,12 +1291,7 @@ mod tests {
 
     #[test]
     fn test_mesh_lod_fallback_nearest() {
-        let mesh = MeshIdentity::new(
-            "test.sco".to_string(),
-            6,
-            "body".to_string(),
-            None,
-        );
+        let mesh = MeshIdentity::new("test.sco".to_string(), 6, "body".to_string(), None);
 
         // Available: 3, 5, 8. Target: 6. Distances: 3, 1, 2. Nearest: 5.
         let available = vec![3, 5, 8];
@@ -1262,12 +1302,7 @@ mod tests {
 
     #[test]
     fn test_mesh_lod_fallback_tie_prefers_lower() {
-        let mesh = MeshIdentity::new(
-            "test.sco".to_string(),
-            5,
-            "body".to_string(),
-            None,
-        );
+        let mesh = MeshIdentity::new("test.sco".to_string(), 5, "body".to_string(), None);
 
         // Available: 3, 7. Target: 5. Distances: 2, 2. Tie-break: prefer 3 (lower index).
         let available = vec![3, 7];
@@ -1278,12 +1313,7 @@ mod tests {
 
     #[test]
     fn test_mesh_lod_fallback_empty() {
-        let mesh = MeshIdentity::new(
-            "test.sco".to_string(),
-            5,
-            "body".to_string(),
-            None,
-        );
+        let mesh = MeshIdentity::new("test.sco".to_string(), 5, "body".to_string(), None);
 
         let fallback = mesh.find_fallback_index(&[]);
         assert_eq!(fallback, None);
@@ -1301,10 +1331,7 @@ mod tests {
 
         sel.invalidate("entity removed".to_string());
         assert!(!sel.is_active());
-        assert!(matches!(
-            sel.status,
-            SelectionStatus::Invalidated { .. }
-        ));
+        assert!(matches!(sel.status, SelectionStatus::Invalidated { .. }));
 
         sel.clear();
         assert_eq!(sel.status, SelectionStatus::None);
@@ -1357,7 +1384,11 @@ mod tests {
         };
 
         let mut hits = vec![hit1, hit2.clone(), hit3];
-        hits.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(Ordering::Equal));
+        hits.sort_by(|a, b| {
+            a.distance
+                .partial_cmp(&b.distance)
+                .unwrap_or(Ordering::Equal)
+        });
 
         assert_eq!(hits[0].distance, 2.0);
         assert_eq!(hits[0].mesh_index, 1);
@@ -1374,12 +1405,17 @@ mod tests {
 
         // The actual raycast logic is tested through integration tests with real vehicles,
         // but this test documents the contract: read-only, no side effects.
-        
+
         // Type check: these functions exist and have the correct immutable signatures
         let _: fn(&omsi_sim::VehicleInstance, DVec3, Vec3, bool, bool) -> Vec<VehicleMeshHit> =
             raycast_vehicle_meshes;
-        let _: fn(&omsi_sim::VehicleInstance, DVec3, Vec3, bool, bool) -> Vec<(usize, VehicleMeshHit)> =
-            raycast_vehicle_trailers;
+        let _: fn(
+            &omsi_sim::VehicleInstance,
+            DVec3,
+            Vec3,
+            bool,
+            bool,
+        ) -> Vec<(usize, VehicleMeshHit)> = raycast_vehicle_trailers;
     }
 
     // Tests for scenery raycast helpers
@@ -1403,7 +1439,11 @@ mod tests {
         };
 
         let mut hits = vec![hit1, hit2.clone(), hit3];
-        hits.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(Ordering::Equal));
+        hits.sort_by(|a, b| {
+            a.distance
+                .partial_cmp(&b.distance)
+                .unwrap_or(Ordering::Equal)
+        });
 
         assert_eq!(hits[0].distance, 2.0);
         assert_eq!(hits[0].mesh_index, 1);
@@ -1457,12 +1497,24 @@ mod tests {
     fn test_scenery_raycast_helpers_are_side_effect_free() {
         // Type check: these functions exist and have the correct immutable signatures
         // All scenery raycast helpers take immutable borrows and return owned data
-        
-        let _: fn(&crate::scene::ObjectType, DVec3, &glam::Mat4, DVec3, Vec3, usize) -> Vec<SceneryMeshHit> =
-            raycast_scenery_object_meshes;
-        let _: fn(i32, i32, &[crate::scene::SceneryObjectRecord], DVec3, Vec3, DVec3) -> Vec<InspectorHit> =
-            raycast_tile_scenery;
-        
+
+        let _: fn(
+            &crate::scene::ObjectType,
+            DVec3,
+            &glam::Mat4,
+            DVec3,
+            Vec3,
+            usize,
+        ) -> Vec<SceneryMeshHit> = raycast_scenery_object_meshes;
+        let _: fn(
+            i32,
+            i32,
+            &[crate::scene::SceneryObjectRecord],
+            DVec3,
+            Vec3,
+            DVec3,
+        ) -> Vec<InspectorHit> = raycast_tile_scenery;
+
         // The signatures ensure no side effects: immutable borrows only, no state mutation
     }
 }
@@ -1505,9 +1557,7 @@ pub(crate) fn build_inspector_snapshot(
         SelectionTarget::Vehicle { key, mesh } => {
             validate_vehicle_snapshot(key, mesh, player, traffic, remotes, player_generation)
         }
-        SelectionTarget::Scenery { key, mesh } => {
-            validate_scenery_snapshot(key, mesh, streamer)
-        }
+        SelectionTarget::Scenery { key, mesh } => validate_scenery_snapshot(key, mesh, streamer),
         SelectionTarget::Human { .. } => {
             Err("Human selection not yet supported in inspector".to_string())
         }
@@ -1713,16 +1763,14 @@ fn build_vehicle_snapshot(
     // Convert heading to quaternion (rotation around Z axis)
     let heading_rad = vehicle.heading.to_radians() as f32;
     let half_angle = heading_rad / 2.0;
-    let rotation = Some([
-        0.0,
-        0.0,
-        half_angle.sin(),
-        half_angle.cos(),
-    ]);
+    let rotation = Some([0.0, 0.0, half_angle.sin(), half_angle.cos()]);
 
     let model_path = Some(vehicle.ty.model_dir.to_string_lossy().to_string());
 
-    let mesh_name = if let SelectionTarget::Vehicle { mesh: Some(mesh), .. } = &target {
+    let mesh_name = if let SelectionTarget::Vehicle {
+        mesh: Some(mesh), ..
+    } = &target
+    {
         Some(mesh.mesh_name.clone())
     } else {
         None
@@ -1760,16 +1808,14 @@ fn build_trailer_snapshot(
     // Convert heading to quaternion (rotation around Z axis)
     let heading_rad = trailer.heading.to_radians() as f32;
     let half_angle = heading_rad / 2.0;
-    let rotation = Some([
-        0.0,
-        0.0,
-        half_angle.sin(),
-        half_angle.cos(),
-    ]);
+    let rotation = Some([0.0, 0.0, half_angle.sin(), half_angle.cos()]);
 
     let model_path = Some(trailer.ty.model_dir.to_string_lossy().to_string());
 
-    let mesh_name = if let SelectionTarget::Vehicle { mesh: Some(mesh), .. } = &target {
+    let mesh_name = if let SelectionTarget::Vehicle {
+        mesh: Some(mesh), ..
+    } = &target
+    {
         Some(mesh.mesh_name.clone())
     } else {
         None
@@ -1811,7 +1857,11 @@ fn validate_scenery_snapshot(
                 map_id
             ))
         }
-        SceneryKey::NonEditable { tile_x, tile_y, key } => {
+        SceneryKey::NonEditable {
+            tile_x,
+            tile_y,
+            key,
+        } => {
             // TODO: Check tile is loaded and object exists
             // For now, return minimal snapshot
             Err(format!(
@@ -1918,20 +1968,29 @@ mod integration_tests {
 
         // Test exiting inspector mode
         active = false;
-        assert!(!active, "Inspector mode should be inactive after toggle off");
+        assert!(
+            !active,
+            "Inspector mode should be inactive after toggle off"
+        );
 
         // Test multiple toggles
         active = true;
         for _ in 0..5 {
             active = !active;
         }
-        assert!(!active, "Inspector mode should be inactive after odd number of toggles");
+        assert!(
+            !active,
+            "Inspector mode should be inactive after odd number of toggles"
+        );
     }
 
     #[test]
     fn test_selection_lifecycle() {
         let mut selection = InspectorSelection::default();
-        assert!(matches!(selection.status, SelectionStatus::None), "Initial selection should be None");
+        assert!(
+            matches!(selection.status, SelectionStatus::None),
+            "Initial selection should be None"
+        );
 
         // Test selecting a vehicle
         let vehicle_target = SelectionTarget::Vehicle {
@@ -1952,11 +2011,17 @@ mod integration_tests {
             mesh: None,
         };
         selection = InspectorSelection::new(scenery_target.clone());
-        assert!(selection.is_active(), "Selection should remain active after replacement");
+        assert!(
+            selection.is_active(),
+            "Selection should remain active after replacement"
+        );
 
         // Test clearing selection
         selection.clear();
-        assert!(matches!(selection.status, SelectionStatus::None), "Selection should be None after clear");
+        assert!(
+            matches!(selection.status, SelectionStatus::None),
+            "Selection should be None after clear"
+        );
     }
 
     #[test]
@@ -1969,8 +2034,11 @@ mod integration_tests {
 
         // Test invalidation
         selection.invalidate("AI vehicle despawned".to_string());
-        assert!(!selection.is_active(), "Selection should be inactive after invalidation");
-        
+        assert!(
+            !selection.is_active(),
+            "Selection should be inactive after invalidation"
+        );
+
         if let SelectionStatus::Invalidated { reason } = &selection.status {
             assert_eq!(reason, "AI vehicle despawned");
         } else {
@@ -2077,7 +2145,9 @@ mod integration_tests {
         });
 
         assert!(selection.is_active());
-        if let SelectionStatus::Selected(SelectionTarget::Vehicle { mesh: sel_mesh, .. }) = &selection.status {
+        if let SelectionStatus::Selected(SelectionTarget::Vehicle { mesh: sel_mesh, .. }) =
+            &selection.status
+        {
             assert_eq!(sel_mesh.as_ref().unwrap().mesh_name, "chassis");
             assert_eq!(sel_mesh.as_ref().unwrap().definition_index, 0);
             assert_eq!(sel_mesh.as_ref().unwrap().disambiguator, Some(1));
@@ -2089,9 +2159,46 @@ mod integration_tests {
     #[test]
     fn test_view_toggles_default() {
         let selection = InspectorSelection::default();
-        assert!(!selection.view.show_bounds, "Bounds should be off by default");
-        assert!(!selection.view.show_local_axes, "Local axes should be off by default");
-        assert!(!selection.view.show_mesh_name, "Mesh name should be off by default");
+        assert!(
+            !selection.view.show_bounds,
+            "Bounds should be off by default"
+        );
+        assert!(
+            !selection.view.show_local_axes,
+            "Local axes should be off by default"
+        );
+        assert!(
+            !selection.view.show_mesh_name,
+            "Mesh name should be off by default"
+        );
+        assert!(
+            !selection.view.highlight_all_hits,
+            "All-hit highlighting should be off by default"
+        );
+    }
+
+    #[test]
+    fn inspector_highlight_targets_keep_selected_cyan_precedence() {
+        let selected = SelectionTarget::Vehicle {
+            key: VehicleKey::AiCar { id: 7 },
+            mesh: None,
+        };
+        let other = SelectionTarget::Scenery {
+            key: SceneryKey::Parked { key: 3 },
+            mesh: None,
+        };
+        let hits = vec![
+            PenetrationHit::new(1.0, selected.clone(), "bus".into()),
+            PenetrationHit::new(2.0, other.clone(), "pole".into()),
+        ];
+        assert_eq!(
+            inspector_highlight_targets(Some(&selected), &hits, Some(&selected), false),
+            vec![(selected.clone(), true)]
+        );
+        assert_eq!(
+            inspector_highlight_targets(Some(&selected), &hits, Some(&selected), true),
+            vec![(selected, true), (other, false)]
+        );
     }
 }
 
@@ -2103,10 +2210,13 @@ mod integration_tests {
 /// Uses cyan/blue-green color (0.2, 0.8, 0.9) to contrast with the object editor's
 /// magenta marker (1.0, 0.1, 0.9).
 ///
+/// White (1.0, 1.0, 1.0) is used for hover highlights.
+///
 /// All overlays are transient and cleared automatically each frame by the scene reset.
 pub fn draw_inspector_overlays(
     snapshot: &InspectorSnapshot,
     view_toggles: &ViewToggles,
+    hover_target: Option<&SelectionTarget>,
     scene: &mut omsi_render::Scene,
 ) {
     use glam::{DVec3, Quat, Vec3};
@@ -2125,14 +2235,16 @@ pub fn draw_inspector_overlays(
 
     // Optional bounds visualization
     if view_toggles.show_bounds {
-        if let (Some(pos), Some(rot), Some(bounds)) = (snapshot.position, snapshot.rotation, snapshot.bounds) {
+        if let (Some(pos), Some(rot), Some(bounds)) =
+            (snapshot.position, snapshot.rotation, snapshot.bounds)
+        {
             let position = DVec3::new(pos[0] as f64, pos[1] as f64, pos[2] as f64);
             let rotation = Quat::from_xyzw(rot[0], rot[1], rot[2], rot[3]);
-            
+
             let (min, max) = bounds;
             let min = Vec3::new(min[0], min[1], min[2]);
             let max = Vec3::new(max[0], max[1], max[2]);
-            
+
             // Draw corner markers for bounding box
             let corners = [
                 Vec3::new(min.x, min.y, min.z),
@@ -2144,7 +2256,7 @@ pub fn draw_inspector_overlays(
                 Vec3::new(min.x, max.y, max.z),
                 Vec3::new(max.x, max.y, max.z),
             ];
-            
+
             for corner in &corners {
                 let world_corner = position + (rotation * *corner).as_dvec3();
                 scene.coronas.push(omsi_render::Corona {
@@ -2163,9 +2275,9 @@ pub fn draw_inspector_overlays(
         if let (Some(pos), Some(rot)) = (snapshot.position, snapshot.rotation) {
             let position = DVec3::new(pos[0] as f64, pos[1] as f64, pos[2] as f64);
             let rotation = Quat::from_xyzw(rot[0], rot[1], rot[2], rot[3]);
-            
+
             let axis_length = 2.0;
-            
+
             // X axis (red)
             let x_axis = rotation * Vec3::X * axis_length;
             scene.coronas.push(omsi_render::Corona {
@@ -2175,7 +2287,7 @@ pub fn draw_inspector_overlays(
                 brightness: 2.0,
                 ..Default::default()
             });
-            
+
             // Y axis (green)
             let y_axis = rotation * Vec3::Y * axis_length;
             scene.coronas.push(omsi_render::Corona {
@@ -2185,7 +2297,7 @@ pub fn draw_inspector_overlays(
                 brightness: 2.0,
                 ..Default::default()
             });
-            
+
             // Z axis (blue)
             let z_axis = rotation * Vec3::Z * axis_length;
             scene.coronas.push(omsi_render::Corona {
@@ -2197,4 +2309,8 @@ pub fn draw_inspector_overlays(
             });
         }
     }
+
+    // Hover geometry is submitted through the renderer's transient mesh overlay list.
+    // Never fall back to a single-position corona: a highlight must cover the target mesh.
+    let _ = (hover_target, snapshot, scene);
 }

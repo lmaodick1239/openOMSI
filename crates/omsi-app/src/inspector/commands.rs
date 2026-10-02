@@ -11,6 +11,11 @@ use serde::{Deserialize, Serialize};
 pub enum InspectorCommand {
     /// Select an entity.
     Select(SelectionTarget),
+    /// Select an entity and preserve the ordered ray penetration stack.
+    SelectWithHits {
+        target: SelectionTarget,
+        hits: Vec<PenetrationHit>,
+    },
     /// Clear the current selection.
     ClearSelection,
     /// Cycle to next penetration hit (Tab).
@@ -41,6 +46,7 @@ pub enum ViewToggle {
     ShowBounds,
     ShowLocalAxes,
     ShowMeshName,
+    HighlightAllHits,
 }
 
 /// Material-specific commands.
@@ -164,12 +170,22 @@ pub enum CommandError {
 
 pub fn unsupported_command_message(command: &InspectorCommand) -> Option<&'static str> {
     match command {
-        InspectorCommand::Material(_) => Some("Material mutations are unavailable in the desktop inspector"),
-        InspectorCommand::Render(_) => Some("Render mutations are unavailable in the desktop inspector"),
-        InspectorCommand::Human(_) => Some("Human playback mutations are unavailable in the desktop inspector"),
-        InspectorCommand::Editor(_) => Some("Editor mutations are unavailable in the desktop inspector"),
+        InspectorCommand::Material(_) => {
+            Some("Material mutations are unavailable in the desktop inspector")
+        }
+        InspectorCommand::Render(_) => {
+            Some("Render mutations are unavailable in the desktop inspector")
+        }
+        InspectorCommand::Human(_) => {
+            Some("Human playback mutations are unavailable in the desktop inspector")
+        }
+        InspectorCommand::Editor(_) => {
+            Some("Editor mutations are unavailable in the desktop inspector")
+        }
         InspectorCommand::Export(_) => Some("Interactive export is unavailable; use --export-glb"),
-        InspectorCommand::Telemetry(_) => Some("Telemetry watches are unavailable in the desktop inspector"),
+        InspectorCommand::Telemetry(_) => {
+            Some("Telemetry watches are unavailable in the desktop inspector")
+        }
         _ => None,
     }
 }
@@ -200,12 +216,23 @@ pub fn validate_command(
     validate_command_with_context(command, selection, &context)
 }
 
+fn validate_selectable_target(target: &SelectionTarget) -> CommandResult {
+    if matches!(target, SelectionTarget::Human { .. }) {
+        Err(CommandError::NotSupported(
+            "Human geometry overlays are unavailable".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn validate_command_without_sandbox_context(
     command: &InspectorCommand,
     selection: &InspectorSelection,
 ) -> CommandResult {
     match command {
-        InspectorCommand::Select(_) => Ok(()),
+        InspectorCommand::Select(target) => validate_selectable_target(target),
+        InspectorCommand::SelectWithHits { target, .. } => validate_selectable_target(target),
         InspectorCommand::ClearSelection => Ok(()),
         InspectorCommand::CycleNextHit | InspectorCommand::CyclePrevHit => {
             if selection.penetration_stack.is_empty() {

@@ -258,6 +258,8 @@ pub struct InspectorMainView {
     pub current_hit_index: usize,
     /// Full selection target for snapshot validation (serialized to preserve identity across round-trips).
     pub selection_target: Option<SelectionTarget>,
+    /// Whether hover highlighting includes every penetration hit.
+    pub highlight_all_hits: bool,
 }
 
 /// Penetration hit view.
@@ -357,6 +359,7 @@ impl From<&InspectorSelection> for InspectorMainView {
             current_hit_index: selection.current_hit_index,
             // Store the full selection target for snapshot validation
             selection_target,
+            highlight_all_hits: selection.view.highlight_all_hits,
         }
     }
 }
