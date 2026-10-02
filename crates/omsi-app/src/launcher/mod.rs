@@ -263,6 +263,7 @@ impl Launcher {
     /// launcher's window).
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub fn release_window(&mut self) -> Option<Arc<Window>> {
+        self.pages.pads.cancel_feedback_test();
         self.surface = None;
         self.gpu = None;
         self.preview_tex = None;
@@ -377,10 +378,19 @@ impl ApplicationHandler for Launcher {
             self.last_input = Instant::now();
         }
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                self.pages.pads.cancel_feedback_test();
+                event_loop.exit();
+            }
             WindowEvent::Touch(t) => self.touch(t, scale),
-            WindowEvent::Focused(f) => self.focused = f,
-            WindowEvent::Occluded(o) => self.occluded = o,
+            WindowEvent::Focused(f) => {
+                self.focused = f;
+                if !f { self.pages.pads.cancel_feedback_test(); }
+            }
+            WindowEvent::Occluded(o) => {
+                self.occluded = o;
+                if o { self.pages.pads.cancel_feedback_test(); }
+            }
             WindowEvent::Resized(s) => {
                 if let (Some(sf), Some(r)) = (self.surface.as_mut(), self.renderer.as_ref()) {
                     sf.resize(r, s.width, s.height);
@@ -486,7 +496,7 @@ impl ApplicationHandler for Launcher {
                 }
             }
             WindowEvent::DroppedFile(path) => {
-                // a mod folder or .zip dropped on the window is installed
+                // a mod folder or supported archive dropped on the window is installed
                 self.page = Page::Mods;
                 self.state.install(path.to_string_lossy().to_string());
             }
@@ -591,6 +601,42 @@ impl Launcher {
         if self.recover_device() {
             return;
         }
+        let desktop = !mobile::mobile() && self.window.is_some();
+        if desktop && self.renderer.is_none() {
+            if self.state.in_game() {
+                // nothing is drawn while a game runs; what is clicked or typed meanwhile is not
+                // done once the launcher is back (the first frame pressed Start again)
+                let now = Instant::now();
+                let dt = now.duration_since(self.last).as_secs_f32().min(0.1);
+                self.last = now;
+                self.state.update(dt);
+                self.ui.discard_input();
+                return;
+            }
+            log::info!("launcher: no game runs any more, the graphics device is opened again");
+            self.make_surface();
+        }
+        self.draw_frame(event_loop);
+        // a game starts or runs: the frame just drawn says so and stays in the window, and the
+        // graphics device is given up until the game ends (with it open, a game on an NVIDIA
+        // card without Resizable BAR uploaded at 20 MB/s)
+        if desktop && self.renderer.is_some() && self.state.in_game() {
+            log::info!("launcher: a game starts or runs, the graphics device is given up until it ends");
+            self.surface = None;
+            self.gpu = None;
+            self.preview_tex = None;
+            self.showroom = showroom::Showroom::new();
+            self.preview_gen = 0;
+            self.renderer = None;
+        }
+        if let Some(d) = self.state.queued_launch.take() {
+            self.pages.pads.cancel_feedback_test();
+            self.state.spawn_launch(d);
+        }
+    }
+
+    /// The launcher's picture, put on the window.
+    fn draw_frame(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
         let dt = now.duration_since(self.last).as_secs_f32().min(0.1);
         self.last = now;
@@ -786,6 +832,9 @@ impl Launcher {
     }
 
     fn draw_ui(&mut self) {
+        if self.page != Page::Controls || self.pages.controls_tab != 1 {
+            self.pages.pads.cancel_feedback_test();
+        }
         let size = self.ui.size;
         let mobile = mobile::mobile();
         // the storage browser (or the update dialog) lies over the page: the page sees no
@@ -793,6 +842,9 @@ impl Launcher {
         let dialog = self.update_dialog_open();
         let crash = !dialog && self.state.crash.is_some();
         let reset = !dialog && !crash && self.pages.confirm_reset;
+        if self.browser.is_some() || dialog || crash || reset {
+            self.pages.pads.cancel_feedback_test();
+        }
         let saved = (self.browser.is_some() || dialog || crash || reset).then(|| {
             let i = self.ui.input.clone();
             self.ui.input.mouse = Vec2::new(-1e4, -1e4);
@@ -855,6 +907,29 @@ impl Launcher {
                 self.draw_browser();
             }
         }
+        // a game starts: the last picture before the launcher gives its graphics device up
+        // (see `frame`), which stays in the window until the game ends
+        if !mobile && self.state.in_game() {
+            self.draw_game_banner();
+        }
+    }
+
+    /// Over the launcher's last picture while a game runs: why the launcher does not move.
+    fn draw_game_banner(&mut self) {
+        let size = self.ui.size;
+        let full = Rect::new(0.0, 0.0, size.x, size.y);
+        self.ui.solid(full);
+        self.ui.p().rect(full, omsi_ui::Color::rgba(0, 0, 0, 0.62));
+        let text = "The launcher rests while you drive, so that the game has the graphics card to itself. It is back as soon as the game ends.";
+        let w = (size.x - 48.0).min(520.0);
+        let th = self.ui.paragraph_height(text, w - 48.0, 13.0, Weight::Regular);
+        let h = 80.0 + th;
+        let r = Rect::new((size.x - w) * 0.5, (size.y - h) * 0.5, w, h);
+        self.ui.panel(r);
+        let inner = Rect::new(r.x + 24.0, r.y + 20.0, r.w - 48.0, r.h - 40.0);
+        self.ui.icon("directions_bus", Vec2::new(inner.x + 14.0, inner.y + 14.0), 26.0, ACCENT);
+        self.ui.text_in("The game is running", Rect::new(inner.x + 38.0, inner.y, inner.w - 38.0, 28.0), 18.0, Weight::Bold, TEXT, Align::Left);
+        self.ui.paragraph(text, Vec2::new(inner.x, inner.y + 40.0), inner.w, 13.0, Weight::Regular, TEXT_DIM);
     }
 
     /// The bus preview in `r`: the game's picture of it, or a word while it loads. The mouse

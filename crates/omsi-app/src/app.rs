@@ -58,6 +58,8 @@ pub(crate) struct App {
     pub(crate) hud: Option<hud::Hud>,
     /// The route navigator (ETS2-style map in a corner).
     pub(crate) navigator: Option<navigator::Navigator>,
+    pub(crate) vr_nav_profiles: crate::vr_navigator::Profiles,
+    pub(crate) vr_nav_edit: Option<crate::vr_navigator::Editing>,
     /// Chat, mouse-over names and name tags (Roboto).
     pub(crate) ui: Option<ui::Ui>,
     pub(crate) fps: f32,
@@ -162,6 +164,13 @@ pub(crate) struct App {
     /// speed, and at 30 km/h the edge of the screen was a third of the lock, with nowhere
     /// further to move.
     pub(crate) mouse_edge: f32,
+    /// Where the cursor steered when the right button began to look round: it goes back
+    /// there when the button is let go, so the wheel does not jump to where looking left it.
+    pub(crate) steer_cursor: Option<(f32, f32)>,
+    /// The cursor is put in the middle of the window before the mouse steers for the first
+    /// time (a game started with the mouse steering on: wherever the cursor was, the wheel
+    /// turned and the bus drove off on full throttle).
+    pub(crate) center_cursor: bool,
     /// The mouse's throttle and brake (eased in with the steering).
     pub(crate) mouse_pedals: (f32, f32),
     /// The speed mouse steering divides by, smoothed.
@@ -212,7 +221,8 @@ pub(crate) struct App {
     /// Whether the game stood paused before the menu opened (closing it goes back to that).
     pub(crate) menu_prev_pause: bool,
     /// OMSI's information bar (`view_toggle_informationdisplay`, Ctrl+Y): time, speed, the
-    /// trip and its next stop along the top of the picture.
+    /// air and cabin temperatures, the passengers aboard, the trip and its next stop along
+    /// the top of the picture.
     pub(crate) info_bar: bool,
     /// A time of day the bus's script wrote (`(S.S.Time)`), for the clock at the next frame.
     pub(crate) pending_time: Option<f64>,
@@ -263,6 +273,9 @@ pub(crate) struct App {
     pub(crate) career: career::Career,
     /// How wet the roads are (0..1), built up by rain and dried by the sun.
     pub(crate) wetness: f32,
+    /// How far the cloud cover has drifted with the wind (fractions of its tiling), summed
+    /// up frame by frame so that a change of wind does not throw the sky around.
+    pub(crate) cloud_drift: [f32; 2],
     /// A change of weather coming in (see `weather_cycle`).
     pub(crate) weather_blend: Option<crate::weather_cycle::Blend>,
     /// The weather cycle, when the weather chosen is `cycle`.
@@ -960,6 +973,9 @@ impl App {
                         Ok(mut t) => {
                             if let Some(lan) = self.lan.as_ref() {
                                 t.set_lan_seed(lan::population_seed(lan));
+                            }
+                            if self.args.traffic > 0 {
+                                t.precache_random(&w, &renderer, &mut scene);
                             }
                             t.day_time = parse_time(&self.args.time);
                             self.traffic = Some(t);

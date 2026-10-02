@@ -11,6 +11,7 @@ use omsi_render::{Renderer, Scene, TextureId};
 
 /// Roboto (Apache 2.0), the interface font.
 const ROBOTO: &[u8] = include_bytes!("../../../assets/fonts/Roboto-VariableFont_wdth,wght.ttf");
+pub(crate) const PAUSE_NOTICE: &str = "Paused  ·  P to go on";
 
 /// A rendered text: its texture and size in pixels.
 #[derive(Clone, Copy)]
@@ -300,6 +301,7 @@ pub struct Frame<'a> {
     pub menu: Option<(usize, &'a [(&'a str, &'a str)])>,
     /// The first line shown when a finger scrolled the menu (`App::menu_top`).
     pub menu_top: Option<f32>,
+    pub vr_nav_editing: bool,
     /// The timetable window: its title and per stop (name, time, 0 served / 1 next / 2 ahead).
     pub timetable: Option<(String, Vec<(String, String, u8)>)>,
     /// The information bar along the top.
@@ -407,7 +409,8 @@ impl Ui {
             // interface is made smaller)
             let mut y = if crate::platform::touch_controls() { (80.0 * f.scale.max(0.5) * f.ui_scale.max(1.0)).max(corner_top) } else { corner_top };
             for n in f.notes.iter().filter(|n| !n.trim().is_empty()).take(8) {
-                let text = clip_to(&self.text, n, px as f32, f.width * 0.6);
+                let text = omsi_ui::tr(n);
+                let text = clip_to(&self.text, &text, px as f32, f.width * 0.6);
                 let l = self.text.label(r, scene, &text, px, [255, 255, 255, 235]);
                 let plate = self.text.plate(r, scene, 7);
                 scene.overlays.push((plate, [x0 - 5.0 * s, y, x0 + l.w as f32 + 5.0 * s, y + l.h as f32]));
@@ -586,17 +589,6 @@ impl Ui {
             scene.overlays.push((plate, [x, top, x + w, y]));
             scene.overlays.extend(items);
         }
-        // --- paused
-        if f.paused && f.menu.is_none() {
-            let l = self.text.label(r, scene, "Paused  ·  P to go on", (18.0 * s) as u32, [255, 255, 255, 0]);
-            let pad = 14.0 * s;
-            let (w, h) = (l.w as f32 + pad * 2.0, l.h as f32 + pad);
-            let x = (f.width - w) * 0.5;
-            let y = f.height * 0.2;
-            let plate = self.text.plate(r, scene, 3);
-            scene.overlays.push((plate, [x, y, x + w, y + h]));
-            scene.overlays.push((l.tex, [x + pad, y + pad * 0.5, x + pad + l.w as f32, y + pad * 0.5 + l.h as f32]));
-        }
         // --- the game menu, in the middle over a dimmed picture
         self.menu_rects.clear();
         self.menu_arrows.clear();
@@ -718,6 +710,24 @@ impl Ui {
                 scene.overlays.push((l.tex, [x + 20.0 * s, ly, x + 20.0 * s + l.w as f32, ly + l.h as f32]));
                 self.menu_rects.push(rect);
                 self.menu_arrows.push(arrows);
+            }
+        }
+        if f.vr && f.vr_nav_editing {
+            let s = (s * 0.55).min(f.width * 0.5 / 640.0);
+            let w = 640.0 * s;
+            let x = (f.width - w) * 0.5;
+            let y = f.height * 0.42 - 49.0 * s;
+            let plate = self.text.plate(r, scene, 3);
+            scene.overlays.push((plate, [x, y, x + w, y + 98.0 * s]));
+            for (i, text) in [
+                "Positioning navigator - changes apply to this bus",
+                "Hold left mouse: move | Hold right mouse: rotate",
+                "Wheel: distance | Ctrl+wheel: size | Shift+right drag: roll",
+                "Esc / Enter: save and finish | R: reset position",
+            ].iter().enumerate() {
+                let label = self.text.label(r, scene, text, (15.0 * s) as u32, [245, 245, 245, 0]);
+                let ty = y + (10.0 + i as f32 * 22.0) * s;
+                scene.overlays.push((label.tex, [x + 12.0 * s, ty, x + 12.0 * s + label.w as f32, ty + label.h as f32]));
             }
         }
         self.menu_overlay_range = menu_overlay_start..scene.overlays.len();
@@ -1081,6 +1091,19 @@ fn format_inspector_target(target: &crate::inspector::SelectionTarget, mesh_name
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pause_notice_is_translated_in_every_supported_language() {
+        for &(_, _, language, _) in omsi_launcher_lib::LANGUAGES {
+            if language == "en" {
+                continue;
+            }
+            let translated = crate::_rust_i18n_try_translate(language, PAUSE_NOTICE)
+                .unwrap_or_else(|| panic!("missing pause notice for {language}"));
+            assert!(!translated.trim().is_empty());
+            assert_ne!(translated, PAUSE_NOTICE, "{language}");
+        }
+    }
 
     #[test]
     fn text_renders_with_an_outline() {

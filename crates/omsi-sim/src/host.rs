@@ -22,6 +22,10 @@ pub struct VehicleHost {
     /// `{init}`, as Omsi.exe sets them when it makes the vehicle (0x70a174), before the
     /// scripts start. None: not known yet (`apply_paint_vars` later).
     pub paint_scheme: Option<Option<usize>>,
+    /// Fleet number and registration chosen by the vehicle dialog. They are copied to the
+    /// script's `number` / `ident` strings before `{init}`, like Omsi.exe does.
+    pub initial_number: Option<String>,
+    pub initial_ident: Option<String>,
     /// A time of day a script wrote to `(S.S.Time)` this frame: the game's clock takes it.
     pub time_written: Option<f64>,
     pub clock: SimClock,
@@ -73,7 +77,6 @@ pub struct VehicleHost {
     pub font_lib: Option<Arc<Mutex<FontLibrary>>>,
     /// `[scripttexture]` images drawn by the `ST*` callbacks.
     pub script_textures: Vec<ScriptTexture>,
-    last_pixel: [u8; 4],
     /// Folder for `STLoadTex` paths (the vehicle directory).
     pub content_dir: std::path::PathBuf,
     /// Depot file (termini, bus stop strings, IBIS trips) behind the `Get*` callbacks.
@@ -383,7 +386,7 @@ impl Host for VehicleHost {
             "stnewtex" => {
                 let i = arg_idx(stacks.pop());
                 if let Some(t) = self.script_textures.get_mut(i) {
-                    t.clear();
+                    t.renew();
                 }
             }
             "stlock" => {
@@ -459,17 +462,24 @@ impl Host for VehicleHost {
                 let y = arg_i32(stacks.pop());
                 let x = arg_i32(stacks.pop());
                 let i = arg_idx(stacks.pop());
-                self.last_pixel = self.script_textures.get(i).map(|t| t.get(x, y)).unwrap_or([0; 4]);
+                // `STReadPixel` makes the selected texture's current ST colour the
+                // pixel it read.  RHLib then asks `STGet*` of either that source texture
+                // or a different target texture: the latter must retain its own draw
+                // colour while the source keeps changing beneath the scaler.
+                if let Some(t) = self.script_textures.get_mut(i) {
+                    let color = t.get(x, y);
+                    t.color = color;
+                }
             }
             "stgetr" | "stgetg" | "stgetb" | "stgeta" => {
-                stacks.pop();
+                let i = arg_idx(stacks.pop());
                 let k = match lname.as_str() {
                     "stgetr" => 0,
                     "stgetg" => 1,
                     "stgetb" => 2,
                     _ => 3,
                 };
-                stacks.push(self.last_pixel[k] as f32);
+                stacks.push(self.script_textures.get(i).map(|t| t.color[k] as f32).unwrap_or(0.0));
             }
             "stcopycolor" => {
                 // colour of texture a → texture b
@@ -499,7 +509,6 @@ impl Host for VehicleHost {
                 match st_load(&full) {
                     Ok(img) => {
                         if let Some(t) = self.script_textures.get_mut(i) {
-                            t.clear();
                             t.load(img.width, img.height, &img.rgba);
                         }
                     }
@@ -593,7 +602,11 @@ impl Host for VehicleHost {
             } else {
                 self.tt_busstop_index as f32
             }),
-            "gettterminusindex" | "getttterminusindex" => stacks.push(self.tt_terminus_index as f32),
+            "gettterminusindex" | "getttterminusindex" => stacks.push(if self.tt_stops.is_empty() {
+                -1.0
+            } else {
+                self.tt_terminus_index as f32
+            }),
             // how high a point of the vehicle stands over the ground (the NL/NG ramp
             // measures the kerb this way before extending)
             "getheightabovepoint" => {
@@ -738,6 +751,32 @@ mod tests {
         // a half goes to the even number, as under Delphi's control word
         assert_eq!((arg_i32(0.5), arg_i32(1.5), arg_i32(2.5), arg_i32(-0.5)), (0, 2, 2, 0));
         assert_eq!(arg_idx(-1.0), usize::MAX);
+    }
+
+    #[test]
+    fn script_texture_colour_is_kept_per_texture() {
+        let p = compile(&CompileInput::default());
+        let mut state = State::new(&p);
+        let mut host = VehicleHost::new(SimClock::default());
+        host.script_textures.push(ScriptTexture::new(2, 1));
+        host.script_textures.push(ScriptTexture::new(2, 1));
+        host.script_textures[0].put(1, 0, [12, 34, 56, 78]);
+        host.script_textures[1].color = [1, 2, 3, 255];
+        let mut stacks = Stacks::default();
+
+        // RHLib reads a source pixel, then asks its target texture whether its
+        // previously selected drawing colour is transparent.
+        stacks.push(0.0);
+        stacks.push(1.0);
+        stacks.push(0.0);
+        host.callback("STReadPixel", 0, &mut stacks, &mut state);
+
+        stacks.push(0.0);
+        host.callback("STGetA", 0, &mut stacks, &mut state);
+        assert_eq!(stacks.pop(), 78.0);
+        stacks.push(1.0);
+        host.callback("STGetA", 0, &mut stacks, &mut state);
+        assert_eq!(stacks.pop(), 255.0);
     }
 
     #[test]

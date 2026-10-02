@@ -38,6 +38,7 @@ impl Default for RawState {
 }
 
 const RANGE: i32 = 10_000;
+const VJOY_HARDWARE_ID: (u16, u16) = (0x1234, 0xBEAD);
 
 /// One device opened.
 pub(crate) struct Device {
@@ -108,11 +109,45 @@ pub(crate) struct DirectInput {
     last_force: Instant,
 }
 
+fn is_controller_device(dev_type: u32, usage_page: u16, usage: u16) -> bool {
+    let primary = dev_type & 0xFF;
+    if matches!(
+        primary,
+        DI8DEVTYPE_JOYSTICK
+            | DI8DEVTYPE_GAMEPAD
+            | DI8DEVTYPE_DRIVING
+            | DI8DEVTYPE_FLIGHT
+            | DI8DEVTYPE_1STPERSON
+            | DI8DEVTYPE_DEVICECTRL
+            | DI8DEVTYPE_SUPPLEMENTAL
+    ) {
+        return true;
+    }
+    if primary == DI8DEVTYPE_DEVICE {
+        return match usage_page {
+            // Generic Desktop: Joystick (0x04), Gamepad (0x05), Multi-axis controller (0x08)
+            0x01 => matches!(usage, 0x04 | 0x05 | 0x08),
+            // Simulation Controls (steering wheels, pedals, cockpits, flight controls)
+            0x02 => true,
+            // Sport Controls (0x04) or Game Controls (0x05)
+            0x04 | 0x05 => true,
+            _ => false,
+        };
+    }
+    false
+}
+
 unsafe extern "system" fn collect(inst: *mut DIDEVICEINSTANCEW, out: *mut core::ffi::c_void) -> windows::core::BOOL {
     let v = &mut *(out as *mut Vec<(GUID, String)>);
     let inst = &*inst;
+    if !is_controller_device(inst.dwDevType, inst.wUsagePage, inst.wUsage) {
+        return windows::core::BOOL(DIENUM_CONTINUE as i32);
+    }
     let end = inst.tszProductName.iter().position(|c| *c == 0).unwrap_or(inst.tszProductName.len());
-    v.push((inst.guidInstance, String::from_utf16_lossy(&inst.tszProductName[..end]).trim().to_string()));
+    let name = String::from_utf16_lossy(&inst.tszProductName[..end]).trim().to_string();
+    if !v.iter().any(|(g, _)| *g == inst.guidInstance) {
+        v.push((inst.guidInstance, name));
+    }
     windows::core::BOOL(DIENUM_CONTINUE as i32)
 }
 
@@ -128,7 +163,7 @@ fn create() -> Option<IDirectInput8W> {
 fn list(di: &IDirectInput8W) -> Vec<(GUID, String)> {
     let mut v: Vec<(GUID, String)> = Vec::new();
     unsafe {
-        let _ = di.EnumDevices(DI8DEVCLASS_GAMECTRL, Some(collect), &mut v as *mut _ as *mut core::ffi::c_void, DIEDFL_ATTACHEDONLY);
+        let _ = di.EnumDevices(DI8DEVCLASS_ALL, Some(collect), &mut v as *mut _ as *mut core::ffi::c_void, DIEDFL_ATTACHEDONLY);
     }
     v
 }
@@ -250,10 +285,14 @@ fn data_format(dev: &IDirectInputDevice8W) -> Option<(Vec<DIOBJECTDATAFORMAT>, D
         dev.EnumObjects(Some(collect_object), &mut objects as *mut _ as *mut core::ffi::c_void, DIDFT_ALL).ok()?;
     }
     let (objs, has_axis, ff_axis) = format_objects(&objects);
+    if objs.is_empty() {
+        return None;
+    }
+    let dw_flags = if has_axis.iter().any(|&a| a) { DIDF_ABSAXIS } else { 0 };
     let f = DIDATAFORMAT {
         dwSize: std::mem::size_of::<DIDATAFORMAT>() as u32,
         dwObjSize: std::mem::size_of::<DIOBJECTDATAFORMAT>() as u32,
-        dwFlags: DIDF_ABSAXIS,
+        dwFlags: dw_flags,
         dwDataSize: std::mem::size_of::<RawState>() as u32,
         dwNumObjs: objs.len() as u32,
         rgodf: std::ptr::null_mut(),
@@ -464,7 +503,7 @@ impl DirectInput {
                     }
                     Err(err) => log::warn!("{name}: says it has force feedback, but its constant force could not be made ({err}): no forces"),
                 }
-                if ff.is_some() {
+                if ff.is_some() && hardware_id != Some(VJOY_HARDWARE_ID) {
                     let mut pf = DIPERIODIC { dwMagnitude: 0, lOffset: 0, dwPhase: 0, dwPeriod: 100_000 };
                     eff.cbTypeSpecificParams = std::mem::size_of::<DIPERIODIC>() as u32;
                     eff.lpvTypeSpecificParams = &mut pf as *mut _ as *mut core::ffi::c_void;
@@ -492,9 +531,7 @@ impl DirectInput {
                 if !self.devices.iter().any(|d| d.guid == g) {
                     match self.open(&g, &name) {
                         Some(d) => self.devices.push(d),
-                        // (said once per device list, so that a log tells why a device the
-                        // system lists is missing)
-                        None => log::warn!("game controller {name}: listed by Windows, but DirectInput could not open it"),
+                        None => log::debug!("DirectInput device {name}: not an active controller or could not be opened"),
                     }
                 }
             }
@@ -540,6 +577,39 @@ impl DirectInput {
                 }
             }
             d.state = s;
+        }
+    }
+
+    /// A hardware-timed calibration pulse; never leaves an infinite force running.
+    pub(crate) fn pulse_force(&mut self, name: &str, force: f32) -> bool {
+        if !self.focused || self.devices.iter().filter(|d| d.name == name && d.ff.is_some()).count() != 1 {
+            return false;
+        }
+        let Some(device) = self.devices.iter_mut().find(|d| d.name == name && d.ff.is_some()) else { return false };
+        let limit = crate::ffb_calibration::MAX_PULSE_FORCE;
+        let mut constant = DICONSTANTFORCE { lMagnitude: (force.clamp(-limit, limit) * DI_FFNOMINALMAX as f32) as i32 };
+        let mut axes = [device.ff_axis];
+        let mut direction = [0i32];
+        let mut effect = DIEFFECT {
+            dwSize: std::mem::size_of::<DIEFFECT>() as u32,
+            dwFlags: DIEFF_CARTESIAN | DIEFF_OBJECTOFFSETS,
+            dwDuration: crate::ffb_calibration::PULSE_MS * 1000,
+            cAxes: 1,
+            rgdwAxes: axes.as_mut_ptr(),
+            rglDirection: direction.as_mut_ptr(),
+            cbTypeSpecificParams: std::mem::size_of::<DICONSTANTFORCE>() as u32,
+            lpvTypeSpecificParams: &mut constant as *mut _ as *mut core::ffi::c_void,
+            ..Default::default()
+        };
+        unsafe {
+            let force_effect = device.ff.as_ref().unwrap();
+            // Some drivers only allow a duration change while the effect is stopped.
+            let result = force_effect.Stop().and_then(|_| force_effect.SetParameters(&mut effect, DIEP_DURATION | DIEP_TYPESPECIFICPARAMS | DIEP_START));
+            if let Err(error) = result {
+                log::warn!("{name}: force feedback calibration pulse failed ({error})");
+                return false;
+            }
+            true
         }
     }
 
@@ -683,5 +753,48 @@ mod tests {
     fn notification_window_opens() {
         let w = std::thread::spawn(|| notification_window().map(|w| unsafe { DestroyWindow(w).is_ok() })).join().unwrap();
         assert_eq!(w, Some(true));
+    }
+
+    #[test]
+    fn controller_device_filter_accepts_controllers_and_rejects_mice_keyboards_and_vendor_devices() {
+        assert!(is_controller_device(DI8DEVTYPE_JOYSTICK, 0, 0));
+        assert!(is_controller_device(DI8DEVTYPE_GAMEPAD, 0, 0));
+        assert!(is_controller_device(DI8DEVTYPE_DRIVING, 0, 0));
+        assert!(is_controller_device(DI8DEVTYPE_FLIGHT, 0, 0));
+        assert!(is_controller_device(DI8DEVTYPE_DEVICECTRL, 0, 0));
+
+        assert!(!is_controller_device(DI8DEVTYPE_KEYBOARD, 0, 0));
+        assert!(!is_controller_device(DI8DEVTYPE_MOUSE, 0, 0));
+        assert!(!is_controller_device(DI8DEVTYPE_SCREENPOINTER, 0, 0));
+
+        // Generic devices (DI8DEVTYPE_DEVICE) with game usages (Arduino button boxes):
+        assert!(is_controller_device(DI8DEVTYPE_DEVICE, 0x01, 0x04)); // Joystick
+        assert!(is_controller_device(DI8DEVTYPE_DEVICE, 0x01, 0x05)); // Gamepad
+        assert!(is_controller_device(DI8DEVTYPE_DEVICE, 0x01, 0x08)); // Multi-axis
+        assert!(is_controller_device(DI8DEVTYPE_DEVICE, 0x02, 0x01)); // Simulation controls
+
+        // Generic devices with consumer/vendor/power/undefined usages (Razer, Logitech mice/keyboards macro collections):
+        assert!(!is_controller_device(DI8DEVTYPE_DEVICE, 0x0C, 0x01)); // Consumer / media keys
+        assert!(!is_controller_device(DI8DEVTYPE_DEVICE, 0x01, 0x80)); // System control
+        assert!(!is_controller_device(DI8DEVTYPE_DEVICE, 0x01, 0x00)); // Undefined
+        assert!(!is_controller_device(DI8DEVTYPE_DEVICE, 0xFF00, 0x01)); // Vendor specific
+    }
+
+    #[test]
+    fn button_box_without_axes_formats_successfully() {
+        let objects: Vec<InputObject> = (0..16)
+            .map(|n| InputObject {
+                guid: GUID_Button,
+                ty: DIDFT_BUTTON | (n << 8),
+                flags: 0,
+            })
+            .collect();
+        let (objs, has_axis, ff_axis) = format_objects(&objects);
+        assert_eq!(objs.len(), 16);
+        assert_eq!(has_axis, [false; 8]);
+        assert_eq!(ff_axis, None);
+        for (i, obj) in objs.iter().enumerate() {
+            assert_eq!(obj.dwOfs, (48 + i) as u32);
+        }
     }
 }

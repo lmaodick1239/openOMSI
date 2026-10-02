@@ -23,11 +23,16 @@ pub struct Stop {
     pub depart: f64,
     /// The stop's map object (its `[busstop]` strings weigh who gets off there).
     pub id: i64,
+    /// The side the platform lies on (see `tiles::stop_side`): 0 = right, 1 = the other,
+    /// 2 = both. A bus whose doors are on both sides opens only these (it reads the value
+    /// as `AI_Scheduled_AtStation_Side`).
+    pub side: f32,
 }
 
 impl Stop {
-    pub fn from_tuple(t: (usize, f32, f32, f64, i64)) -> Stop {
-        Stop { ri: t.0, s: t.1, bay: t.2, depart: t.3, id: t.4 }
+    #[allow(clippy::type_complexity)]
+    pub fn from_tuple(t: (usize, f32, f32, f64, i64, f32)) -> Stop {
+        Stop { ri: t.0, s: t.1, bay: t.2, depart: t.3, id: t.4, side: t.5 }
     }
 }
 
@@ -70,9 +75,6 @@ pub struct BusService {
     /// The terminus of its trip, the name the waiting people read off it (Omsi.exe's bus
     /// +0x7bc) to see whether it goes their way.
     pub terminus: String,
-    /// People aboard when it was put on the road (seated by the passengers' side when the
-    /// bus first comes near).
-    pub riders: u8,
     /// How far the front stop was last frame (m; infinite when not measured yet).
     near_d: f32,
 }
@@ -128,7 +130,7 @@ pub struct Ctx<'a> {
 }
 
 impl BusService {
-    pub fn new(stops: Vec<Stop>, riders: u8) -> BusService {
+    pub fn new(stops: Vec<Stop>) -> BusService {
         BusService {
             stops: stops.into(),
             phase: Phase::Running,
@@ -140,7 +142,6 @@ impl BusService {
             layover: false,
             route_open: false,
             terminus: String::new(),
-            riders,
             near_d: f32::INFINITY,
         }
     }
@@ -148,6 +149,16 @@ impl BusService {
     /// Doors open for people (`AI_Scheduled_AtStation`).
     pub fn at_station(&self) -> bool {
         self.phase == Phase::Boarding
+    }
+
+    /// The side's doors the bus opens at the stop it is at (`AI_Scheduled_AtStation_Side`):
+    /// the front stop's while it boards, else 0 (nobody at a stop, nothing to open).
+    pub fn at_station_side(&self) -> f32 {
+        if self.phase == Phase::Boarding {
+            self.stops.front().map(|s| s.side).unwrap_or(0.0)
+        } else {
+            0.0
+        }
     }
 
     pub fn trip_done(&self) -> bool {
@@ -397,39 +408,37 @@ pub fn stop_shift(ty: &omsi_sim::VehicleType, rail: bool) -> f32 {
     half - hold
 }
 
-/// How many people ride a timetable bus put on the road at `day_time` (seconds of the
-/// day): the rush hours full, the night nearly empty; `seed` spreads it between buses.
-pub fn riders_at(day_time: f64, seed: u64) -> u8 {
-    // (OMSI_AI_RIDERS=0 leaves them empty, =n caps them)
-    let cap = omsi_cfg::env::var("OMSI_AI_RIDERS").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(40.0);
-    let h = (day_time / 3600.0).rem_euclid(24.0);
-    let rush = |c: f64, w: f64| (-((h - c) / w).powi(2)).exp();
-    let base = if (5.0..23.5).contains(&h) { 5.0 } else { 1.0 };
-    let peak = 16.0 * rush(7.8, 1.3) + 13.0 * rush(16.8, 1.8) + 6.0 * rush(12.5, 2.0);
-    let spread = 0.6 + ((seed >> 17) % 100) as f64 / 100.0 * 0.8;
-    ((base + peak) * spread).round().clamp(0.0, cap) as u8
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn riders_follow_the_rush_hours() {
-        let at = |h: f64| (0..20).map(|s| riders_at(h * 3600.0, s * 7919 << 17) as u32).sum::<u32>();
-        assert!(at(8.0) > at(11.0));
-        assert!(at(17.0) > at(20.0));
-        assert!(at(20.0) > at(3.0));
-    }
-
-    #[test]
     fn standing_time() {
-        let mut s = BusService::new(vec![], 0);
+        let mut s = BusService::new(vec![]);
         assert_eq!(s.standing_for(0.0), 0.0);
         s.phase = Phase::Waiting;
         s.leave_at = 100.0;
         assert!((s.standing_for(40.0) - 62.0).abs() < 1e-3);
         s.phase = Phase::TripDone;
         assert!(s.standing_for(0.0) > 100.0);
+    }
+
+    #[test]
+    fn station_side_comes_from_the_stop_it_boards_at() {
+        let stop = |side: f32| Stop::from_tuple((0, 0.0, 0.0, 0.0, 1, side));
+        let mut s = BusService::new(vec![stop(1.0)]);
+        // off a stop: nothing to open
+        s.phase = Phase::Running;
+        assert_eq!(s.at_station_side(), 0.0);
+        // boarding: the front stop's side
+        s.phase = Phase::Boarding;
+        assert_eq!(s.at_station_side(), 1.0);
+        // waiting to pull out (doors shut): the side is not asked for any more
+        s.phase = Phase::Waiting;
+        assert_eq!(s.at_station_side(), 0.0);
+        // an empty queue answers 0, not a panic
+        s.phase = Phase::Boarding;
+        s.stops.clear();
+        assert_eq!(s.at_station_side(), 0.0);
     }
 }

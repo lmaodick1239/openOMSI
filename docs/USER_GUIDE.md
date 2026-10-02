@@ -65,7 +65,7 @@ whole start-up by itself (main switch, ignition, starter, gearbox to neutral); `
 is the same thing for an offscreen run.
 
 **Updates.** When the launcher starts it asks
-[github.com/turbo-devv/openOMSI](https://github.com/turbo-devv/openOMSI) for the latest release
+[github.com/openOMSI-Project/openOMSI](https://github.com/openOMSI-Project/openOMSI) for the latest release
 and, when there is a newer one, offers it: **Update now** downloads it (checked against the
 SHA-256 GitHub lists), puts the new program in place of the old one and starts the launcher
 again - on Windows `openomsi.exe` and `openomsi-launcher.exe`, on macOS the `openOMSI.app`
@@ -169,7 +169,7 @@ again only when something changes; drag on it to turn the bus, scroll to zoom. I
   it save its run (SIGTERM, up to 8 s, and only a stuck game is killed) and, for a LAN
   session, the code to copy, who is playing and the chat.
 * **Mods** - installing mods and archives (see *Mods and the content folder*); a folder or
-  .zip dropped on the window is installed.
+  .zip, .7z or .rar dropped on the window is installed.
 * **Timetable** - a map's lines, their tours and trips. Changes stay while you move between
   lines and are saved together (*Save all*); **New line** makes a line, **Repeat** turns a tour
   into a whole day of them (every *n* minutes up to a last departure).
@@ -197,8 +197,10 @@ lines, as in the game, whose default date is 1989-05-30.
 ## Settings, enhanced graphics, the navigator
 
 `~/.openomsi/settings.cfg` (written by the launcher's settings page, or by hand) holds
-`msaa` (1/2/4; a count the GPU cannot do falls back to the next lower one), `anisotropy`
-(1..16), `ssao`, `shadows`, `shadow_size`, `navigator`, `ui_opacity` (how much of the interface's backgrounds shows - the navigator's, the
+`msaa` (1/2/4/8; a count the GPU cannot do falls back to the next lower one), `anisotropy`
+(1..16), `ssao`, `shadows`, `shadow_size`, `shadow_blobs` (the models' `[isshadow]` shadow
+meshes, OMSI's flat blob under a vehicle, laid on the road its wheels stand on; off, only the
+sun shadow map shades under a vehicle), `navigator`, `ui_opacity` (how much of the interface's backgrounds shows - the navigator's, the
 menu's, the timetable's, the plates under the notes - 0.2 to 1, the texts staying solid; 0.85
 as designed; `navigator_opacity` in older files),
 `navigator_corner` (`bottom-left` default, `bottom-right`, `top-left`, `top-right`),
@@ -253,8 +255,22 @@ physically based renderer: high-range lighting with energy-conserving diffuse an
 reflections (roughness from `[matl_envmap]`), a computed sky (Rayleigh/Mie scattering,
 lit cumulus) that also lights the scene, contact-hardening sun shadows, aerial perspective
 and height fog, automatic exposure, a glow only real highlights produce and the PBR
-Neutral tone curve with FXAA (`post_aa`); no light shafts, vignette or grading. The
-vanilla look stays the default. The navigator (`crates/omsi-app/src/navigator.rs`) sits in a corner of the screen (lower
+Neutral tone curve with FXAA (`post_aa`); no light shafts, vignette or grading.
+
+The enhanced renderer also reflects buses, buildings and scenery in wet road puddles
+when `reflections=1`. Shallow rain ripples and depth-aware filtering soften the image.
+The player's nearby bus and up to three coupled sections use one local geometry capture,
+mirrored around the actual road face's height and slope. Its windows are shaded from the
+reflected eye, and an open legacy chassis gets a dark underside in that same depth-tested
+view. This avoids mixing offset screen-space and geometry projections on the bus.
+Other objects use the current frame's colour and a private hit-depth texture that includes
+reflective windows. Rays run at half resolution, capped at 518400 pixels and 48 steps;
+the local bus capture has the same pixel cap and a 60 m distance limit. Dry roads,
+snow-covered roads and mirror views skip these passes. Reflections beyond the local road
+plane use screen-space rays; objects unavailable to those rays keep the sky reflection.
+OpenGL uses the sky reflection too.
+
+The vanilla look stays the default. The navigator (`crates/omsi-app/src/navigator.rs`) sits in a corner of the screen (lower
 left by default), after the Route Advisor of Euro Truck Simulator 2: small, dark and half
 transparent, a tilted 3D map that turns with the bus and zooms out with speed - the roads
 of the lane network, the trip's route with arrows along it, coloured stretch by stretch by
@@ -276,12 +292,23 @@ the bus and the traffic; drag to move, the wheel zooms, the buttons centre on th
 zoom, Escape or a click outside closes it. **Shift+N** cycles
 map → map with the schedule of the next stops → off (N alone is the gearbox's neutral);
 `OMSI_DEBUG_NAV=1` logs it.
-**Z / X / C** are the indicators. **Shift + 1**, **Shift + 2**, … open or close a door, front
+**Z / X / C** are the indicators. Controls also offers **Indicator left (toggle)** and
+**Indicator right (toggle)** for keyboard keys or wheel buttons such as shift paddles.
+They start unbound: one press turns that side on, another turns it off, and pressing the
+other side switches direction. A script's automatic cancellation is respected.
+**Shift + 1**, **Shift + 2**, … open or close a door, front
 to back: a bus like the SD200/SD202/EN92 with one two-leaf front door and a combined
 aft/stop-brake-release door answers to Shift+1/2/3, a low-floor mod with three or four
 independent doors (the O530 Facelift) to Shift+1 through Shift+4/5 - whatever
 `bus_doorfront<n>` triggers the bus's own script defines, `bus_dooraft` last (the HUD's
 control reminder says how many).
+
+In Settings → Camera, **Driver's view turns with the steering** smoothly turns the driver's
+view into the steering direction, independently of the bus's head-motion simulation.
+**Steering view angle** sets the full-lock rotation (0–60°, default 30°), and **Steering
+view response** sets the smoothing time (50–1000 ms, default 250 ms; larger values follow
+more slowly). Manual looking remains available. The automatic turn is suppressed while
+VR or an active head tracker controls the view. It is off by default.
 
 ## Mods and the content folder
 
@@ -293,11 +320,11 @@ been copied into OMSI 2, and a file of the same name replaces the stock one. The
 installation is never written to. `OMSI_CONTENT=/some/dir` moves the content folder.
 
 Installing a mod: the launcher's **Mods** page opens the system's folder / file picker
-(Finder, Explorer, GTK) for a mod folder or a `.zip` and sorts it
+(Finder, Explorer, GTK) for a mod folder or a `.zip`, `.7z` or `.rar` archive and sorts it
 into place (OMSI-style folders anywhere inside are merged; a lone bus, map, object or
 spline folder is recognised by its `.bus` / `global.cfg` / `.sco` / `.sli` files and put
 under the right folder), or drop it into `Mods/` next to the binary and open the page.
-`openomsi-launcher --cli install '{"path":"/path/to/mod.zip"}'` and `--cli mods` do the same
+`openomsi-launcher --cli install '{"path":"/path/to/mod.7z"}'` and `--cli mods` do the same
 from a shell. An installation is a background job: the archive's table of contents becomes
 a plan, the disk is checked for room, everything is unpacked into a staging folder on the
 content volume and moved into place in one step, and it can be cancelled and cleaned up at
@@ -310,6 +337,7 @@ content folder's `Archives/` (hard-linked when it is on the same disk, moved fro
 unpacking (`omsi_cfg::vfs` mounts every archive there, as well as `--content-zip` and
 `OMSI_CONTENT_ZIP`). The Mods page offers it ("use the archive in place"), and its default
 unpacks what fits on the disk and uses an archive in place when its unpacked size does not;
+`.7z` and `.rar` archives are always unpacked.
 `--cli install '{"path":…,"mode":"inplace"}'` (or `extract` / `auto`) and
 `--cli modinfo '{"path":…}'` do the same from a shell. The launcher's lists see the maps
 and buses inside the archives.
@@ -421,6 +449,7 @@ Environment variables, all off unless set. The useful ones:
 | `OMSI_FLEET_IDLE=s`, `OMSI_FLEET_AHEAD=min` | how long an unused vehicle set is kept, how far ahead the fleet is read |
 | `OMSI_NO_BC=1`, `OMSI_NO_TEXCOMPRESS=1`, `OMSI_KEEP_ALLOCATOR=1` | textures as RGBA, no compression of loose pictures, no allocator restart |
 | `OMSI_NO_SHADOWS`, `OMSI_NO_CORONAS`, `OMSI_NO_ENVMAP`, `OMSI_NO_BUMP`, `OMSI_NO_CULL`, `OMSI_ENV_PHOTO=0` | leave one part of the picture out for an A/B |
+| `OMSI_NO_PUDDLE_REFLECTIONS=1` | leave wet-road scene reflections out for a screenshot or performance comparison |
 | `OMSI_DEBUG_ENHANCED`, `OMSI_DEBUG_SKY`, `OMSI_DEBUG_EXPOSURE`, `OMSI_METER=…` | the enhanced renderer's lamps, sky, adaptation and metering |
 | `OMSI_DEBUG_TRAFFIC`, `OMSI_DEBUG_PAX`, `OMSI_DEBUG_PHYSICS`, `OMSI_DEBUG_LAN`, `OMSI_DEBUG_IBIS`, `OMSI_DEBUG_VARS=a,b` | why a car, a passenger, a wheel, a peer, an IBIS or a script variable does what it does |
 | `OMSI_CHECK_ROADS=1`, `OMSI_ROAD_PHOTO=1`, `OMSI_CHECK_ENTRIES=1` | walk the lanes as a bus wheel, photograph the carriageway from above, check every entry point |

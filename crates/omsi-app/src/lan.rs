@@ -934,6 +934,29 @@ pub fn update_server_info(players: usize, time: &str, weather: &str) {
     }
 }
 
+/// A server run: the players `GET /players` lists now.
+pub fn update_server_players(list: Vec<omsi_net::ws::PlayerInfo>) {
+    if let Ok(w) = WS_PATH.lock() {
+        if let Some(g) = w.as_ref().and_then(|w| w.gateway.as_ref()) {
+            if let Ok(mut i) = g.info.lock() {
+                i.player_list = list;
+            }
+        }
+    }
+}
+
+/// A server run: the admin commands that came to the web gateway's `POST /admin`.
+pub fn take_local_admin() -> Vec<String> {
+    if let Ok(w) = WS_PATH.lock() {
+        if let Some(g) = w.as_ref().and_then(|w| w.gateway.as_ref()) {
+            if let Ok(mut i) = g.info.lock() {
+                return std::mem::take(&mut i.local_admin_queue);
+            }
+        }
+    }
+    Vec::new()
+}
+
 /// Joining game: reach `url` (a server's or a host's tunnel) over a WebSocket; the local
 /// address to join instead.
 fn ws_join_target(url: &str) -> Result<String, String> {
@@ -2971,6 +2994,10 @@ fn drive_remote(rv: &mut RemoteVehicle, pose: &Pose, dt: f32, exact: bool) {
         brake: pose.flags & omsi_net::FLAG_BRAKE != 0 || pose.brake > 0.1,
         lights: pose.head >= 2,
         at_station: if doors_open { 1 } else { -1 },
+        // Their stop's side is not on the wire: their doors are pinned to the openings
+        // they send (see `doors` above), so which side the player's own script opened is
+        // already in those values - the frame only runs the AI half of the script.
+        at_station_side: 0.0,
         priority_warning: false,
     };
     rv.vehicle.update_ai_with(dt, &frame, &inputs, &pinned);
@@ -3310,6 +3337,7 @@ pub fn tick(
                 rv.hof.as_deref(),
                 &want.0,
                 &want.1,
+                &[],
             );
             log::info!(
                 "LAN: player {} '{}' shows {}{}",
