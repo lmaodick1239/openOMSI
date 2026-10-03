@@ -45,6 +45,12 @@ fn render_scale_step(fps: f32, slow_frame_wait_share: f32) -> f32 {
     }
 }
 
+/// Capability gate: inspector interaction requires both args and runtime state.
+#[cfg(not(target_os = "android"))]
+const fn inspector_can_interact(args_inspector: bool, inspector_active: bool) -> bool {
+    args_inspector && inspector_active
+}
+
 use super::*;
 
 /// How fast a stick turns the head, fully pushed (degrees a second, see `Analog::look`).
@@ -67,7 +73,33 @@ impl ApplicationHandler for App {
         self.save_last_situation();
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
+        // Inspector ImGui event handling when enabled - apply capture before application handlers
+        #[cfg(not(target_os = "android"))]
+        let inspector_captures = if inspector_can_interact(self.args.inspector, self.inspector_active) {
+            if let Some(window) = self.window.as_ref() {
+                if window.id() != window_id {
+                    return; // Reject events from mismatched windows
+                }
+                if let Some(inspector_ui) = self.inspector_ui.as_mut() {
+                    let winit_event = winit::event::Event::<()>::WindowEvent {
+                        window_id,
+                        event: event.clone(),
+                    };
+                    inspector_ui.handle_event(window, &winit_event);
+                    inspector_ui.input_capture
+                } else {
+                    crate::inspector::imgui_inspector::InputCaptureState::default()
+                }
+            } else {
+                crate::inspector::imgui_inspector::InputCaptureState::default()
+            }
+        } else {
+            crate::inspector::imgui_inspector::InputCaptureState::default()
+        };
+        #[cfg(target_os = "android")]
+        let inspector_captures = crate::inspector::imgui_inspector::InputCaptureState::default();
+
         match event {
             WindowEvent::CloseRequested => {
                 self.finish_vr_nav_edit();
@@ -108,6 +140,10 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                // ImGui keyboard capture takes precedence
+                if inspector_captures.blocks_keyboard() {
+                    return;
+                }
                 if event.state == ElementState::Pressed && self.menu_edit_icao {
                     if let Some(text)=event.text.as_deref(){ self.icao_edit_text(text); }
                 }
@@ -179,6 +215,9 @@ impl ApplicationHandler for App {
                 button: winit::event::MouseButton::Right,
                 ..
             } => {
+                if inspector_captures.blocks_pointer() {
+                    return;
+                }
                 if let Some(edit) = self.vr_nav_edit.as_mut() {
                     edit.rotating = state == ElementState::Pressed;
                     return;
@@ -207,6 +246,9 @@ impl ApplicationHandler for App {
                 button: winit::event::MouseButton::Middle,
                 ..
             } => {
+                if inspector_captures.blocks_pointer() {
+                    return;
+                }
                 if self.vr_nav_edit.is_some() { return; }
                 if self.navigator.as_ref().map(|n| n.map_open()).unwrap_or(false) {
                     return;
@@ -215,6 +257,9 @@ impl ApplicationHandler for App {
                 self.update_hover();
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                if inspector_captures.blocks_pointer() {
+                    return;
+                }
                 let amount = match delta {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => y,
                     winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
@@ -222,6 +267,9 @@ impl ApplicationHandler for App {
                 self.wheel(amount);
             }
             WindowEvent::CursorMoved { position, .. } => {
+                if inspector_captures.blocks_pointer() {
+                    return;
+                }
                 if self.vr_nav_edit.is_some() { return; }
                 // (both physical pixels)
                 if let Some((x, y)) = self.cursor_hidden {
@@ -254,6 +302,9 @@ impl ApplicationHandler for App {
                 button: winit::event::MouseButton::Left,
                 ..
             } => {
+                if inspector_captures.blocks_pointer() {
+                    return;
+                }
                 if self.touch.enabled {
                     let p = glam::Vec2::new(self.cursor.0, self.cursor.1);
                     if state == ElementState::Pressed {
@@ -280,7 +331,12 @@ impl ApplicationHandler for App {
                 }
             }
             // a finger (a phone; see touch.rs)
-            WindowEvent::Touch(t) => self.on_touch(event_loop, t),
+            WindowEvent::Touch(t) => {
+                if inspector_captures.blocks_pointer() {
+                    return;
+                }
+                self.on_touch(event_loop, t);
+            }
             WindowEvent::RedrawRequested => {
                 if self.vr_nav_edit.is_some() && (!self.vr_active() || self.view != "driver") {
                     self.finish_vr_nav_edit();
@@ -2152,6 +2208,12 @@ impl ApplicationHandler for App {
                     *self.profile.entry("hud").or_default() += __t.elapsed().as_secs_f64();
                 }
 
+                // Process inspector commands when enabled
+                #[cfg(not(target_os = "android"))]
+                if inspector_can_interact(self.args.inspector, self.inspector_active) {
+                    self.process_inspector_commands();
+                }
+
                 let mut lighting = match self.weather.as_ref() {
                     Some(w) => {
                         self.wetness = road_wetness(precip_of(w).1, dt as f64, self.wetness);
@@ -2201,6 +2263,15 @@ impl ApplicationHandler for App {
                     let (w, h) = (s.config.width, s.config.height);
                     self.touch_prepare(w, h);
                 }
+
+                // Build inspector snapshot before entering renderer borrow scope
+                #[cfg(not(target_os = "android"))]
+                let inspector_snapshot = if inspector_can_interact(self.args.inspector, self.inspector_active) {
+                    Some(self.inspector_snapshot())
+                } else {
+                    None
+                };
+
                 if let (Some(s), Some(r), Some(scene), Some(cam), Some(win)) = (
                     self.surface.as_ref(),
                     self.renderer.as_mut(),
@@ -2483,7 +2554,44 @@ impl ApplicationHandler for App {
                         }
                         // the on-screen controls over the picture (a phone)
                         self.touch.render(r, &view, s.config.width, s.config.height);
+
                         *self.profile.entry("render").or_default() += __t.elapsed().as_secs_f64();
+
+                        // Inspector ImGui rendering when enabled - render after main scene, before present
+                        #[cfg(not(target_os = "android"))]
+                        if let Some(snapshot) = inspector_snapshot {
+                            if let Some(inspector_ui) = self.inspector_ui.as_mut() {
+                                if inspector_ui.begin_frame(win) {
+                                    inspector_ui.draw(win, &snapshot);
+                                    let mut encoder = r.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                        label: Some("inspector")
+                                    });
+                                    {
+                                        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                            label: Some("inspector_pass"),
+                                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                                view: &view,
+                                                resolve_target: None,
+                                                ops: wgpu::Operations {
+                                                    load: wgpu::LoadOp::Load,
+                                                    store: wgpu::StoreOp::Store,
+                                                },
+                                                depth_slice: None,
+                                            })],
+                                            depth_stencil_attachment: None,
+                                            timestamp_writes: None,
+                                            occlusion_query_set: None,
+                                            multiview_mask: None,
+                                        });
+                                        if let Err(e) = inspector_ui.render(win, &r.queue, &r.device, &mut pass) {
+                                            log::warn!("inspector render failed: {e:?}");
+                                        }
+                                    }
+                                    r.queue.submit([encoder.finish()]);
+                                }
+                            }
+                        }
+
                         if omsi_cfg::env::var_os("OMSI_PROFILE_GPU").is_some() {
                             // wait for the GPU here, so that its time shows as a stage of its own
                             let __t = Instant::now();
@@ -2668,6 +2776,16 @@ impl ApplicationHandler for App {
             }
         }
         if let DeviceEvent::MouseMotion { delta } = event {
+            // Inspector active pointer capture blocks raw device mouse motion
+            #[cfg(not(target_os = "android"))]
+            if inspector_can_interact(self.args.inspector, self.inspector_active) {
+                if let Some(inspector_ui) = self.inspector_ui.as_ref() {
+                    if inspector_ui.input_capture.blocks_pointer() {
+                        return;
+                    }
+                }
+            }
+
             if self.vr_nav_edit.is_some() {
                 if self.window_focused { self.vr_nav_drag(delta.0 as f32, delta.1 as f32); }
                 return;
@@ -3138,5 +3256,76 @@ mod vr_mirror_tests {
         assert_eq!(vr_mirror_updates(&mut budget, 0.1, -1.0, 0), 0);
         assert_eq!(vr_mirror_updates(&mut budget, 0.1, 360.0, 0), 0);
         assert_eq!(budget, 0.0);
+    }
+}
+
+#[cfg(test)]
+#[cfg(not(target_os = "android"))]
+mod inspector_input_tests {
+    use crate::inspector::imgui_inspector::InputCaptureState;
+
+    #[test]
+    fn capture_state_blocks_application_handlers_when_active() {
+        let capture = InputCaptureState {
+            pointer: true,
+            keyboard: false,
+        };
+        assert!(capture.blocks_pointer());
+        assert!(!capture.blocks_keyboard());
+
+        let capture = InputCaptureState {
+            pointer: false,
+            keyboard: true,
+        };
+        assert!(!capture.blocks_pointer());
+        assert!(capture.blocks_keyboard());
+    }
+
+    #[test]
+    fn inactive_inspector_clears_stale_capture_state() {
+        let capture = InputCaptureState {
+            pointer: true,
+            keyboard: true,
+        };
+        let effective = capture.effective(false);
+        assert!(!effective.blocks_pointer());
+        assert!(!effective.blocks_keyboard());
+
+        let effective = capture.effective(true);
+        assert!(effective.blocks_pointer());
+        assert!(effective.blocks_keyboard());
+    }
+
+    #[test]
+    fn inspector_disabled_prevents_interaction_despite_stale_state() {
+        // Scenario: Args inspector=false, but stale inspector_active=true and
+        // capture state lingering from a prior session. The capability gate
+        // (args.inspector) must prevent all inspector setup and interaction.
+
+        use super::inspector_can_interact;
+
+        let args_inspector = false;
+        let inspector_active = true; // stale from prior run
+        let _capture = InputCaptureState {
+            pointer: true,
+            keyboard: true,
+        };
+
+        // The production capability gate prevents reading capture state entirely
+        assert!(
+            !inspector_can_interact(args_inspector, inspector_active),
+            "Capability gate must block when args.inspector=false"
+        );
+
+        // Verify enabled configuration permits interaction
+        assert!(
+            inspector_can_interact(true, true),
+            "Both gates required for interaction"
+        );
+
+        // Verify either gate can block
+        assert!(!inspector_can_interact(false, false));
+        assert!(!inspector_can_interact(true, false));
+        assert!(!inspector_can_interact(false, true));
     }
 }

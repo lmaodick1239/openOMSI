@@ -4633,13 +4633,97 @@ impl Humans {
         generation: u64,
         is_driver: bool,
     ) -> Option<omsi_sim::human::HumanSnapshot> {
-        let _person = self.people.iter_mut().find(|person| person.id == id)?;
+        use omsi_sim::human::{HumanSnapshot, BehaviorState, AnimationState, AnimationClip, BoneTransform};
+
+        let person = self.people.iter_mut().find(|person| person.id == id)?;
         if self.generations.get(&id).copied().unwrap_or_default() != generation {
             return None;
         }
-        // TODO(merge): OmsiAnim → Pose conversion needed for full inspector support
-        // Temporarily return minimal snapshot until animation system is unified
-        Some(omsi_sim::human::HumanSnapshot::minimal(id, generation, is_driver))
+
+        // Build snapshot from OmsiAnim state
+        let behavior_state = BehaviorState::from(person.activity);
+        let phase_frac = (person.anim.phase % 1.0).max(0.0);
+
+        // Infer animation clip from activity
+        let mut clips = Vec::new();
+        match person.activity {
+            omsi_sim::human::Activity::Walk => {
+                clips.push(AnimationClip {
+                    name: "walk".to_string(),
+                    phase: phase_frac,
+                    speed: (person.pace as f32 / 1.2).min(1.0),
+                    weight: 1.0,
+                });
+            }
+            omsi_sim::human::Activity::Sit => {
+                clips.push(AnimationClip {
+                    name: "sit".to_string(),
+                    phase: 1.0,
+                    speed: 1.0,
+                    weight: 1.0,
+                });
+            }
+            _ => {
+                clips.push(AnimationClip {
+                    name: "idle".to_string(),
+                    phase: phase_frac,
+                    speed: 1.0,
+                    weight: 1.0,
+                });
+            }
+        }
+
+        let animation_state = AnimationState {
+            active_clips: clips,
+            activity: person.activity,
+            gait_phase: phase_frac,
+            walk_weight: if person.activity == omsi_sim::human::Activity::Walk { 1.0 } else { 0.0 },
+            sit_weight: if person.activity == omsi_sim::human::Activity::Sit { 1.0 } else { 0.0 },
+            speed: person.pace as f32,
+            accel: 0.0,
+            turn_rate: 0.0,
+        };
+
+        // Extract skeleton from current bones if available
+        let skeleton_bones = if let Some(ref bones) = person.skin_bones {
+            // Convert SLOTS (17) bone array to Vec<BoneTransform>
+            const BONE_NAMES: [&str; 17] = [
+                "Pelvis", "Spine", "Neck", "Head",
+                "LeftThigh", "LeftShin", "LeftFoot",
+                "RightThigh", "RightShin", "RightFoot",
+                "LeftUpperArm", "LeftForearm", "LeftHand",
+                "RightUpperArm", "RightForearm", "RightHand",
+                "Waist",
+            ];
+            bones.iter().enumerate()
+                .map(|(i, transform)| BoneTransform::from_affine(BONE_NAMES[i].to_string(), transform))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        Some(HumanSnapshot {
+            id: person.id,
+            generation,
+            is_driver,
+            position: person.position.as_vec3(),
+            velocity: glam::Vec3::new(person.vel.x as f32, person.vel.y as f32, 0.0),
+            behavior_state,
+            animation_phase: phase_frac,
+            skeleton_bones,
+            active_animation: animation_state.active_clips.first()
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| "idle".to_string()),
+            animation_state,
+            navigation_target: None,
+            steering_vector: if person.vel.length() > 0.01 {
+                Some(glam::Vec3::new(person.vel.x as f32, person.vel.y as f32, 0.0).normalize())
+            } else {
+                None
+            },
+            passenger_economy: None,
+            artifacts: Vec::new(),
+        })
     }
 
     /// Put avatar `key` where `cmd` says (made on its first call, of figure `kind`).

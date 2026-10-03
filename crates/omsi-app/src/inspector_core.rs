@@ -1065,7 +1065,7 @@ pub fn raycast_tile_scenery(
                     key: SceneryKey::NonEditable {
                         tile_x,
                         tile_y,
-                        key: scenery.key,
+                        key: scenery.map_id,
                     },
                     mesh: Some(mesh_identity),
                 },

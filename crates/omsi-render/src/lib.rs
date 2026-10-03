@@ -1149,11 +1149,12 @@ impl Scene {
             }
         };
 
-        // Extract PBR params from uniform if available
+        // Extract PBR params from uniform if available (pbr field: x=normal, y=occlusion, z=roughness, w=metalness)
         let pbr_maps = material.texture.and_then(|tex_id| self.pbr_maps.get(&tex_id).copied());
         let (metalness, roughness) = if let Some(pbr) = pbr_maps {
             (pbr.flags[3], pbr.flags[2])
         } else {
+            // Default PBR values when no PBR maps
             (0.0, 1.0)
         };
 
@@ -1161,8 +1162,11 @@ impl Scene {
             shader_variant: if material.unlit { "unlit" } else { "lit" }.to_string(),
             alpha_mode: material.alpha,
             blend_mode: blend_mode.to_string(),
-            color: [material.color[0], material.color[1], material.color[2], material.color[3]],
-            pbr_params: PbrParams { metalness, roughness },
+            color: material.color,
+            pbr_params: PbrParams {
+                metalness,
+                roughness,
+            },
             diffuse_tex: material.texture.map(|id| TextureRef { id }),
         })
     }

@@ -405,7 +405,7 @@ select "Inspector" to enter inspector mode. The global Ctrl+I keybind has been r
 
 **Selection:** Left-click a vehicle or scenery object to select it. A cyan marker appears above
 the selection, distinguishing it from the object editor's magenta. Left-click empty space to
-clear the selection. Open the pause menu and select "Inspector" again to exit inspector mode.
+clear the selection.
 
 **What you can select:**
 - **Vehicles**: Player bus, AI traffic, remote players (LAN), trailers
