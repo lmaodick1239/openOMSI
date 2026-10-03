@@ -103,7 +103,8 @@ the keyboard, and Shift+right-drag zooms - this is OMSI's `[altView]` mode, the 
 (up: the outside camera backs away, the view inside widens up to the seat's own) and only the
 wheel button turns the view; each view keeps its own
 direction (turning the outside camera leaves the driver's head where it was), **Space** looks
-ahead again in every view (OMSI's `view_reset_all_directions`), Home recentres the view shown.
+ahead again in every view (OMSI's `view_reset_all_directions`), Home recentres the view shown
+where keyboard.cfg does not make it the ticket desk camera.
 The mouse wheel (and **=** / **-**, a pinch on a phone) zooms: outside the camera comes closer,
 inside the bus the view narrows, as in OMSI; **Ctrl**+wheel outside narrows the view instead
 (a telephoto, the camera stays where it is). F1-F4 driver / passenger / outside / map (free) camera, F5-F8 the destination
@@ -145,8 +146,14 @@ again only when something changes; drag on it to turn the bus, scroll to zoom. I
   *Graphics* (the quality preset first, the screen, distances and memory), *Driving* (keys,
   mouse, wheel and pedals, with the way to the Controls page), *Camera* (the seat, the views,
   head tracking, VR), *Sound*, *Gameplay* (passengers, traffic, collisions, the clock) and
-  *General* (language, the game's interface size, navigator, updates, and resetting every
-  setting).
+  *General* (language, the game's interface size, navigator, Discord Rich Presence,
+  updates, and resetting every setting).
+  **Discord Rich Presence** shows the launcher while preparing a drive, then the map and
+  line above the vehicle type and tour while playing. The full vehicle name is in the logo's
+  tooltip. The launcher status returns when the game ends.
+  It is enabled by default and can be turned off under Settings → General; the switch
+  affects the launcher immediately and the game on its next start. Discord must be running
+  on the same computer.
 * **Controls** - `Inputs/keyboard.cfg`: click a key, press the new one; clashes are red. The
   keys are the game's with *Driving keys: Custom controls* (Settings → Driving); with a ready-made
   layout (W A S D, arrows) those keys drive and win over the list - the page says so, and
@@ -204,6 +211,7 @@ sun shadow map shades under a vehicle), `navigator`, `ui_opacity` (how much of t
 menu's, the timetable's, the plates under the notes - 0.2 to 1, the texts staying solid; 0.85
 as designed; `navigator_opacity` in older files),
 `navigator_corner` (`bottom-left` default, `bottom-right`, `top-left`, `top-right`),
+`nav_ai` (the other AI vehicles as dots on the navigator and the city map; on by default),
 `boarding`, `detail_textures`, `exact_fare`, `enhanced`, `fullscreen`, `vsync`, `volume`
 and `drive_keys`, plus `render_scale` (`auto` or a fraction: the picture is drawn smaller
 and upscaled), `post_aa` (`fxaa`, the enhanced renderer's, or `off`), `view_distance` (m,
@@ -409,6 +417,33 @@ clear the selection. Open the pause menu and select "Inspector" again to exit in
 - World position and rotation
 - Local position and rotation (relative to parent for trailers)
 - Bounding box (when available)
+
+## Mirror panels
+
+Copies of the bus's mirrors can be laid over the picture, so that the street behind is in
+view without looking at the glass. In the cab **Ctrl+M** shows or hides them (the first time a
+panel appears for each bus); **Ctrl+Shift+M** starts and ends their editor. The panels are only
+pictures until the editor is on, so the mouse and the keys work as always. In the editor each
+panel has a yellow frame, and:
+
+* the left button drags a panel, the wheel over it resizes it and **Shift+wheel** makes it wider
+  or narrower;
+* the arrows turn the mirror of the panel under the cursor (as Ctrl+Alt+arrows turns the one
+  the driver looks at), **Alt+arrows** shift it across and up and **Page Up/Down** forward and
+  back, **-** and **+** narrow and widen its field of view; **R** puts that mirror back as the
+  bus has it and **Shift+R** every mirror (turns, shifts and fields of view are kept per bus in
+  `mirrors.cfg`);
+* **Insert** adds a panel (the main side mirrors first, then the others the bus has), **Delete**
+  takes the one under the cursor away and **C** shows another mirror in it;
+* **Esc** (or Ctrl+Shift+M again) ends the editor and keeps the layout.
+
+A new panel has the shape of the mirror's glass in the model. The layout is kept per bus in
+`~/.openomsi/mirror_hud.cfg`. The setting `mirror_hud` (0 off, 1 the right mirror, 2 the left,
+3 both) gives a bus with no layout of its own its first panels. The panels need the mirrors
+themselves to be drawn (`mirror_size` not 0); they are redrawn at the rate `mirror_refresh`
+sets, also when the glass is not in the view.
+
+## Debug and test switches
 - Tile coordinates (for scenery)
 
 **Mutual exclusion:** Inspector mode and object editor mode are mutually exclusive. Activating
@@ -433,6 +468,32 @@ available within the Inspector windows once inspector mode is active.
 - Selection becomes unavailable if the object unloads or is replaced
 - Only one scenery tile pinned at a time (tile unload is blocked while scenery is selected)
 - Humans, terrain, and splines not selectable in this version
+=======
+## Mirror panels
+
+Copies of the bus's mirrors can be laid over the picture, so that the street behind is in
+view without looking at the glass. In the cab **Ctrl+M** shows or hides them (the first time a
+panel appears for each bus); **Ctrl+Shift+M** starts and ends their editor. The panels are only
+pictures until the editor is on, so the mouse and the keys work as always. In the editor each
+panel has a yellow frame, and:
+
+* the left button drags a panel, the wheel over it resizes it and **Shift+wheel** makes it wider
+  or narrower;
+* the arrows turn the mirror of the panel under the cursor (as Ctrl+Alt+arrows turns the one
+  the driver looks at), **Alt+arrows** shift it across and up and **Page Up/Down** forward and
+  back, **-** and **+** narrow and widen its field of view; **R** puts that mirror back as the
+  bus has it and **Shift+R** every mirror (turns, shifts and fields of view are kept per bus in
+  `mirrors.cfg`);
+* **Insert** adds a panel (the main side mirrors first, then the others the bus has), **Delete**
+  takes the one under the cursor away and **C** shows another mirror in it;
+* **Esc** (or Ctrl+Shift+M again) ends the editor and keeps the layout.
+
+A new panel has the shape of the mirror's glass in the model. The layout is kept per bus in
+`~/.openomsi/mirror_hud.cfg`. The setting `mirror_hud` (0 off, 1 the right mirror, 2 the left,
+3 both) gives a bus with no layout of its own its first panels. The panels need the mirrors
+themselves to be drawn (`mirror_size` not 0); they are redrawn at the rate `mirror_refresh`
+sets, also when the glass is not in the view.
+>>>>>>> upstream/main
 
 ## Debug and test switches
 
@@ -441,6 +502,7 @@ Environment variables, all off unless set. The useful ones:
 | Variable | What it does |
 | --- | --- |
 | `OMSI_PROFILE=1`, `OMSI_GPU_TIMERS`, `OMSI_DEBUG_DRAWS` | frame split and memory, per-pass GPU times, draw and changed-instance counts |
+| `OMSI_MIRROR_HUD=n` | offscreen: lay the mirror panels (`mirror_hud` 1..3) over the picture |
 | `OMSI_SEED=n` | repeat a session: the scripts' `random` is seeded per session (the log says which seed) |
 | `OMSI_INPUT="t=3 move x,y; t=3.2 press; t=4 key F3; …"` | drive the real window handlers (mouse, keys, `look`/`turn`) from a script |
 | `OMSI_CHURN=x,y` | offscreen check of tile streaming: load the tiles around that far point, unload the start area, unload the far tiles and load the start area again, so the picture is drawn from recycled GPU slots |

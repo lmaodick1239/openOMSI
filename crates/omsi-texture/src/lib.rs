@@ -15,6 +15,9 @@ pub mod dds;
 pub mod gpu;
 pub mod tga;
 
+#[cfg(test)]
+mod format_tests;
+
 /// The widest and tallest texture any decoder accepts (what Direct3D 9 cards held).
 pub const MAX_DIMENSION: usize = 16384;
 
@@ -130,8 +133,9 @@ pub fn decode_bytes(bytes: &[u8], path: &Path) -> Result<Image, TextureError> {
         Ok(img) => img,
         // D3DX reads what GDI would: a palette bitmap that counts more colours than its bit
         // depth holds (the A21's and the Urbino's 4-bit `LCD-Innenanzeige.bmp` says 17) is
-        // read with the colours it can use
-        Err(e) if format == image::ImageFormat::Bmp => match bmp_clamped_palette(bytes) {
+        // read with the colours it can use, and a 24-bit one that says BI_BITFIELDS (sky
+        // packs' `Texture\skybox\night01.bmp`) as the plain 24-bit bitmap it is
+        Err(e) if format == image::ImageFormat::Bmp => match bmp_clamped_palette(bytes).or_else(|| bmp24_bitfields(bytes)) {
             Some(fixed) => image::load_from_memory_with_format(&fixed, format).map_err(|e| TextureError::Decode(path.to_path_buf(), e.to_string()))?,
             None => return Err(TextureError::Decode(path.to_path_buf(), e.to_string())),
         },
@@ -164,6 +168,21 @@ fn bmp_clamped_palette(bytes: &[u8]) -> Option<Vec<u8>> {
     let mut out = bytes.to_vec();
     out[46..50].copy_from_slice(&used.min(max).to_le_bytes());
     out[50..54].copy_from_slice(&important.min(max).to_le_bytes());
+    Some(out)
+}
+
+/// A copy of a 24-bit bitmap that says `BI_BITFIELDS` (3) with its compression set to
+/// `BI_RGB`: bit fields mean nothing at 24 bits, and D3DX reads the pixels as B8G8R8 where
+/// the `image` crate refuses the file. The masks after a 40-byte header stay where they are
+/// (the pixel offset already points past them). None when the bitmap is not one of those.
+fn bmp24_bitfields(bytes: &[u8]) -> Option<Vec<u8>> {
+    let bits = bytes.get(28..30).map(|b| u16::from_le_bytes([b[0], b[1]]))?;
+    let compression = bytes.get(30..34).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))?;
+    if bits != 24 || compression != 3 {
+        return None;
+    }
+    let mut out = bytes.to_vec();
+    out[30..34].copy_from_slice(&0u32.to_le_bytes());
     Some(out)
 }
 
@@ -245,7 +264,55 @@ pub fn find_texture(name: &str, dirs: &[&Path]) -> Option<PathBuf> {
 }
 
 fn find_texture_uncached(name: &str, dirs: &[&Path]) -> Option<PathBuf> {
-    find_texture_in_season(name, dirs, season_folder().as_deref())
+    find_texture_in_season(name, dirs, season_folder().as_deref()).or_else(|| find_texture_elsewhere(name, dirs))
+}
+
+/// A spline's or object's texture missing from its folders: the nearest same-named file under `Splines`/`Sceneryobjects`.
+fn find_texture_elsewhere(name: &str, dirs: &[&Path]) -> Option<PathBuf> {
+    let name = name.trim();
+    if name.is_empty() || name.contains(['/', '\\']) {
+        return None;
+    }
+    let first = dirs.first()?;
+    let top = first.ancestors().find(|a| {
+        a.file_name().and_then(|f| f.to_str()).is_some_and(|f| f.eq_ignore_ascii_case("Splines") || f.eq_ignore_ascii_case("Sceneryobjects"))
+    })?;
+    static INDEX: std::sync::OnceLock<Mutex<HashMap<PathBuf, Arc<HashMap<String, Vec<PathBuf>>>>>> = std::sync::OnceLock::new();
+    let index = INDEX.get_or_init(|| Mutex::new(HashMap::new())).lock().entry(top.to_path_buf()).or_insert_with(|| Arc::new(texture_index(top))).clone();
+    let key = |p: &Path| p.file_stem().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase());
+    let want = Path::new(name);
+    if !want.extension().and_then(|x| x.to_str()).is_some_and(|x| ["dds", "bmp", "jpg", "jpeg", "png", "tga"].iter().any(|t| x.eq_ignore_ascii_case(t))) {
+        return None;
+    }
+    let candidates = index.get(&key(want)?)?;
+    let shared = |p: &Path| p.components().zip(first.components()).take_while(|(a, b)| a == b).count();
+    let in_texture = |p: &Path| p.parent().and_then(|d| d.file_name()).and_then(|f| f.to_str()).is_some_and(|f| f.eq_ignore_ascii_case("texture"));
+    let same_ext = |p: &Path| p.extension().zip(want.extension()).is_some_and(|(a, b)| a.eq_ignore_ascii_case(b));
+    let found = candidates.iter().max_by_key(|p| (in_texture(p), shared(p), same_ext(p)))?.clone();
+    static SAID: std::sync::OnceLock<Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+    if SAID.get_or_init(Default::default).lock().insert(name.to_ascii_lowercase()) {
+        log::info!("texture {name} is not in its folders ({}); taken from {}", first.display(), found.display());
+    }
+    Some(found)
+}
+
+fn texture_index(top: &Path) -> HashMap<String, Vec<PathBuf>> {
+    let mut out: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    let mut stack = vec![top.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for e in entries.flatten() {
+            let p = e.path();
+            if e.file_type().is_ok_and(|t| t.is_dir()) {
+                stack.push(p);
+            } else if p.extension().and_then(|x| x.to_str()).is_some_and(|x| ["dds", "bmp", "jpg", "png", "tga"].iter().any(|t| x.eq_ignore_ascii_case(t))) {
+                if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                    out.entry(stem.to_ascii_lowercase()).or_default().push(p);
+                }
+            }
+        }
+    }
+    out
 }
 
 fn find_texture_in_season(name: &str, dirs: &[&Path], season: Option<&str>) -> Option<PathBuf> {
@@ -600,6 +667,19 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    #[test]
+    fn a_spline_texture_missing_from_its_folders_comes_from_another_spline_folder() {
+        let dir = std::env::temp_dir().join(format!("omsi-elsewhere-{}", std::process::id()));
+        let (own, other) = (dir.join("Splines/Pack/Roads/texture"), dir.join("Splines/Pack/Paths/texture"));
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("gehweg.bmp"), b"x").unwrap();
+        std::fs::write(other.join("0.png"), b"x").unwrap();
+        assert_eq!(find_texture_uncached("gehweg.bmp", &[&own]), Some(other.join("gehweg.bmp")));
+        assert_eq!(find_texture_uncached("0", &[&own]), None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// A mesh's texture name with Windows' quirks (Ahlheim's `anz-oben.jpg.`) finds the file.
     #[test]
     fn texture_names_as_windows_reads_them() {
@@ -645,6 +725,32 @@ mod tests {
         let img = decode_bytes(&bmp32([[1, 2, 3, 0]; 4]), Path::new("x.bmp")).unwrap();
         assert!(!img.has_alpha);
         assert!(img.rgba.chunks_exact(4).all(|p| p[3] == 255));
+    }
+
+    /// A 24-bit bitmap that says BI_BITFIELDS, with its three masks after the header, reads
+    /// as a plain 24-bit one (a sky pack's `night01.bmp`).
+    #[test]
+    fn bmp24_with_bitfields() {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"BM");
+        b.extend_from_slice(&(66u32 + 16).to_le_bytes());
+        b.extend_from_slice(&[0; 4]);
+        b.extend_from_slice(&66u32.to_le_bytes());
+        b.extend_from_slice(&40u32.to_le_bytes());
+        b.extend_from_slice(&2i32.to_le_bytes());
+        b.extend_from_slice(&2i32.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&24u16.to_le_bytes());
+        b.extend_from_slice(&3u32.to_le_bytes());
+        b.extend_from_slice(&[0; 20]);
+        for m in [0x00ff_0000u32, 0x0000_ff00, 0x0000_00ff] {
+            b.extend_from_slice(&m.to_le_bytes());
+        }
+        // two rows of two BGR pixels, each padded to four bytes, bottom-up
+        b.extend_from_slice(&[1, 2, 3, 4, 5, 6, 0, 0, 7, 8, 9, 10, 11, 12, 0, 0]);
+        let img = decode_bytes(&b, Path::new("night01.bmp")).unwrap();
+        assert_eq!((img.width, img.height), (2, 2));
+        assert_eq!(&img.rgba[..8], &[9, 8, 7, 255, 12, 11, 10, 255]);
     }
 
     /// A TGA named `.png` (NEOMAN's `W_Bader_KR498_disp.png`, a 24-bit RLE TGA) decodes as TGA.

@@ -3526,6 +3526,7 @@ dependencies = [
  "serde_json",
  "sevenz-rust2",
  "unrar-rs",
+ "windows 0.62.2",
  "winresource",
  "zip",
 ]
@@ -3590,6 +3591,7 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "glam",
+ "hashbrown 0.15.5",
  "log",
  "naga",
  "omsi-cfg",

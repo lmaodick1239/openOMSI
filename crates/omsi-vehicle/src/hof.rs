@@ -159,10 +159,19 @@ impl Hof {
                     let route = r.str().to_string();
                     let line = r.str().to_string();
                     h.info_trips.push(InfoTrip { code, name, route, line, extra: Vec::new() });
+                    // every trip has a stop list, empty until one follows (THof.LoadFromFile
+                    // 0x7ea142), so that the lists stay in step with the trips
+                    h.info_busstop_lists.push(Vec::new());
                 }
                 "infosystem_busstop_list" => {
+                    // the list of the trip read last (0x7ea16f: DynArrayHigh of the trips);
+                    // pushed as one more list, a trip without one (the IVU data routes of
+                    // some depot files) gave every later trip the stops of the one before
                     let n = r.usize();
-                    h.info_busstop_lists.push((0..n).map(|_| r.str().to_string()).collect());
+                    let list: Vec<String> = (0..n).map(|_| r.str().to_string()).collect();
+                    if let Some(last) = h.info_busstop_lists.last_mut() {
+                        *last = list;
+                    }
                 }
                 "infosystem_busstop" => h.info_busstops.push((0..3).map(|_| r.str().to_string()).collect()),
                 _ => {}
@@ -214,6 +223,55 @@ pub fn depot_in(dir: &Path, name: &str) -> Option<Hof> {
         .find_map(|f| Hof::load(f).ok())
 }
 
+/// The words of a depot or map name that tell one place from another: four letters or
+/// more, not a year or a number, not a word every depot file has ("Linie 20", "Hof").
+fn place_words(s: &str) -> Vec<String> {
+    const COMMON: [&str; 14] = ["linie", "line", "lines", "depot", "omsi", "maps", "version", "final", "neue", "update", "addon", "fixed", "standard", "default"];
+    s.split(|c: char| !c.is_alphanumeric())
+        .map(|w| w.to_lowercase())
+        .filter(|w| w.chars().count() >= 4 && !w.chars().all(|c| c.is_ascii_digit()) && !COMMON.contains(&w.as_str()))
+        .collect()
+}
+
+/// Of `names` (the depot files a bus has), the one that belongs to the place `hints` name
+/// (the map's depot names, its title, its folder): the one sharing the most of their
+/// words, the longer words counting more; the first of equals. None when none shares one.
+///
+/// OMSI asks the driver which of the bus's depot files to use; taking the first of them
+/// when none is called exactly as the map wants put a bus on Hamburg's Linie 20 with the
+/// Grundorf depot of its folder - no line and no destination its IBIS knew (#896).
+pub fn closest_name(names: &[&str], hints: &[&str]) -> Option<usize> {
+    let wanted: Vec<String> = hints.iter().flat_map(|h| place_words(h)).collect();
+    let mut best: Option<(usize, usize)> = None;
+    for (i, n) in names.iter().enumerate() {
+        let mut words = place_words(n);
+        words.dedup();
+        let score: usize = words.iter().filter(|w| wanted.contains(w)).map(|w| w.chars().count()).sum();
+        if score > 0 && best.is_none_or(|(_, b)| score > b) {
+            best = Some((i, score));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
+/// The depot file of `dir` that belongs to the place `hints` name (see [`closest_name`]),
+/// by its file name or its `[name]`.
+pub fn depot_like(dir: &Path, hints: &[&str]) -> Option<Hof> {
+    let files = depot_files(dir);
+    let names: Vec<String> = files
+        .iter()
+        .map(|f| {
+            let stem = f.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+            match Hof::read_name(f) {
+                Some(n) => format!("{stem} {n}"),
+                None => stem,
+            }
+        })
+        .collect();
+    let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+    closest_name(&refs, hints).and_then(|i| Hof::load(&files[i]).ok())
+}
+
 /// The depot file called `name` in any vehicle folder of any content root (`Vehicles/*/`).
 ///
 /// A depot file belongs to a map, not to a bus model: it lists the map's termini, stops and
@@ -252,6 +310,18 @@ pub fn depot_anywhere(name: &str) -> Option<Hof> {
 mod tests {
     use super::*;
 
+    /// #896: the bus's own depot of the map's place, not the first of its folder.
+    #[test]
+    fn closest_depot_name_is_the_maps_place() {
+        let names = ["Grundorf", "Hamburg Linie 20", "Spandau 2019"];
+        assert_eq!(closest_name(&names, &["Hamburg_Linie_20", "Linie 20"]), Some(1));
+        assert_eq!(closest_name(&names, &["Spandau 1986"]), Some(2));
+        assert_eq!(closest_name(&names, &["Berlin-Spandau"]), Some(2));
+        assert_eq!(closest_name(&names, &["Thüringer Wald"]), None);
+        assert_eq!(closest_name(&["Berlin X10", "Spandau"], &["Berlin-Spandau"]), Some(1));
+        assert_eq!(closest_name(&["Linie 20"], &["Linie 7"]), None);
+    }
+
     #[test]
     fn terminus_list_columns() {
         let text = "stringcount_terminus\r\n3\r\n\r\n[addterminus_list]\r\n{ALLEX}\t13\tBetriebsfahrt\tBETRIEBSFAHRT\t\tBETRIEBSFAHRT\t\t\r\n\t282\tU Ruhleben\tRUHLEBEN\tU-BAHNHOF\tRUHLEBEN  \t\t\t\r\n[end]\r\n";
@@ -263,5 +333,22 @@ mod tests {
         assert_eq!(h.termini[1].terminus_stop.as_deref(), Some("U Ruhleben"));
         assert_eq!(h.termini[1].strings, vec!["RUHLEBEN", "U-BAHNHOF", "RUHLEBEN  "]);
         assert_eq!(h.terminus_by_code(282).map(|t| t.texture_id.as_str()), Some("U Ruhleben"));
+    }
+
+    /// #667: a trip without a stop list (an IVU data route) keeps the lists of the trips
+    /// after it on their own trips.
+    #[test]
+    fn stop_lists_belong_to_the_trip_before_them() {
+        let text = "[infosystem_trip]\r\n45581\r\nZOB-HOHENECK\r\n81\r\n455\r\n\r\n\
+            [infosystem_busstop_list]\r\n2\r\nZOB\r\nHoheneck\r\n\r\n\
+            [infosystem_trip]\r\n455900\r\nIVU\r\n81\r\n455\r\n\r\n\
+            [infosystem_trip]\r\n45503\r\nHBF-BERGERFUERTH\r\n3\r\n455\r\n\r\n\
+            [infosystem_busstop_list]\r\n3\r\nHauptbahnhof\r\nMarkt\r\nBergerfuerth\r\n";
+        let h = Hof::parse(&CfgFile::from_str("test.hof", text));
+        assert_eq!(h.info_trips.len(), 3);
+        assert_eq!(h.info_busstop_lists.len(), 3);
+        assert_eq!(h.info_busstop_lists[0], vec!["ZOB", "Hoheneck"]);
+        assert!(h.info_busstop_lists[1].is_empty());
+        assert_eq!(h.info_busstop_lists[2], vec!["Hauptbahnhof", "Markt", "Bergerfuerth"]);
     }
 }
