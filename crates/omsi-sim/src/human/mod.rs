@@ -12,6 +12,7 @@ mod legacy;
 pub use legacy::{
     Activity, Pose, PoseInput, Posed, Rig, Joints, Influence, HumanMesh, HumanType,
     slot_of, run_factor, skin, skin_from, curl_hands, grip_centres, hand_slot,
+    slots_from_omsi,
     BONE_OS_L, BONE_OS_R, BONE_US_L, BONE_US_R, BONE_OA_L, BONE_OA_R,
     BONE_UA_L, BONE_UA_R, BONE_HIP, BONE_MAIN, BONE_HEAD, BONE_HAND_L, BONE_HAND_R,
     SLOTS,

@@ -614,6 +614,23 @@ fn parklist_index(strings: &[String]) -> usize {
     strings.first().and_then(|s| s.trim().parse::<usize>().ok()).unwrap_or(0)
 }
 
+/// A non-editable scenery object record for inspector selection.
+#[derive(Clone)]
+pub struct SceneryObjectRecord {
+    /// Collision key (unique per placed object).
+    pub key: i64,
+    /// Map id (may be 0 for spline-attached or row objects with no map id).
+    pub map_id: i64,
+    /// Object type (shared, read-only).
+    pub ty: Arc<ObjectType>,
+    /// World position.
+    pub pos: DVec3,
+    /// Transform matrix.
+    pub xf: Mat4,
+    /// Render instances (all LODs).
+    pub instances: Vec<usize>,
+}
+
 /// A tile read and tessellated, its objects typed but not yet standing on the ground. Kept
 /// (by [`World::prepare_tiles`]) while a loaded tile or one on its way depends on it.
 pub struct StagedTile {
@@ -854,6 +871,9 @@ pub struct TileState {
     pub parked_count: usize,
     /// The tile's echoing places (see `World::reverb_zones`).
     pub reverb_zones: Vec<(omsi_sim::collision::Obb, f32, f32)>,
+    /// Non-editable scenery objects for inspector selection: (collision key, map id, type, position, transform, instances).
+    /// Includes scripted objects, lamps, poles, and all other placed objects that are not in `edit_objects` or `parked_objects`.
+    pub scenery_objects: Vec<SceneryObjectRecord>,
     pub gpu: TileGpu,
 }
 

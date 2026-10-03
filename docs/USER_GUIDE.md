@@ -468,7 +468,7 @@ available within the Inspector windows once inspector mode is active.
 - Selection becomes unavailable if the object unloads or is replaced
 - Only one scenery tile pinned at a time (tile unload is blocked while scenery is selected)
 - Humans, terrain, and splines not selectable in this version
-=======
+
 ## Mirror panels
 
 Copies of the bus's mirrors can be laid over the picture, so that the street behind is in
@@ -493,7 +493,6 @@ A new panel has the shape of the mirror's glass in the model. The layout is kept
 3 both) gives a bus with no layout of its own its first panels. The panels need the mirrors
 themselves to be drawn (`mirror_size` not 0); they are redrawn at the rate `mirror_refresh`
 sets, also when the glass is not in the view.
->>>>>>> upstream/main
 
 ## Debug and test switches
 

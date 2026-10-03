@@ -1041,6 +1041,8 @@ pub struct Scene {
     /// Overlay textures that hold premultiplied alpha (drawn by `omsi-ui`, e.g. the
     /// navigator) rather than straight alpha.
     pub premultiplied: std::collections::HashSet<TextureId>,
+    /// Inspector overlay instances for debug visualization.
+    pub inspector_overlay_instances: Vec<usize>,
     /// Per overlay: the texture its bind group was made for, its rect buffer and the group
     /// (kept between frames; only the rect is rewritten).
     overlay_res: Vec<(TextureId, wgpu::Buffer, wgpu::BindGroup, [f32; 8])>,
@@ -1089,6 +1091,30 @@ fn snow_texture_flag(scene: &Scene, texture: Option<TextureId>) -> f32 {
     }
 }
 
+/// Material snapshot for inspector.
+#[derive(Debug, Clone)]
+pub struct MaterialSnapshot {
+    pub shader_variant: String,
+    pub alpha_mode: AlphaMode,
+    pub blend_mode: String,
+    pub color: [f32; 4],
+    pub pbr_params: PbrParams,
+    pub diffuse_tex: Option<TextureRef>,
+}
+
+/// PBR parameters.
+#[derive(Debug, Clone, Copy)]
+pub struct PbrParams {
+    pub metalness: f32,
+    pub roughness: f32,
+}
+
+/// Texture reference.
+#[derive(Debug, Clone, Copy)]
+pub struct TextureRef {
+    pub id: TextureId,
+}
+
 impl Scene {
     /// Bytes of one texture on the GPU (0 for a freed slot or an unknown id).
     pub fn texture_bytes_of(&self, id: TextureId) -> u64 {
@@ -1106,6 +1132,39 @@ impl Scene {
             .get(id)
             .map(|t| format!("{:?}", t.texture.format()))
             .unwrap_or_default()
+    }
+
+    /// Query material snapshot for inspector.
+    pub fn query_material_snapshot(&self, id: MaterialId) -> Option<MaterialSnapshot> {
+        let material = self.materials.get(id)?;
+
+        // Determine blend mode from alpha mode and z-write settings
+        let blend_mode = if material.no_z_write {
+            "blended_no_z_write"
+        } else {
+            match material.alpha {
+                AlphaMode::Opaque => "opaque",
+                AlphaMode::Test => "alpha_test",
+                AlphaMode::Blend => "alpha_blend",
+            }
+        };
+
+        // Extract PBR params from uniform if available
+        let pbr_maps = material.texture.and_then(|tex_id| self.pbr_maps.get(&tex_id).copied());
+        let (metalness, roughness) = if let Some(pbr) = pbr_maps {
+            (pbr.flags[3], pbr.flags[2])
+        } else {
+            (0.0, 1.0)
+        };
+
+        Some(MaterialSnapshot {
+            shader_variant: if material.unlit { "unlit" } else { "lit" }.to_string(),
+            alpha_mode: material.alpha,
+            blend_mode: blend_mode.to_string(),
+            color: [material.color[0], material.color[1], material.color[2], material.color[3]],
+            pbr_params: PbrParams { metalness, roughness },
+            diffuse_tex: material.texture.map(|id| TextureRef { id }),
+        })
     }
 
     /// Bytes on the GPU: (textures, mesh buffers, per-draw and light buffers). Freed slots
@@ -4095,6 +4154,7 @@ impl Renderer {
             sky_bind_group: None,
             overlays: Vec::new(),
             premultiplied: Default::default(),
+            inspector_overlay_instances: Vec::new(),
             overlay_res: Vec::new(),
             dirty: true,
             changed: Vec::new(),
